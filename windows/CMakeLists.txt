@@ -1,0 +1,258 @@
+# Project-level configuration.
+cmake_minimum_required(VERSION 3.14)
+project(tvbro LANGUAGES CXX)
+
+# The name of the executable created for the application. Change this to change
+# the on-disk name of your application.
+set(BINARY_NAME "tvbro")
+
+# Explicitly opt in to modern CMake behaviors to avoid warnings with recent
+# versions of CMake.
+cmake_policy(VERSION 3.14...3.25)
+
+# Define build configuration option.
+get_property(IS_MULTICONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(IS_MULTICONFIG)
+  set(CMAKE_CONFIGURATION_TYPES "Debug;Profile;Release"
+    CACHE STRING "" FORCE)
+else()
+  if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Debug" CACHE
+      STRING "Flutter build mode" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+      "Debug" "Profile" "Release")
+  endif()
+endif()
+# Define settings for the Profile build mode.
+set(CMAKE_EXE_LINKER_FLAGS_PROFILE "${CMAKE_EXE_LINKER_FLAGS_RELEASE}")
+set(CMAKE_SHARED_LINKER_FLAGS_PROFILE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE}")
+set(CMAKE_C_FLAGS_PROFILE "${CMAKE_C_FLAGS_RELEASE}")
+set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
+
+# Use Unicode for all projects.
+add_definitions(-DUNICODE -D_UNICODE)
+
+# Compilation settings that should be applied to most targets.
+#
+# Be cautious about adding new options here, as plugins use this function by
+# default. In most cases, you should add new options to specific targets instead
+# of modifying this function.
+function(APPLY_STANDARD_SETTINGS TARGET)
+  target_compile_features(${TARGET} PUBLIC cxx_std_17)
+  target_compile_options(${TARGET} PRIVATE /W4 /WX /wd"4100")
+  # Read sources as UTF-8 so non-ASCII literals (e.g. the "×" in the speed badge)
+  # encode correctly and don't trip C4066 under /WX on MSVC's default codepage.
+  target_compile_options(${TARGET} PRIVATE /utf-8)
+  target_compile_options(${TARGET} PRIVATE /EHsc)
+  target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=0")
+  target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Debug>:_DEBUG>")
+endfunction()
+
+# Flutter library and tool build rules.
+set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")
+add_subdirectory(${FLUTTER_MANAGED_DIR})
+
+# Application build; see runner/CMakeLists.txt.
+add_subdirectory("runner")
+
+
+# Generated plugin build rules, which manage building the plugins and adding
+# them to the application.
+include(flutter/generated_plugins.cmake)
+
+
+# === Installation ===
+# Support files are copied into place next to the executable, so that it can
+# run in place. This is done instead of making a separate bundle (as on Linux)
+# so that building and running from within Visual Studio will work.
+set(BUILD_BUNDLE_DIR "$<TARGET_FILE_DIR:${BINARY_NAME}>")
+# Make the "install" step default, as it's required to run.
+set(CMAKE_VS_INCLUDE_INSTALL_TO_DEFAULT_BUILD 1)
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+  set(CMAKE_INSTALL_PREFIX "${BUILD_BUNDLE_DIR}" CACHE PATH "..." FORCE)
+endif()
+
+set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
+set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
+
+install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  COMPONENT Runtime)
+
+install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
+  COMPONENT Runtime)
+
+install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
+
+if(PLUGIN_BUNDLED_LIBRARIES)
+  install(FILES "${PLUGIN_BUNDLED_LIBRARIES}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
+
+# Override media_kit's bundled libmpv with a libplacebo-enabled build so mpv's
+# `gpu-next` video output is available — needed for correct HDR / Dolby Vision
+# rendering, since media_kit's pinned 2023 libmpv has no gpu-next.
+#
+# If the DLL isn't already vendored at windows/libmpv/libmpv-2.dll, fetch a
+# pinned, hash-verified build at configure time so fresh clones / CI work with no
+# manual step. To use a different build, drop your own libmpv-2.dll in that
+# folder (it takes precedence). See windows/libmpv/README.md.
+set(LIBMPV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmpv")
+set(CUSTOM_LIBMPV "${LIBMPV_DIR}/libmpv-2.dll")
+# Optional pinned/mirrored override for reproducible or offline builds:
+#   -DLIBMPV_PLACEBO_URL=... [-DLIBMPV_PLACEBO_SHA256=...]  (or the same env vars)
+# Left unset, we resolve zhongfly's *latest* mpv-winbuild release at configure
+# time: zhongfly publishes daily and deletes old assets, so a fixed dated URL
+# rots within days (which is exactly what broke a pinned build). See
+# windows/libmpv/README.md.
+if(NOT DEFINED LIBMPV_PLACEBO_URL AND DEFINED ENV{LIBMPV_PLACEBO_URL})
+  set(LIBMPV_PLACEBO_URL "$ENV{LIBMPV_PLACEBO_URL}")
+endif()
+if(NOT DEFINED LIBMPV_PLACEBO_SHA256 AND DEFINED ENV{LIBMPV_PLACEBO_SHA256})
+  set(LIBMPV_PLACEBO_SHA256 "$ENV{LIBMPV_PLACEBO_SHA256}")
+endif()
+
+if(NOT EXISTS "${CUSTOM_LIBMPV}")
+  set(LIBMPV_PLACEBO_ARCHIVE "${CMAKE_BINARY_DIR}/libmpv-placebo.7z")
+  set(LIBMPV_PLACEBO_EXTRACT "${CMAKE_BINARY_DIR}/libmpv-placebo")
+
+  # Optional auth header — dodges the unauthenticated GitHub API rate limit on
+  # shared CI runners. Set GITHUB_TOKEN in the build environment (CI provides it).
+  set(LIBMPV_API_HEADERS "")
+  if(DEFINED ENV{GITHUB_TOKEN} AND NOT "$ENV{GITHUB_TOKEN}" STREQUAL "")
+    set(LIBMPV_API_HEADERS HTTPHEADER "Authorization: Bearer $ENV{GITHUB_TOKEN}")
+  endif()
+
+  # Resolve the latest release's dev asset when no explicit URL was given.
+  if(NOT LIBMPV_PLACEBO_URL)
+    if(CMAKE_VERSION VERSION_LESS "3.19")
+      message(WARNING "CMake < 3.19 can't parse the release metadata to auto-fetch "
+        "libmpv; HDR / Dolby Vision falls back to media_kit's bundled libmpv. "
+        "Vendor windows/libmpv/libmpv-2.dll manually (see its README).")
+    else()
+      set(LIBMPV_API_JSON "${CMAKE_BINARY_DIR}/mpv-winbuild-latest.json")
+      message(STATUS "Resolving latest libmpv (gpu-next) build from zhongfly/mpv-winbuild")
+      file(DOWNLOAD
+        "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest"
+        "${LIBMPV_API_JSON}"
+        ${LIBMPV_API_HEADERS}
+        STATUS LIBMPV_API_STATUS)
+      list(GET LIBMPV_API_STATUS 0 LIBMPV_API_CODE)
+      if(NOT LIBMPV_API_CODE EQUAL 0)
+        message(WARNING "Could not query the mpv-winbuild release list "
+          "(${LIBMPV_API_STATUS}); falling back to media_kit's bundled libmpv.")
+      else()
+        file(READ "${LIBMPV_API_JSON}" LIBMPV_RELEASE_JSON)
+        string(JSON LIBMPV_ASSET_COUNT ERROR_VARIABLE LIBMPV_JSON_ERR
+          LENGTH "${LIBMPV_RELEASE_JSON}" "assets")
+        # string(JSON) sets the error var to the literal "NOTFOUND" on success,
+        # which is itself a CMake false constant — so compare it explicitly
+        # rather than relying on if(<var>) truthiness.
+        if(NOT LIBMPV_JSON_ERR STREQUAL "NOTFOUND" OR NOT LIBMPV_ASSET_COUNT MATCHES "^[1-9][0-9]*$")
+          message(WARNING "Unexpected release metadata (${LIBMPV_JSON_ERR}); "
+            "falling back to media_kit's bundled libmpv.")
+        else()
+          math(EXPR LIBMPV_ASSET_LAST "${LIBMPV_ASSET_COUNT} - 1")
+          foreach(i RANGE ${LIBMPV_ASSET_LAST})
+            string(JSON LIBMPV_ASSET GET "${LIBMPV_RELEASE_JSON}" "assets" ${i})
+            string(JSON LIBMPV_ASSET_NAME GET "${LIBMPV_ASSET}" "name")
+            # The generic x86_64 dev archive (libmpv-2.dll inside). Exclude the
+            # "-v3-" build: it requires AVX2 and crashes on older CPUs.
+            if(LIBMPV_ASSET_NAME MATCHES "^mpv-dev-x86_64-[0-9].*\\.7z$")
+              string(JSON LIBMPV_PLACEBO_URL GET "${LIBMPV_ASSET}" "browser_download_url")
+              string(JSON LIBMPV_PLACEBO_DIGEST ERROR_VARIABLE LIBMPV_DG_ERR
+                GET "${LIBMPV_ASSET}" "digest")
+              if(LIBMPV_DG_ERR STREQUAL "NOTFOUND" AND LIBMPV_PLACEBO_DIGEST MATCHES "^sha256:([0-9a-fA-F]+)$")
+                set(LIBMPV_PLACEBO_SHA256 "${CMAKE_MATCH_1}")
+              endif()
+              break()
+            endif()
+          endforeach()
+          if(NOT LIBMPV_PLACEBO_URL)
+            message(WARNING "No mpv-dev-x86_64 asset in the latest release; "
+              "falling back to media_kit's bundled libmpv.")
+          endif()
+        endif()
+      endif()
+    endif()
+  endif()
+
+  if(LIBMPV_PLACEBO_URL)
+    message(STATUS "Fetching libplacebo libmpv (gpu-next): ${LIBMPV_PLACEBO_URL}")
+    # Download WITHOUT EXPECTED_HASH so a 404 / rotted asset can never turn into
+    # a fatal configure error (the deleted pinned URL did exactly that); verify
+    # the digest by hand afterwards and fall back on any mismatch.
+    file(DOWNLOAD "${LIBMPV_PLACEBO_URL}" "${LIBMPV_PLACEBO_ARCHIVE}"
+      SHOW_PROGRESS
+      STATUS LIBMPV_DL_STATUS)
+    list(GET LIBMPV_DL_STATUS 0 LIBMPV_DL_CODE)
+    set(LIBMPV_DL_OK TRUE)
+    if(NOT LIBMPV_DL_CODE EQUAL 0)
+      set(LIBMPV_DL_OK FALSE)
+      message(WARNING "libmpv download failed (${LIBMPV_DL_STATUS}); HDR / Dolby "
+        "Vision will fall back to media_kit's bundled libmpv. See "
+        "windows/libmpv/README.md to vendor it manually.")
+    elseif(LIBMPV_PLACEBO_SHA256)
+      file(SHA256 "${LIBMPV_PLACEBO_ARCHIVE}" LIBMPV_ACTUAL_SHA256)
+      string(TOLOWER "${LIBMPV_PLACEBO_SHA256}" LIBMPV_EXPECTED_LC)
+      string(TOLOWER "${LIBMPV_ACTUAL_SHA256}" LIBMPV_ACTUAL_LC)
+      if(NOT LIBMPV_ACTUAL_LC STREQUAL LIBMPV_EXPECTED_LC)
+        set(LIBMPV_DL_OK FALSE)
+        message(WARNING "libmpv archive SHA-256 mismatch (expected "
+          "${LIBMPV_EXPECTED_LC}, got ${LIBMPV_ACTUAL_LC}); falling back to "
+          "media_kit's bundled libmpv.")
+      endif()
+    else()
+      message(STATUS "No digest available to verify the libmpv archive; "
+        "proceeding on HTTPS/GitHub transport trust.")
+    endif()
+
+    if(LIBMPV_DL_OK)
+      file(MAKE_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}")
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E tar xzf "${LIBMPV_PLACEBO_ARCHIVE}"
+        WORKING_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}"
+        RESULT_VARIABLE LIBMPV_EXTRACT_RESULT)
+      file(GLOB_RECURSE LIBMPV_FOUND "${LIBMPV_PLACEBO_EXTRACT}/libmpv-2.dll")
+      if(LIBMPV_EXTRACT_RESULT EQUAL 0 AND LIBMPV_FOUND)
+        list(GET LIBMPV_FOUND 0 LIBMPV_FOUND_FIRST)
+        file(MAKE_DIRECTORY "${LIBMPV_DIR}")
+        file(COPY "${LIBMPV_FOUND_FIRST}" DESTINATION "${LIBMPV_DIR}")
+        message(STATUS "Vendored libmpv-2.dll -> ${CUSTOM_LIBMPV}")
+      else()
+        message(WARNING "Could not extract libmpv-2.dll from the downloaded archive.")
+      endif()
+    endif()
+  endif()
+endif()
+
+# Install our libmpv over media_kit's at install time (after the plugin libraries
+# above, so it wins). The EXISTS check is evaluated at install time, so dropping
+# the DLL in later only needs a rebuild, not a CMake reconfigure.
+install(CODE "
+  if(EXISTS \"${CUSTOM_LIBMPV}\")
+    message(STATUS \"Overriding libmpv-2.dll with libplacebo build (gpu-next).\")
+    file(COPY \"${CUSTOM_LIBMPV}\" DESTINATION \"${INSTALL_BUNDLE_LIB_DIR}\")
+  endif()
+" COMPONENT Runtime)
+
+# Copy the native assets provided by the build.dart from all packages.
+set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
+install(DIRECTORY "${NATIVE_ASSETS_DIR}"
+   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+   COMPONENT Runtime)
+
+# Fully re-copy the assets directory on each build to avoid having stale files
+# from a previous install.
+set(FLUTTER_ASSET_DIR_NAME "flutter_assets")
+install(CODE "
+  file(REMOVE_RECURSE \"${INSTALL_BUNDLE_DATA_DIR}/${FLUTTER_ASSET_DIR_NAME}\")
+  " COMPONENT Runtime)
+install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)
+
+# Install the AOT library on non-Debug builds only.
+install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
+  CONFIGURATIONS Profile;Release
+  COMPONENT Runtime)

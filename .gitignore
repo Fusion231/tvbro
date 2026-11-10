@@ -1,0 +1,76 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Local VS Code workspace settings.
+.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/apkRelease/
+/coverage/
+
+# Local QA output and generated code-analysis cache.
+/validation/
+/lib/graphify-out/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio / Gradle will place build artifacts here
+/android/build/
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Private Android release-signing material. The tracked debug keystore is
+# deliberately non-secret and must never be used by the release build type.
+*.jks
+*.keystore
+**/key.properties
+
+# Claude Code agent memory store (not project files)
+/memory/
+
+# Local cloud-sync config for `flutter run --dart-define-from-file=dart_define.json`.
+# Holds only the publishable Supabase values; keep it out of git regardless.
+/dart_define.json
+
+# Local Flutter DevTools settings.
+/devtools_options.yaml
+
+# Working drafts / notes not meant for the repo (store-listing copy, questionnaire
+# answers, tester-feedback triage, etc.). Local scratch only.
+/docs/private/
+
+# Local deployment credentials.
+.env
+.env.*
+*.env
+!.env.example
+/android/.kotlin/

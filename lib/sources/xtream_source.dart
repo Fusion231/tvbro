@@ -1,0 +1,1074 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
+
+import '../data/load_token.dart';
+import '../data/diagnostics_log.dart';
+import '../data/net.dart';
+import 'epg_guides.dart';
+import 'epg_matching.dart';
+import 'epg_mapping.dart';
+import '../data/epg_download_cache.dart';
+import 'expiry.dart';
+import 'source.dart';
+
+/// Container extensions an Xtream panel can be asked for on the live and
+/// timeshift endpoints. Most panels serve both.
+const kXtreamStreamExtensions = <String>{'ts', 'm3u8'};
+
+/// Which container extension [XtreamSource] asks the panel for.
+///
+/// **`m3u8` on iOS, `ts` everywhere else — a per-platform default, not a
+/// feature.** `AVPlayer` cannot play a naked continuous MPEG-TS stream (TS
+/// segments *inside* an HLS playlist are fine), so on iOS a `.ts` locator routes
+/// straight to the libmpv fallback, which is permanently tone-mapped SDR with no
+/// PiP and no AirPlay (docs/ios.md "Known parity gaps"). Since the extension is
+/// something this source *chooses* rather than something the provider dictates,
+/// preferring `m3u8` there is what decides whether AVPlayer is the common path
+/// or a rare one — see docs/ios.md "The `streamExtension` lever".
+///
+/// This deliberately does **not** help Stalker, whose `create_link` returns
+/// whatever the portal chooses and is typically extension-less (and therefore
+/// routes to mpv by `selectIosEngine` rule 4), nor M3U playlists that name `.ts`
+/// directly.
+///
+/// [override] is the per-source escape hatch (`SourceConfig.settings`
+/// `streamExtension`). It exists because the failure mode of a wrong default is
+/// not graceful: a panel that does *not* serve `m3u8` answers 404, AVPlayer
+/// reports `engineFailed`, and Dart's fallback reopens the **same** 404 URL on
+/// mpv — so the channel is dead rather than merely SDR. Anything not in
+/// [kXtreamStreamExtensions] falls back to the platform default rather than
+/// being passed through to the URL builder.
+///
+/// Pure and platform-injected so `flutter test` can assert both branches from a
+/// desktop VM.
+String resolveXtreamStreamExtension(String? override, {required bool isIOS}) {
+  final value = override?.trim().toLowerCase() ?? '';
+  if (kXtreamStreamExtensions.contains(value)) return value;
+  return isIOS ? 'm3u8' : 'ts';
+}
+
+/// A [Source] backed by an Xtream Codes panel (host + username + password).
+///
+/// Implements live TV; VOD and series can be layered on the same interface
+/// later. Stream URLs follow `/live/USER/PASS/STREAM_ID.ext`.
+class XtreamSource
+    implements
+        Source,
+        BatchedEpgSource,
+        MappedEpgSource,
+        CatchupSource,
+        SourceCapabilityReporter,
+        RefreshableSource {
+  final String sourceId;
+  final String host; // e.g. http://host:port
+  final String username;
+  final String password;
+
+  /// `'ts'` (most compatible) or `'m3u8'`. Resolved once at construction by
+  /// [resolveXtreamStreamExtension] — see there for the iOS default and the
+  /// per-source override.
+  final String streamExtension;
+
+  /// Expiry carried by an M3U/get.php URL before it was converted to an
+  /// Xtream source. Some panels expose it in the playlist URL but omit it
+  /// from `player_api.php`.
+  final String? playlistExpiryHint;
+
+  /// Extra XMLTV guides layered *under* the panel's own `xmltv.php`, in
+  /// priority order. See [mergeEpgGuides]: a channel is served by the first
+  /// guide that carries it, never by two at once.
+  final List<String> extraEpgUrls;
+  @override
+  final epgMapping = EpgMappingSession();
+
+  /// Advanced per-source catch-up overrides. When omitted, Xtream panels are
+  /// treated as using the device wall clock.
+  final String? catchupTimezone;
+  final int? catchupOffsetMinutes;
+  final int? catchupMaxDays;
+  @visibleForTesting
+  final Future<dynamic> Function(Map<String, String> params)? debugApi;
+
+  final HttpClient _http = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 15)
+    ..autoUncompress = false;
+  final Map<String, Future<List<MediaItem>>> _mediaListCache = {};
+  final Map<String, int> _mediaListSizes = {};
+  final Map<String, int> _mediaCategorySizes = {};
+  final Map<ContentKind, String> _pagedCategoryKeys = {};
+  int _cachedMediaItems = 0;
+  final Map<ContentKind, int> _searchGenerations = {};
+  String? _providerCatchupTimezone;
+
+  // Stalker portals usually return compact provider pages, often around
+  // 14 rows. Xtream's common API does not expose equivalent paging, so keep
+  // the app-facing page small and let category filters/search carry discovery.
+  static const _mediaPageSize = 14;
+  static const _searchResultLimit = 120;
+  static const _maximumCachedMediaItems = 5000;
+  static const _maximumCachedMediaCategories = 32;
+
+  XtreamSource({
+    required this.sourceId,
+    required this.host,
+    required this.username,
+    required this.password,
+    String? streamExtension,
+    this.playlistExpiryHint,
+    this.extraEpgUrls = const [],
+    this.catchupTimezone,
+    this.catchupOffsetMinutes,
+    this.catchupMaxDays,
+    this.debugApi,
+    this.displayName,
+  }) : streamExtension = resolveXtreamStreamExtension(
+         streamExtension,
+         isIOS: Platform.isIOS,
+       );
+
+  /// User-assigned label (from SourceConfig); preferred over the derived name.
+  final String? displayName;
+
+  String get _base {
+    var h = host.trim();
+    if (!h.startsWith('http://') && !h.startsWith('https://')) h = 'http://$h';
+    if (h.endsWith('/')) h = h.substring(0, h.length - 1);
+    return h;
+  }
+
+  @override
+  String get id => sourceId;
+
+  @override
+  String get name => displayName?.trim().isNotEmpty == true
+      ? displayName!.trim()
+      : 'Xtream · ${Uri.tryParse(_base)?.host ?? 'panel'}';
+
+  @override
+  CatchupCapability get catchupCapability => CatchupCapability(
+    mode: CatchupUrlMode.xtreamTimeshift,
+    timezone: catchupTimezone ?? _providerCatchupTimezone,
+    fixedOffsetMinutes: catchupOffsetMinutes,
+    maxArchiveWindow: catchupMaxDays == null
+        ? null
+        : Duration(days: catchupMaxDays!),
+    startFormat: 'yyyy-MM-dd:HH-mm',
+  );
+
+  @override
+  SourceCapabilities get sourceCapabilities => const SourceCapabilities(
+    epg: CapabilityAvailability.supported,
+    catchup: CapabilityAvailability.supported,
+    resolution: ResolutionCapability.providerDefined,
+  );
+
+  @override
+  Future<void> connect() async {
+    final info = await _api({});
+    final user = info is Map ? info['user_info'] : null;
+    if (user is Map && '${user['auth']}' == '0') {
+      throw StateError('Xtream authentication failed');
+    }
+    final server = info is Map ? info['server_info'] : null;
+    final reported = server is Map
+        ? server['timezone']?.toString().trim()
+        : null;
+    if (reported != null &&
+        reported.isNotEmpty &&
+        isSupportedCatchupTimezone(reported)) {
+      _providerCatchupTimezone = reported;
+    }
+  }
+
+  @override
+  Future<List<Category>> categories() async {
+    final r = await _api({'action': 'get_live_categories'});
+    if (r is! List) return const [];
+    return r
+        .whereType<Map>()
+        .map(
+          (c) => Category(
+            id: '${c['category_id']}',
+            title: '${c['category_name']}',
+          ),
+        )
+        .toList();
+  }
+
+  @override
+  Future<List<Channel>> channels({String? categoryId}) async {
+    final params = {'action': 'get_live_streams'};
+    if (categoryId != null) params['category_id'] = categoryId;
+    Object? raw;
+    try {
+      raw = await _fetchCatalogRaw(params);
+    } on HttpWorkloadException {
+      if (categoryId != null) rethrow;
+      return _channelsPartitionedByCategory();
+    }
+    return _channelsFromRaw(raw);
+  }
+
+  /// Xtream's common API has no formal pagination for live streams, but most
+  /// panels honor category_id. If the monolithic catalog crosses the bounded
+  /// response limit, partition it by category and merge stable stream IDs.
+  Future<List<Channel>> _channelsPartitionedByCategory() async {
+    final available = await categories();
+    if (available.isEmpty) {
+      throw const HttpWorkloadException(
+        'Xtream live catalog is too large and exposes no categories',
+      );
+    }
+    final out = <Channel>[];
+    final seen = <String>{};
+    for (final category in available) {
+      final raw = await _fetchCatalogRaw({
+        'action': 'get_live_streams',
+        'category_id': category.id,
+      });
+      for (final channel in await _channelsFromRaw(raw)) {
+        if (seen.add(channel.id)) out.add(channel);
+      }
+    }
+    return out;
+  }
+
+  @override
+  Future<StreamInfo> resolve(Channel channel) async {
+    final streamId = channel.extra['streamId']?.toString() ?? channel.id;
+    return StreamInfo(
+      url: '$_base/live/$username/$password/$streamId.$streamExtension',
+    );
+  }
+
+  @override
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async {
+    final streamId = channel.extra['streamId']?.toString() ?? channel.id;
+    final duration = programme.stop.difference(programme.start).inMinutes;
+    return StreamInfo(
+      url:
+          '$_base/timeshift/$username/$password/$duration/'
+          '${_timeshiftStart(programme.start, catchupCapability)}/$streamId.$streamExtension',
+      isLive: false,
+    );
+  }
+
+  /// Xtream timeshift start stamp `Y-m-d:H-i`. XMLTV times are absolute, but the
+  /// endpoint expects the panel's local time; we use the device's local zone
+  /// (device ≈ panel region in practice). A per-source offset is the future
+  /// refinement if a panel sits in a different zone.
+  @visibleForTesting
+  static String timeshiftStart(
+    DateTime start, [
+    CatchupCapability? capability,
+  ]) => _timeshiftStart(
+    start,
+    capability ?? const CatchupCapability(mode: CatchupUrlMode.xtreamTimeshift),
+  );
+
+  static String _timeshiftStart(DateTime start, CatchupCapability capability) =>
+      formatCatchupTime(start, capability);
+
+  /// Unbatched fallback, kept for [Source]'s contract. Drains the same merged
+  /// feed [epgBatched] builds, so the two can't diverge.
+  @override
+  Future<List<Programme>> epg(List<Channel> channels) async {
+    final feeds = _guideFeeds(channels, null);
+    if (feeds.isEmpty) return const [];
+    final out = <Programme>[];
+    await for (final batch in mergeEpgGuides(feeds)) {
+      out.addAll(batch);
+    }
+    return out;
+  }
+
+  @override
+  Stream<List<Programme>>? epgBatched(
+    List<Channel> channels, {
+    LoadToken? token,
+  }) {
+    final feeds = _guideFeeds(channels, token);
+    return feeds.isEmpty ? null : mergeEpgGuides(feeds, token: token);
+  }
+
+  /// The panel's own `xmltv.php` first, then any [extraEpgUrls] the user added
+  /// — a panel guide that covers only part of the catalog is the usual reason
+  /// to add one.
+  List<EpgGuideFeed> _guideFeeds(List<Channel> channels, LoadToken? token) {
+    if (channels.isEmpty) return const [];
+    final urls = <String>[
+      _xmltvUri.toString(),
+      for (final url in extraEpgUrls)
+        if (url.isNotEmpty) url,
+    ];
+    epgMapping.validateGuides(
+      urls.take(kMaxEpgGuides).map((url) => epgGuideId(id, url)),
+    );
+    final tvgIds = buildTvgIdIndex(channels);
+    final names = epgNameIndexFor(channels, extraCount: urls.length - 1);
+    return [
+      for (var i = 0; i < urls.length && i < kMaxEpgGuides; i++)
+        xmltvGuideFeed(
+          url: urls[i],
+          cachedDownload: (uri, file) =>
+              _downloadToFile(uri, file, token: token),
+          tvgIdToChannelIds: tvgIds,
+          // The panel's own guide keeps exact `tvg-id` matching only — see
+          // [epgNameIndexFor].
+          nameToChannelIds: i == 0 ? const {} : names,
+          token: token,
+          guideId: epgGuideId(id, urls[i]),
+          guideLabel: i == 0 ? 'Provider guide' : 'XMLTV guide ${i + 1}',
+          mapping: epgMapping,
+        ),
+    ];
+  }
+
+  Uri get _xmltvUri =>
+      Uri.parse('$_base/xmltv.php?username=$username&password=$password');
+
+  @override
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async {
+    final action = switch (kind) {
+      ContentKind.movie => 'get_vod_categories',
+      ContentKind.series => 'get_series_categories',
+      _ => null,
+    };
+    if (action == null) return const [];
+    final r = await _api({'action': action});
+    return _listFromAny(r)
+        .map((c) {
+          final m = Map<String, dynamic>.from(c);
+          return MediaCategory(
+            id: _firstString(m, ['category_id', 'id']) ?? '',
+            title: _firstString(m, ['category_name', 'name', 'title']) ?? '',
+            kind: kind,
+          );
+        })
+        .where((c) => c.id.isNotEmpty && c.title.isNotEmpty)
+        .toList();
+  }
+
+  @override
+  Future<List<MediaItem>> mediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int? maxPages,
+  }) async {
+    if (kind == ContentKind.season && parent != null) {
+      return _seriesSeasons(parent);
+    }
+    if (kind == ContentKind.episode && parent != null) {
+      return _seasonEpisodes(parent);
+    }
+    final pagesToLoad = maxPages ?? 1;
+    final out = <MediaItem>[];
+    for (var page = 1; page <= pagesToLoad; page++) {
+      final fetched = await mediaItemsPage(
+        kind,
+        categoryId: categoryId,
+        parent: parent,
+        page: page,
+      );
+      out.addAll(fetched.items);
+      if (!fetched.hasMore) break;
+    }
+    return out;
+  }
+
+  @override
+  Future<MediaPage> mediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async {
+    if (kind == ContentKind.season && parent != null) {
+      return MediaPage(
+        items: await _seriesSeasons(parent),
+        page: page,
+        totalPages: page,
+      );
+    }
+    if (kind == ContentKind.episode && parent != null) {
+      return MediaPage(
+        items: _seasonEpisodes(parent),
+        page: page,
+        totalPages: page,
+      );
+    }
+    if (kind != ContentKind.movie && kind != ContentKind.series) {
+      return MediaPage(items: const [], page: page, totalPages: page);
+    }
+    if (categoryId == null) {
+      return _aggregateMediaPage(kind, page: page);
+    }
+    _pagedCategoryKeys[kind] = _mediaListKey(kind, categoryId);
+    final items = await _fetchMediaList(kind, categoryId: categoryId);
+    return _sliceMediaPage(items, page: page);
+  }
+
+  @override
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async {
+    // Movies and series are searched concurrently by the global search view.
+    // Only a newer query of the same kind supersedes this traversal.
+    final generation = (_searchGenerations[kind] ?? 0) + 1;
+    _searchGenerations[kind] = generation;
+    bool superseded() => _searchGenerations[kind] != generation;
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    if (kind != ContentKind.movie && kind != ContentKind.series) {
+      return const [];
+    }
+    if (categoryId != null) {
+      final items = await _fetchMediaList(kind, categoryId: categoryId);
+      if (superseded()) return const [];
+      return items
+          .where((item) => item.title.toLowerCase().contains(q))
+          .take(_searchResultLimit)
+          .toList();
+    }
+    final results = <MediaItem>[];
+    final seen = <String>{};
+    final categories = await mediaCategories(kind);
+    if (superseded()) return const [];
+    if (categories.isEmpty) {
+      final items = await _fetchMediaList(kind);
+      if (superseded()) return const [];
+      return items
+          .where((item) => item.title.toLowerCase().contains(q))
+          .take(_searchResultLimit)
+          .toList();
+    }
+    for (final category in categories) {
+      if (superseded()) return const [];
+      final items = await _fetchMediaList(kind, categoryId: category.id);
+      if (superseded()) return const [];
+      for (final item in items) {
+        if (!item.title.toLowerCase().contains(q)) continue;
+        if (item.id.isNotEmpty && !seen.add(item.id)) continue;
+        results.add(item);
+        if (results.length >= _searchResultLimit) {
+          _pruneMediaLists(keep: '');
+          return results;
+        }
+      }
+      _pruneMediaLists(keep: '');
+      // Cached categories may otherwise chain only microtasks for a large
+      // catalog, delaying the keystroke that cancels this search.
+      await Future<void>.delayed(Duration.zero);
+    }
+    return results;
+  }
+
+  @override
+  Future<MediaItem> mediaDetails(MediaItem item) async {
+    final action = switch (item.kind) {
+      ContentKind.movie => 'get_vod_info',
+      ContentKind.series => 'get_series_info',
+      _ => null,
+    };
+    if (action == null) return item;
+    final idParam = item.kind == ContentKind.movie ? 'vod_id' : 'series_id';
+    final r = await _api({'action': action, idParam: item.id});
+    final details = r is Map ? Map<String, dynamic>.from(r) : const {};
+    final info = details['info'] is Map
+        ? Map<String, dynamic>.from(details['info'] as Map)
+        : details;
+    return item.copyWith(
+      poster:
+          _firstImageUrl(info, ['movie_image', 'cover', 'cover_big']) ??
+          item.poster,
+      backdrop:
+          _firstImageUrl(info, ['backdrop_path', 'backdrop', 'cover_big']) ??
+          item.backdrop,
+      description:
+          _firstString(info, ['description', 'plot']) ?? item.description,
+      year:
+          _firstString(info, ['releasedate', 'release_date', 'year']) ??
+          item.year,
+      extra: {...item.extra, 'details': details},
+    );
+  }
+
+  @override
+  Future<StreamInfo> resolveMedia(MediaItem item) async {
+    if (item.kind != ContentKind.movie && item.kind != ContentKind.episode) {
+      throw UnsupportedError('${item.kind.name} is not directly playable yet');
+    }
+    final ext = item.extra['container_extension']?.toString();
+    final extension = ext == null || ext.isEmpty ? 'mp4' : ext;
+    final path = item.kind == ContentKind.movie ? 'movie' : 'series';
+    return StreamInfo(
+      url: '$_base/$path/$username/$password/${item.id}.$extension',
+      headers: {HttpHeaders.userAgentHeader: 'VLC/3.0.20 LibVLC/3.0.20'},
+      isLive: false,
+    );
+  }
+
+  @override
+  Future<SubscriptionExpiry> subscriptionExpiry() async {
+    final info = await _api({});
+    final user = info is Map ? info['user_info'] : null;
+    if (user is Map) {
+      final parsed = parseSubscriptionExpiryValue(user['exp_date']);
+      if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
+    }
+    return parseSubscriptionExpiryValue(playlistExpiryHint);
+  }
+
+  @override
+  Future<void> dispose() async => _http.close(force: true);
+
+  // ── http ──────────────────────────────────────────────────────────────
+
+  Future<dynamic> _api(Map<String, String> params) async {
+    final override = debugApi;
+    if (override != null) return override(params);
+    final uri = Uri.parse('$_base/player_api.php').replace(
+      queryParameters: {'username': username, 'password': password, ...params},
+    );
+    final bytes = await _download(uri, kProviderJsonWorkload);
+    return _decodeJson(bytes);
+  }
+
+  /// Catalog responses (`get_vod_streams`/`get_live_streams`) can be many MB;
+  /// decoding them on the UI thread stalls the frame. Offload big payloads to a
+  /// background isolate, but decode small ones inline — isolate spawn overhead
+  /// would dominate for the many tiny auth/category calls.
+  static const _isolateJsonThreshold = 256 * 1024;
+
+  Future<dynamic> _decodeJson(Uint8List bytes) {
+    if (bytes.length < _isolateJsonThreshold) {
+      return Future.value(_decodeJsonBytes(bytes));
+    }
+    return compute(_decodeJsonBytes, bytes);
+  }
+
+  /// Fetches a catalog endpoint (`get_live_streams`/`get_vod_streams`/
+  /// `get_series`) and hands back either the already-decoded value from
+  /// [debugApi] (tests bypass HTTP entirely) or the raw response bytes for a
+  /// real panel call. Real bytes let the caller route through the one-pass
+  /// typed worker below instead of decoding into a dynamic tree first.
+  Future<Object?> _fetchCatalogRaw(Map<String, String> params) async {
+    final override = debugApi;
+    if (override != null) return override(params);
+    final uri = Uri.parse('$_base/player_api.php').replace(
+      queryParameters: {'username': username, 'password': password, ...params},
+    );
+    return _download(uri, kProviderJsonWorkload);
+  }
+
+  /// Bounded one-pass ingestion for `get_live_streams`: [raw] is either the
+  /// decoded [debugApi] value (mapped inline — it's already small, synthetic
+  /// test data) or real response bytes, which get the same threshold-gated
+  /// isolate/inline routing as [_decodeJson].
+  Future<List<Channel>> _channelsFromRaw(Object? raw) => raw is Uint8List
+      ? _decodeLiveChannels(raw)
+      : Future.value(mapLiveChannels(raw));
+
+  Future<List<Channel>> _decodeLiveChannels(Uint8List bytes) {
+    if (bytes.length < _isolateJsonThreshold) {
+      return Future.value(decodeLiveChannelsBytes(bytes));
+    }
+    return compute(decodeLiveChannelsBytes, bytes);
+  }
+
+  /// Bounded one-pass ingestion for `get_vod_streams`/`get_series`. See
+  /// [_channelsFromRaw] for the debugApi-vs-real-bytes split.
+  Future<List<MediaItem>> _mediaItemsFromRaw(Object? raw, ContentKind kind) =>
+      raw is Uint8List
+      ? _decodeMediaItems(raw, kind)
+      : Future.value(mapMediaItemsFromDecoded(raw, kind));
+
+  Future<List<MediaItem>> _decodeMediaItems(Uint8List bytes, ContentKind kind) {
+    final args = XtreamMediaDecodeArgs(bytes, kind);
+    if (bytes.length < _isolateJsonThreshold) {
+      return Future.value(decodeMediaItemsBytes(args));
+    }
+    return compute(decodeMediaItemsBytes, args);
+  }
+
+  Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
+    final operation = HttpOperation(
+      policy,
+      onReadMetrics: (m) => DiagnosticsLog.instance.add(
+        'http:${policy.name}',
+        'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
+      ),
+    );
+    for (var attempt = 1; ; attempt++) {
+      try {
+        final req = await operation.wait(_http.getUrl(uri));
+        final resp = await operation.wait(req.close());
+        if (resp.statusCode == HttpStatus.ok) {
+          return await operation.readBytes(resp);
+        }
+        // Release the socket before retrying or reporting a rejected request.
+        await operation.wait(resp.drain<void>());
+        // Some panels also return 404 briefly for an existing API endpoint.
+        if (attempt >= 2 ||
+            (resp.statusCode != HttpStatus.notFound &&
+                !isTransientHttpStatus(resp.statusCode))) {
+          throw StateError('HTTP ${resp.statusCode} from ${redactUrl(uri)}');
+        }
+        DiagnosticsLog.instance.add(
+          'http:${policy.name}',
+          'retrying HTTP ${resp.statusCode} attempt=2 url=${redactUrl(uri)}',
+        );
+      } catch (error) {
+        if (attempt >= 2 || !isTransientNetworkError(error)) rethrow;
+      }
+      await operation.wait(
+        Future<void>.delayed(const Duration(milliseconds: 600)),
+      );
+    }
+  }
+
+  /// Streams [uri]'s body into [destination] without holding it in memory —
+  /// the XMLTV path, whose guides can run to hundreds of MB.
+  Future<EpgDownloadReceipt> _downloadToFile(
+    Uri uri,
+    File destination, {
+    LoadToken? token,
+  }) => const EpgDownloadCache().fetch(
+    sourceId: id,
+    uri: uri,
+    client: _http,
+    destination: destination,
+    token: token,
+  );
+
+  Future<MediaPage> _aggregateMediaPage(
+    ContentKind kind, {
+    required int page,
+  }) async {
+    final categories = await mediaCategories(kind);
+    if (categories.isEmpty) {
+      _pagedCategoryKeys[kind] = _mediaListKey(kind, null);
+      final items = await _fetchMediaList(kind);
+      return _sliceMediaPage(items, page: page);
+    }
+
+    final start = (page - 1) * _mediaPageSize;
+    var skipped = 0;
+    final pageItems = <MediaItem>[];
+    final seen = <String>{};
+
+    for (final category in categories) {
+      final key = _mediaListKey(kind, category.id);
+      final knownSize = _mediaCategorySizes[key];
+      if (knownSize != null && skipped + knownSize <= start) {
+        skipped += knownSize;
+        continue;
+      }
+      final items = await _fetchMediaList(kind, categoryId: category.id);
+      if (skipped + items.length <= start) {
+        skipped += items.length;
+        continue;
+      }
+
+      _pagedCategoryKeys[kind] = key;
+      _pruneMediaLists(keep: key);
+      final startInCategory = math.max(0, start - skipped);
+      for (var i = startInCategory; i < items.length; i++) {
+        final item = items[i];
+        if (item.id.isNotEmpty && !seen.add(item.id)) continue;
+        pageItems.add(item);
+        if (pageItems.length >= _mediaPageSize) {
+          return MediaPage(items: pageItems, page: page, totalPages: page + 1);
+        }
+      }
+      skipped += items.length;
+    }
+
+    return MediaPage(items: pageItems, page: page, totalPages: page);
+  }
+
+  MediaPage _sliceMediaPage(List<MediaItem> items, {required int page}) {
+    final totalPages = items.isEmpty
+        ? page
+        : (items.length / _mediaPageSize).ceil();
+    final start = (page - 1) * _mediaPageSize;
+    if (start >= items.length) {
+      return MediaPage(items: const [], page: page, totalPages: page);
+    }
+    final end = math.min(start + _mediaPageSize, items.length);
+    return MediaPage(
+      items: items.sublist(start, end),
+      page: page,
+      totalPages: totalPages < page ? page : totalPages,
+    );
+  }
+
+  @override
+  void invalidate() {
+    // Drop the memoized VOD/series catalogs so a forced reload re-fetches them.
+    // Xtream live channels aren't memoized, so nothing else to clear here.
+    _mediaListCache.clear();
+    _mediaListSizes.clear();
+    _mediaCategorySizes.clear();
+    _pagedCategoryKeys.clear();
+    _cachedMediaItems = 0;
+    for (final kind in _searchGenerations.keys.toList()) {
+      _searchGenerations[kind] = _searchGenerations[kind]! + 1;
+    }
+  }
+
+  Future<List<MediaItem>> _fetchMediaList(
+    ContentKind kind, {
+    String? categoryId,
+  }) {
+    final key = _mediaListKey(kind, categoryId);
+    final cached = _mediaListCache[key];
+    if (cached != null) {
+      final size = _mediaListSizes.remove(key);
+      if (size != null) _mediaListSizes[key] = size;
+      return cached;
+    }
+    final pending = () async {
+      final action = switch (kind) {
+        ContentKind.movie => 'get_vod_streams',
+        ContentKind.series => 'get_series',
+        _ => null,
+      };
+      if (action == null) return const <MediaItem>[];
+      final params = {'action': action};
+      if (categoryId != null) params['category_id'] = categoryId;
+      final raw = await _fetchCatalogRaw(params);
+      return _mediaItemsFromRaw(raw, kind);
+    }();
+    _mediaListCache[key] = pending;
+    // A transient failure must not become a permanently memoized error. An
+    // older failed request must also leave a replacement after invalidate alone.
+    unawaited(
+      pending.then<void>((items) {
+        if (!identical(_mediaListCache[key], pending)) return;
+        _mediaListSizes[key] = items.length;
+        _mediaCategorySizes[key] = items.length;
+        _cachedMediaItems += items.length;
+        _pruneMediaLists(keep: key);
+      }, onError: (Object _, StackTrace _) {
+        if (identical(_mediaListCache[key], pending)) _mediaListCache.remove(key);
+      }),
+    );
+    return pending;
+  }
+
+  static String _mediaListKey(ContentKind kind, String? categoryId) =>
+      '${kind.name}:${categoryId ?? ''}';
+
+  void _pruneMediaLists({required String keep}) {
+    // Keep counts after eviction: aggregate paging can skip previous categories
+    // without downloading their full catalogs again. In-flight requests are not
+    // in this LRU and remain shared. One oversized active category may exceed
+    // the budget because the provider does not offer real category pagination.
+    for (final key in _mediaListSizes.keys.toList()) {
+      if (_cachedMediaItems <= _maximumCachedMediaItems &&
+          _mediaListSizes.length <= _maximumCachedMediaCategories) {
+        break;
+      }
+      if (key == keep || _pagedCategoryKeys.containsValue(key)) continue;
+      _cachedMediaItems -= _mediaListSizes.remove(key)!;
+      _mediaListCache.remove(key);
+    }
+  }
+
+  Future<List<MediaItem>> _seriesSeasons(MediaItem series) async {
+    final details = await _seriesDetails(series);
+    final episodes = details['episodes'];
+    if (episodes is! Map) return const [];
+    final infoSeasons = details['seasons'] is List
+        ? (details['seasons'] as List).whereType<Map>().toList()
+        : const <Map>[];
+    return episodes.keys.map((key) {
+      final seasonNumber = int.tryParse(key.toString());
+      final info = infoSeasons
+          .map((e) => Map<String, dynamic>.from(e))
+          .where((e) => '${e['season_number'] ?? e['season']}' == '$key')
+          .cast<Map<String, dynamic>?>()
+          .firstWhere((e) => e != null, orElse: () => null);
+      final title =
+          _firstString(info ?? const {}, ['name', 'title']) ??
+          'Season ${seasonNumber ?? key}';
+      return MediaItem(
+        id: '${series.id}:season:$key',
+        title: title,
+        kind: ContentKind.season,
+        parentId: series.id,
+        poster:
+            _firstString(info ?? const {}, ['cover', 'cover_big']) ??
+            series.poster,
+        seasonNumber: seasonNumber,
+        extra: {
+          'seriesId': series.id,
+          'seasonId': '$key',
+          'episodes': episodes[key],
+          'details': details,
+        },
+      );
+    }).toList();
+  }
+
+  List<MediaItem> _seasonEpisodes(MediaItem season) {
+    final raw = season.extra['episodes'];
+    if (raw is! List) return const [];
+    return raw.whereType<Map>().map((entry) {
+      final m = Map<String, dynamic>.from(entry);
+      final id = _firstString(m, ['id', 'episode_id', 'stream_id']) ?? '';
+      return MediaItem(
+        id: id,
+        title: _firstString(m, ['title', 'name']) ?? 'Episode',
+        kind: ContentKind.episode,
+        parentId: season.id,
+        poster:
+            _firstString(m, ['movie_image', 'cover', 'cover_big']) ??
+            season.poster,
+        description: _firstString(m, ['plot', 'description']),
+        year: _firstString(m, ['releasedate', 'release_date', 'year']),
+        durationSeconds: _parseDurationSeconds(
+          _firstString(m, ['duration', 'time', 'length']),
+        ),
+        seasonNumber: season.seasonNumber,
+        episodeNumber: _parseInt(m['episode_num'] ?? m['episode_number']),
+        extra: m,
+      );
+    }).toList();
+  }
+
+  Future<Map<String, dynamic>> _seriesDetails(MediaItem series) async {
+    final existing = series.extra['details'];
+    if (existing is Map) return Map<String, dynamic>.from(existing);
+    final r = await _api({'action': 'get_series_info', 'series_id': series.id});
+    return r is Map ? Map<String, dynamic>.from(r) : const {};
+  }
+
+  @visibleForTesting
+  MediaItem debugMapMediaItem(Map<String, dynamic> m, ContentKind kind) =>
+      _mapMediaItem(m, kind);
+}
+
+/// Isolate entrypoint: decode UTF-8 JSON bytes. Top-level + pure so it can run
+/// under [compute]. Returns the raw decoded tree (List/Map of primitives),
+/// which is sendable back across the isolate port. Used for the small/generic
+/// calls (auth, categories, `get_series_info`) that have no typed worker.
+dynamic _decodeJsonBytes(Uint8List bytes) =>
+    jsonDecode(utf8.decode(bytes, allowMalformed: true));
+
+/// Maps a decoded `get_live_streams` response (or a category-partitioned
+/// slice of one) straight to typed [Channel]s. Top-level + pure: it's the
+/// core of [decodeLiveChannelsBytes] (isolate path) and is also called
+/// directly with an already-decoded [debugApi] value (test path, no bytes to
+/// decode). Public so fixture-driven tests can exercise it directly.
+@visibleForTesting
+List<Channel> mapLiveChannels(dynamic decoded) {
+  if (decoded is! List) return const [];
+  return decoded.whereType<Map>().map((s) {
+    final m = Map<String, dynamic>.from(s);
+    final streamId = '${m['stream_id']}';
+    final epgId = m['epg_channel_id']?.toString();
+    return Channel(
+      id: streamId,
+      name: '${m['name']}',
+      number: int.tryParse('${m['num']}'),
+      logo:
+          (m['stream_icon'] is String &&
+              (m['stream_icon'] as String).isNotEmpty)
+          ? m['stream_icon'] as String
+          : null,
+      categoryId: m['category_id']?.toString(),
+      archiveDays: _archiveDays(m['tv_archive'], m['tv_archive_duration']),
+      extra: {
+        'streamId': streamId,
+        if (epgId != null && epgId.isNotEmpty) 'tvgId': epgId,
+      },
+    );
+  }).toList();
+}
+
+/// Isolate entrypoint: decode + map a `get_live_streams` response in one
+/// pass, so the dynamic JSON tree is built and consumed entirely inside the
+/// worker isolate — only the typed [Channel] list crosses back to the main
+/// isolate. Top-level + pure so it can run under [compute]; public so
+/// fixture-driven tests can exercise it directly with raw bytes.
+@visibleForTesting
+List<Channel> decodeLiveChannelsBytes(Uint8List bytes) =>
+    mapLiveChannels(jsonDecode(utf8.decode(bytes, allowMalformed: true)));
+
+/// Maps a decoded VOD/series catalog response (`get_vod_streams`/
+/// `get_series`) to typed [MediaItem]s. Shared by the already-decoded
+/// [debugApi] path and [decodeMediaItemsBytes] (isolate) path.
+@visibleForTesting
+List<MediaItem> mapMediaItemsFromDecoded(dynamic decoded, ContentKind kind) =>
+    _listFromAny(decoded)
+        .map((e) => _mapMediaItem(e, kind))
+        .where((item) => item.id.isNotEmpty)
+        .toList();
+
+/// Bundles the isolate arguments for [decodeMediaItemsBytes] — [compute]
+/// only passes a single message, and mapping needs both the raw bytes and
+/// which [ContentKind] they represent.
+@visibleForTesting
+class XtreamMediaDecodeArgs {
+  final Uint8List bytes;
+  final ContentKind kind;
+  const XtreamMediaDecodeArgs(this.bytes, this.kind);
+}
+
+/// Isolate entrypoint: decode + map a VOD/series catalog response in one
+/// pass — the dynamic JSON tree never leaves the worker isolate. Top-level +
+/// pure so it can run under [compute]; public so fixture-driven tests can
+/// exercise it directly with raw bytes.
+@visibleForTesting
+List<MediaItem> decodeMediaItemsBytes(XtreamMediaDecodeArgs args) =>
+    mapMediaItemsFromDecoded(
+      jsonDecode(utf8.decode(args.bytes, allowMalformed: true)),
+      args.kind,
+    );
+
+MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
+  final id = kind == ContentKind.movie
+      ? _firstString(m, ['stream_id', 'id', 'movie_id', 'vod_id'])
+      : _firstString(m, ['series_id', 'id', 'stream_id']);
+  return MediaItem(
+    id: id ?? '',
+    title: _firstString(m, ['name', 'title']) ?? 'Untitled',
+    kind: kind,
+    categoryId: m['category_id']?.toString(),
+    poster: _firstImageUrl(m, ['stream_icon', 'cover', 'cover_big']),
+    backdrop: _firstImageUrl(m, ['backdrop_path', 'backdrop', 'cover_big']),
+    description: _firstString(m, ['plot', 'description']),
+    year: _firstString(m, ['year', 'releaseDate', 'release_date']),
+    rating: _parseDouble(_firstString(m, ['rating', 'rating_5based'])),
+    providerId: _firstString(m, ['tmdb_id', 'imdb_id']),
+    extra: m,
+  );
+}
+
+List<Map<String, dynamic>> _listFromAny(dynamic value) {
+  if (value is List) {
+    return value
+        .whereType<Map>()
+        .map((entry) => Map<String, dynamic>.from(entry))
+        .toList();
+  }
+  if (value is Map) {
+    for (final key in const [
+      'data',
+      'items',
+      'results',
+      'series',
+      'movies',
+      'available_channels',
+      'categories',
+    ]) {
+      final nested = value[key];
+      final rows = _listFromAny(nested);
+      if (rows.isNotEmpty) return rows;
+    }
+  }
+  return const [];
+}
+
+int? _parseInt(dynamic value) {
+  if (value is int) return value;
+  if (value == null) return null;
+  return int.tryParse(value.toString());
+}
+
+/// Catch-up window in days from a live-stream's `tv_archive` (0/1) and
+/// `tv_archive_duration` (days). Archive off → 0; on but duration
+/// missing/zero → [kDefaultArchiveDays].
+int _archiveDays(dynamic archive, dynamic duration) {
+  final on = archive == 1 || archive == '1' || archive == true;
+  if (!on) return 0;
+  final days = _parseInt(duration) ?? 0;
+  return days > 0 ? days : kDefaultArchiveDays;
+}
+
+double? _parseDouble(String? value) {
+  if (value == null) return null;
+  return double.tryParse(value.replaceAll(',', '.'));
+}
+
+int? _parseDurationSeconds(String? value) {
+  if (value == null || value.isEmpty) return null;
+  final direct = int.tryParse(value);
+  if (direct != null) return direct;
+  final parts = value.split(':').map(int.tryParse).toList();
+  if (parts.any((part) => part == null)) return null;
+  if (parts.length == 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
+  if (parts.length == 2) return parts[0]! * 60 + parts[1]!;
+  return null;
+}
+
+String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
+  for (final key in keys) {
+    final value = map[key];
+    if (value == null) continue;
+    final text = value.toString().trim();
+    if (text.isNotEmpty && text != 'null') return text;
+  }
+  return null;
+}
+
+String? _firstImageUrl(Map<dynamic, dynamic> map, List<String> keys) {
+  for (final key in keys) {
+    final url = normalizeImageUrl(map[key]);
+    if (url != null) return url;
+  }
+  return null;
+}
+
+/// Credentials extracted from a URL that points at an Xtream Codes panel
+/// (typically a `get.php` playlist link). [host] is `scheme://host[:port]`.
+class XtreamCredentials {
+  final String host;
+  final String username;
+  final String password;
+  const XtreamCredentials({
+    required this.host,
+    required this.username,
+    required this.password,
+  });
+}
+
+/// Pulls Xtream credentials out of [uri] when it looks like a panel link —
+/// either `http://user:pass@host/...` or `?username=…&password=…`. Returns
+/// null when host/username/password aren't all present.
+XtreamCredentials? xtreamCredentialsFromUrl(Uri uri) {
+  String? username;
+  String? password;
+  if (uri.userInfo.isNotEmpty) {
+    final parts = uri.userInfo.split(':');
+    if (parts.length >= 2) {
+      username = parts[0];
+      password = parts.sublist(1).join(':');
+    }
+  }
+  username ??= uri.queryParameters['username'];
+  password ??= uri.queryParameters['password'];
+  if (username == null ||
+      username.isEmpty ||
+      password == null ||
+      password.isEmpty) {
+    return null;
+  }
+  if (uri.host.isEmpty) return null;
+  final scheme = uri.scheme.isEmpty ? 'http' : uri.scheme;
+  final host = '$scheme://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+  return XtreamCredentials(host: host, username: username, password: password);
+}

@@ -1,0 +1,668 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:isolate';
+import 'dart:typed_data';
+
+import '../l10n/app_localizations.dart';
+
+/// Named limits for one HTTP workload. The wire/body ceiling is separate from
+/// the decoded ceiling so compressed responses cannot become decompression
+/// bombs. [totalTimeout] never resets; [idleTimeout] resets for each chunk.
+class HttpWorkloadPolicy {
+  const HttpWorkloadPolicy({
+    required this.name,
+    required this.maximumBodyBytes,
+    required this.maximumDecodedBytes,
+    required this.totalTimeout,
+    this.idleTimeout = const Duration(seconds: 20),
+  });
+
+  final String name;
+  final int maximumBodyBytes;
+  final int maximumDecodedBytes;
+  final Duration idleTimeout;
+  final Duration totalTimeout;
+
+  HttpWorkloadPolicy copyWith({
+    String? name,
+    int? maximumBodyBytes,
+    int? maximumDecodedBytes,
+    Duration? idleTimeout,
+    Duration? totalTimeout,
+  }) => HttpWorkloadPolicy(
+    name: name ?? this.name,
+    maximumBodyBytes: maximumBodyBytes ?? this.maximumBodyBytes,
+    maximumDecodedBytes: maximumDecodedBytes ?? this.maximumDecodedBytes,
+    idleTimeout: idleTimeout ?? this.idleTimeout,
+    totalTimeout: totalTimeout ?? this.totalTimeout,
+  );
+}
+
+class HttpReadMetrics {
+  final int compressedBytes;
+  final int decodedBytes;
+  const HttpReadMetrics({
+    required this.compressedBytes,
+    required this.decodedBytes,
+  });
+}
+
+const int _mib = 1024 * 1024;
+
+/// Provider payload limits are deliberately generous relative to normal API
+/// responses. They stop hostile/unconfigured endpoints without rejecting the
+/// large catalogs represented by the PR 0 fixtures.
+const kPlaylistWorkload = HttpWorkloadPolicy(
+  name: 'playlist',
+  maximumBodyBytes: 128 * _mib,
+  maximumDecodedBytes: 256 * _mib,
+  totalTimeout: Duration(minutes: 5),
+);
+
+/// XMLTV guides are streamed to disk and parsed from there with the gzip
+/// inflated on the fly (`xmltvGuideFeed`, `parseXmltvFileBatched`), so neither
+/// number below is a memory budget any more — the body ceiling is disk, and the
+/// decoded ceiling is parse *time*, the one cost that still grows with a guide.
+/// Sized to take a combined "all countries" guide (~200 MB compressed, ~1.7 GB
+/// decompressed) with headroom. The total timeout covers the download only; a
+/// stalled server is still cut off by the 20 s idle timeout.
+const kEpgWorkload = HttpWorkloadPolicy(
+  name: 'epg',
+  maximumBodyBytes: 512 * _mib,
+  maximumDecodedBytes: 4096 * _mib,
+  totalTimeout: Duration(minutes: 30),
+);
+const kProviderJsonWorkload = HttpWorkloadPolicy(
+  name: 'provider JSON',
+  maximumBodyBytes: 128 * _mib,
+  maximumDecodedBytes: 256 * _mib,
+  totalTimeout: Duration(minutes: 3),
+);
+const kStalkerJsonWorkload = HttpWorkloadPolicy(
+  name: 'Stalker JSON',
+  // Real portals can return the entire live catalog from get_all_channels in
+  // one response. The PR 0 50k-row fixture is ~11 MiB and a user-validated
+  // portal exceeds 16 MiB, so retain a meaningful ceiling without rejecting
+  // legitimate large catalogs.
+  maximumBodyBytes: 64 * _mib,
+  maximumDecodedBytes: 128 * _mib,
+  totalTimeout: Duration(minutes: 1),
+);
+const kMetadataJsonWorkload = HttpWorkloadPolicy(
+  name: 'metadata JSON',
+  maximumBodyBytes: 4 * _mib,
+  maximumDecodedBytes: 8 * _mib,
+  totalTimeout: Duration(seconds: 45),
+);
+const kUpdateDiscoveryWorkload = HttpWorkloadPolicy(
+  name: 'update discovery',
+  maximumBodyBytes: 1024 * 1024,
+  maximumDecodedBytes: 2 * 1024 * 1024,
+  totalTimeout: Duration(seconds: 45),
+);
+const kUpdateArtifactWorkload = HttpWorkloadPolicy(
+  name: 'update artifact',
+  maximumBodyBytes: 1024 * _mib,
+  maximumDecodedBytes: 1024 * _mib,
+  totalTimeout: Duration(minutes: 30),
+);
+
+/// Retained for native/update call sites that only need an idle timeout.
+const Duration kHttpReadTimeout = Duration(seconds: 20);
+
+/// HTTP failures that can recover when a provider is briefly busy or offline.
+bool isTransientHttpStatus(int status) =>
+    status == HttpStatus.requestTimeout ||
+    status == HttpStatus.tooManyRequests ||
+    status == HttpStatus.internalServerError ||
+    status == HttpStatus.badGateway ||
+    status == HttpStatus.serviceUnavailable ||
+    status == HttpStatus.gatewayTimeout;
+
+class HttpWorkloadException implements Exception {
+  const HttpWorkloadException(this.message);
+  final String message;
+
+  @override
+  String toString() => 'HttpWorkloadException: $message';
+}
+
+/// Whether a provider operation is worth retrying automatically.
+///
+/// Some provider implementations preserve the original dart:io exception,
+/// while older Stalker endpoint discovery wraps it in a provider exception.
+/// Keep the textual fallback deliberately narrow: size/policy failures and
+/// authentication failures must fail immediately rather than repeating an
+/// expensive catalog request.
+bool isTransientNetworkError(Object error) {
+  if (error is HttpWorkloadException) return false;
+  if (error is TimeoutException ||
+      error is SocketException ||
+      error is HttpException) {
+    return true;
+  }
+  final message = error.toString().toLowerCase();
+  return message.contains('timed out') ||
+      message.contains('timeoutexception') ||
+      message.contains('connection reset') ||
+      message.contains('connection closed') ||
+      message.contains('connection refused') ||
+      message.contains('network is unreachable') ||
+      message.contains('temporary failure in name resolution');
+}
+
+/// Retries one transient provider failure, while leaving policy, parsing, and
+/// authentication failures untouched.
+Future<T> retryTransientNetworkOperation<T>(
+  Future<T> Function() operation, {
+  int maximumAttempts = 2,
+  Duration retryDelay = const Duration(milliseconds: 600),
+  void Function(Object error, int nextAttempt)? onRetry,
+}) async {
+  if (maximumAttempts < 1) {
+    throw ArgumentError.value(maximumAttempts, 'maximumAttempts');
+  }
+  for (var attempt = 1; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= maximumAttempts || !isTransientNetworkError(error)) {
+        rethrow;
+      }
+      onRetry?.call(error, attempt + 1);
+      if (retryDelay > Duration.zero) await Future<void>.delayed(retryDelay);
+    }
+  }
+}
+
+/// Short text suitable for a source-loading page. Provider exceptions can
+/// contain request URLs, response bodies, or nested stack-like messages, so
+/// those details stay in redacted diagnostics rather than the widget tree.
+String sourceLoadErrorMessage(Object error) {
+  final raw = error.toString();
+  final message = raw.toLowerCase();
+  // Socket messages can be localized; these are the Android/Linux, Apple,
+  // and Windows refusal codes. Older provider wrappers retain only the text.
+  if ((error is SocketException &&
+          const {111, 61, 10061}.contains(error.osError?.errorCode)) ||
+      message.contains('connection refused')) {
+    return tr(
+      'The connection to the source was refused. Check the source address, HTTP/HTTPS protocol and port, or try another network.',
+    );
+  }
+  if (isTransientNetworkError(error)) {
+    return tr(
+      'The source did not respond in time. We retried automatically; check the connection and try again.',
+    );
+  }
+  if (error is HttpWorkloadException) {
+    return tr('The source returned more data than the app can safely load.');
+  }
+  // A provider that answered with a status told us whose problem this is, and
+  // the old message threw that away: every `HTTP nnn` fell through to "check
+  // its details and try again", which sent users to re-type credentials that
+  // were demonstrably fine. Read from the raw string — the sources throw
+  // `HTTP <status> fetching/from <redacted url>`, and lowercasing first would
+  // still match, but the status itself must not be lowercased into a URL's own
+  // digits. The space and the capitals are what keep `http://host:8080/…` out.
+  final status = int.tryParse(
+    RegExp(r'\bHTTP (\d{3,})\b').firstMatch(raw)?.group(1) ?? '',
+  );
+  if (status != null) return _httpStatusMessage(status);
+
+  if (message.contains('unauthorized') ||
+      message.contains('forbidden') ||
+      message.contains('invalid credential') ||
+      message.contains('authentication')) {
+    return tr(
+      'The source rejected the saved credentials. Check the source details.',
+    );
+  }
+  return tr('The source could not be loaded. Check its details and try again.');
+}
+
+/// The user-facing half of [sourceLoadErrorMessage] for a provider that
+/// answered with an HTTP status.
+///
+/// The status is printed deliberately: it is not a secret (the URL beside it is
+/// already redacted), it is the single most useful thing a support report can
+/// carry, and providers return codes outside the standard range — a real field
+/// report arrived as `HTTP 884` — which no wording can anticipate. Anything
+/// unrecognised is therefore attributed to the provider rather than to the
+/// user's settings, because a response *came back*: the host resolved, the
+/// connection succeeded, and the server chose to refuse.
+String _httpStatusMessage(int status) {
+  switch (status) {
+    case 401:
+    case 403:
+    case 407:
+      return tr(
+        'The provider rejected these credentials (HTTP {status}). Check the source details.',
+        {'status': status},
+      );
+    case 404:
+      return tr(
+        'The provider could not find the requested data (HTTP {status}). Try again; if the error persists, check the source URL.',
+        {'status': status},
+      );
+    case 410:
+      return tr(
+        'The provider has no such address (HTTP {status}). Check the URL in the source details.',
+        {'status': status},
+      );
+    case 429:
+      return tr(
+        'The provider is rate-limiting this device (HTTP {status}). Wait a moment and try again.',
+        {'status': status},
+      );
+    default:
+      return tr(
+        'The provider refused this request (HTTP {status}). That came from their server, not your settings — try again shortly.',
+        {'status': status},
+      );
+  }
+}
+
+/// One non-resetting deadline spanning request creation, headers, redirects,
+/// body transfer, and optional decoding.
+class HttpOperation {
+  HttpOperation(this.policy, {this.onReadMetrics})
+    : _stopwatch = Stopwatch()..start();
+
+  final HttpWorkloadPolicy policy;
+  final Stopwatch _stopwatch;
+  HttpReadMetrics? lastReadMetrics;
+  final void Function(HttpReadMetrics metrics)? onReadMetrics;
+
+  Duration get remaining {
+    final value = policy.totalTimeout - _stopwatch.elapsed;
+    if (value <= Duration.zero) {
+      throw TimeoutException('${policy.name} exceeded total deadline');
+    }
+    return value;
+  }
+
+  Future<T> wait<T>(Future<T> future) => future.timeout(
+    remaining,
+    onTimeout: () => throw TimeoutException(
+      '${policy.name} exceeded total deadline',
+      policy.totalTimeout,
+    ),
+  );
+
+  Future<Uint8List> readBytes(HttpClientResponse response) async {
+    final encoded = await readBoundedBytes(
+      response,
+      contentLength: response.contentLength,
+      maximumBytes: policy.maximumBodyBytes,
+      idleTimeout: policy.idleTimeout,
+      totalTimeout: remaining,
+      workloadName: policy.name,
+    );
+    if (!_isGzip(response, encoded)) {
+      _checkLimit(encoded.length, policy.maximumDecodedBytes, policy.name);
+      lastReadMetrics = HttpReadMetrics(
+        compressedBytes: encoded.length,
+        decodedBytes: encoded.length,
+      );
+      onReadMetrics?.call(lastReadMetrics!);
+      return encoded;
+    }
+    final decoded = await wait(
+      Isolate.run(() => decodeGzipBounded(encoded, policy.maximumDecodedBytes)),
+    );
+    lastReadMetrics = HttpReadMetrics(
+      compressedBytes: encoded.length,
+      decodedBytes: decoded.length,
+    );
+    onReadMetrics?.call(lastReadMetrics!);
+    return decoded;
+  }
+
+  /// Streams a response directly to [destination], bounding both a declared
+  /// Content-Length and actual chunks. The partial file is deleted on every
+  /// failure, including idle/total timeout and a consumer callback exception.
+  Future<int> readToFile(
+    HttpClientResponse response,
+    File destination, {
+    int? maximumBytes,
+    void Function(List<int> chunk, int received)? onChunk,
+  }) async {
+    final ceiling = maximumBytes ?? policy.maximumBodyBytes;
+    return writeBoundedStreamToFile(
+      response,
+      destination,
+      contentLength: response.contentLength,
+      maximumBytes: ceiling,
+      idleTimeout: policy.idleTimeout,
+      totalTimeout: remaining,
+      workloadName: policy.name,
+      onChunk: onChunk,
+    );
+  }
+}
+
+Future<Uint8List> readBoundedBytes(
+  Stream<List<int>> stream, {
+  required int contentLength,
+  required int maximumBytes,
+  required Duration idleTimeout,
+  Duration? totalTimeout,
+  required String workloadName,
+}) async {
+  _checkContentLength(contentLength, maximumBytes, workloadName);
+  final builder = BytesBuilder(copy: false);
+  var received = 0;
+  await _consumeWithTimeouts(
+    stream,
+    idleTimeout: idleTimeout,
+    totalTimeout: totalTimeout,
+    workloadName: workloadName,
+    onChunk: (chunk) {
+      received += chunk.length;
+      _checkLimit(received, maximumBytes, workloadName);
+      builder.add(chunk);
+    },
+  );
+  return builder.takeBytes();
+}
+
+Future<int> writeBoundedStreamToFile(
+  Stream<List<int>> stream,
+  File destination, {
+  required int contentLength,
+  required int maximumBytes,
+  required Duration idleTimeout,
+  Duration? totalTimeout,
+  required String workloadName,
+  void Function(List<int> chunk, int received)? onChunk,
+}) async {
+  _checkContentLength(contentLength, maximumBytes, workloadName);
+  if (await destination.exists()) await destination.delete();
+  final sink = destination.openWrite();
+  var received = 0;
+  try {
+    await _consumeWithTimeouts(
+      stream,
+      idleTimeout: idleTimeout,
+      totalTimeout: totalTimeout,
+      workloadName: workloadName,
+      onChunk: (chunk) {
+        received += chunk.length;
+        _checkLimit(received, maximumBytes, workloadName);
+        sink.add(chunk);
+        onChunk?.call(chunk, received);
+      },
+    );
+    await sink.flush();
+    await sink.close();
+    return received;
+  } catch (_) {
+    await sink.close();
+    if (await destination.exists()) await destination.delete();
+    rethrow;
+  }
+}
+
+Future<void> _consumeWithTimeouts(
+  Stream<List<int>> stream, {
+  required Duration idleTimeout,
+  required Duration? totalTimeout,
+  required String workloadName,
+  required void Function(List<int>) onChunk,
+}) {
+  final completer = Completer<void>();
+  StreamSubscription<List<int>>? subscription;
+  Timer? idleTimer;
+  Timer? totalTimer;
+  var finished = false;
+
+  Future<void> fail(Object error, [StackTrace? stackTrace]) async {
+    if (finished) return;
+    finished = true;
+    idleTimer?.cancel();
+    totalTimer?.cancel();
+    await subscription?.cancel();
+    if (!completer.isCompleted) {
+      completer.completeError(error, stackTrace ?? StackTrace.current);
+    }
+  }
+
+  void armIdleTimer() {
+    idleTimer?.cancel();
+    idleTimer = Timer(
+      idleTimeout,
+      () => fail(
+        TimeoutException('$workloadName stalled while reading response'),
+      ),
+    );
+  }
+
+  if (totalTimeout != null) {
+    totalTimer = Timer(
+      totalTimeout,
+      () => fail(TimeoutException('$workloadName exceeded total deadline')),
+    );
+  }
+  armIdleTimer();
+  subscription = stream.listen(
+    (chunk) {
+      if (finished) return;
+      try {
+        onChunk(chunk);
+        armIdleTimer();
+      } catch (error, stackTrace) {
+        fail(error, stackTrace);
+      }
+    },
+    onError: (Object error, StackTrace stackTrace) => fail(error, stackTrace),
+    onDone: () {
+      if (finished) return;
+      finished = true;
+      idleTimer?.cancel();
+      totalTimer?.cancel();
+      completer.complete();
+    },
+    cancelOnError: true,
+  );
+  return completer.future;
+}
+
+/// Byte counts as a human reads them.
+///
+/// These numbers reach the user — a rejected download surfaces its exception
+/// text in the source error body and the exportable log — and "exceeds
+/// 134217728 bytes" tells someone nothing about how far over they are or what
+/// to do. `192 MB` against `128 MB` is immediately actionable.
+String formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  const units = ['KB', 'MB', 'GB'];
+  var value = bytes / 1024;
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  final rounded = value >= 100 || value == value.roundToDouble()
+      ? value.round().toString()
+      : value.toStringAsFixed(1);
+  return '$rounded ${units[unit]}';
+}
+
+void _checkContentLength(int contentLength, int maximum, String name) {
+  if (contentLength >= 0 && contentLength > maximum) {
+    throw HttpWorkloadException(
+      '$name download is ${formatBytes(contentLength)}, over the '
+      '${formatBytes(maximum)} limit',
+    );
+  }
+}
+
+void _checkLimit(int actual, int maximum, String name) {
+  if (actual > maximum) {
+    throw HttpWorkloadException(
+      '$name is ${formatBytes(actual)}, over the ${formatBytes(maximum)} limit',
+    );
+  }
+}
+
+bool _isGzip(HttpClientResponse response, Uint8List bytes) {
+  final encoding = response.headers
+      .value(HttpHeaders.contentEncodingHeader)
+      ?.toLowerCase();
+  return encoding?.split(',').any((value) => value.trim() == 'gzip') == true ||
+      isGzipBytes(bytes);
+}
+
+bool isGzipBytes(List<int> bytes) =>
+    bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b;
+
+/// Synchronous bounded gzip decoding. Call this inside an isolate for large or
+/// attacker-controlled input; [HttpOperation.readBytes] already does so.
+Uint8List decodeGzipBounded(Uint8List encoded, int maximumDecodedBytes) {
+  final sink = _BoundedByteSink(maximumDecodedBytes, 'decoded gzip');
+  final decoder = gzip.decoder.startChunkedConversion(sink);
+  decoder.add(encoded);
+  decoder.close();
+  return sink.takeBytes();
+}
+
+class _BoundedByteSink implements Sink<List<int>> {
+  _BoundedByteSink(this.maximumBytes, this.workloadName);
+
+  final int maximumBytes;
+  final String workloadName;
+  final BytesBuilder _builder = BytesBuilder(copy: false);
+  var _length = 0;
+
+  @override
+  void add(List<int> data) {
+    _length += data.length;
+    _checkLimit(_length, maximumBytes, workloadName);
+    _builder.add(data);
+  }
+
+  @override
+  void close() {}
+
+  Uint8List takeBytes() => _builder.takeBytes();
+}
+
+/// Redacts secret-looking material from free-form [text] (an exception
+/// message, an mpv log line) so it is safe to log or show on screen. Finds an
+/// embedded http(s) URL and redacts its path segments that look like
+/// credentials (long or token-shaped) — IPTV providers put username/password
+/// in the *path* (`/live/user/pass/123.ts`), which [redactUrl]'s query-focused
+/// redaction wouldn't touch.
+String redactText(String text) {
+  final urlMatch = RegExp(
+    r'https?://\S+',
+    caseSensitive: false,
+  ).firstMatch(text);
+  if (urlMatch != null) {
+    final redactedUrl = _redactUrlPath(redactUrl(urlMatch.group(0)!));
+    return text.replaceRange(urlMatch.start, urlMatch.end, redactedUrl);
+  }
+  return _redactUrlPath(text);
+}
+
+/// Path segments that introduce IPTV credential/route material. Xtream-style
+/// stream URLs put the username and password in the two segments immediately
+/// after one of these keywords (`/live/<user>/<pass>/<id>.ts`), and those creds
+/// are frequently too short to trip the length/token heuristic below — so the
+/// segments right after a keyword are redacted structurally, regardless of
+/// length.
+const _kCredentialPathKeywords = {
+  'live',
+  'movie',
+  'movies',
+  'series',
+  'timeshift',
+  'play',
+};
+
+String _redactUrlPath(String value) {
+  final uri = Uri.tryParse(value);
+  if (uri == null) return value;
+  if (!uri.hasAuthority && !value.contains('/')) return value;
+  final segments = uri.pathSegments;
+  // Structural redaction: after a credential keyword, redact the next two
+  // segments (the user/pass pair) regardless of length, but never the final
+  // segment — that's the stream id / filename, which carries no secret.
+  final redactByStructure = List<bool>.filled(segments.length, false);
+  for (var i = 0; i < segments.length; i++) {
+    if (_kCredentialPathKeywords.contains(segments[i].toLowerCase())) {
+      for (var j = i + 1; j <= i + 2 && j < segments.length - 1; j++) {
+        redactByStructure[j] = true;
+      }
+    }
+  }
+  final cleanSegments = <String>[];
+  for (var i = 0; i < segments.length; i++) {
+    final segment = segments[i];
+    final looksSecret =
+        segment.length > 18 ||
+        RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
+    cleanSegments.add(
+      (looksSecret || redactByStructure[i]) ? '<redacted>' : segment,
+    );
+  }
+  final path = cleanSegments.join('/');
+  final authority = uri.hasAuthority
+      ? '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}'
+      : '';
+  final prefix = authority.isNotEmpty
+      ? authority
+      : (uri.scheme.isNotEmpty ? '${uri.scheme}:' : '');
+  return '$prefix/${path.replaceAll(RegExp(r'/+'), '/')}';
+}
+
+/// Whether [value] is usable as a provider/guide URL: parseable, http(s), with
+/// a non-empty host.
+///
+/// [requireScheme] decides how much this actually rejects, and the difference
+/// is larger than it looks. Without it the check is deliberately **very**
+/// lenient — prepending `http://` means `Uri` accepts almost any single token
+/// as a host (`nonsense` parses; so does `not a url`, whose spaces are
+/// percent-encoded into the authority). That is the correct trade for a
+/// *host/portal* field, where scheme-less input is supported syntax and a false
+/// rejection locks the owner out of saving an edit. It is the wrong trade for a
+/// full URL the user is expected to paste — an EPG guide locator — where
+/// there is no scheme-less convention to protect and accepting `nonsense`
+/// merely defers the failure to the next guide refresh.
+///
+/// **Normalises exactly the way the sources do before judging.** Both
+/// `XtreamSource._base` and `StalkerSource._base()` prepend `http://` when the
+/// user omitted a scheme, so `panel.example.com:8080` and `1.2.3.4:8080` are
+/// supported input, not mistakes. Validating the raw string rejected both:
+/// `Uri.tryParse` reads `panel.example.com` as the *scheme* (dots are legal
+/// there) and gives `1.2.3.4:8080` an empty host. That turned every
+/// scheme-less source into one the owner could no longer save an edit to —
+/// change the password, press Save, and the Host field they never touched
+/// errors out while the source itself still plays fine.
+bool looksLikeValidUrl(String value, {bool requireScheme = false}) {
+  final hasScheme = value.startsWith('http://') || value.startsWith('https://');
+  if (requireScheme && !hasScheme) return false;
+  final normalised = hasScheme ? value : 'http://$value';
+  final uri = Uri.tryParse(normalised);
+  if (uri == null) return false;
+  return (uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isNotEmpty;
+}
+
+/// Removes credentials from [url] so it is safe to surface in error messages,
+/// logs, and exported diagnostics.
+String redactUrl(Object url) {
+  final text = url.toString();
+  final uri = Uri.tryParse(text);
+  if (uri == null || uri.scheme.isEmpty) {
+    return text.split('?').first;
+  }
+  final out = StringBuffer()
+    ..write(uri.scheme)
+    ..write('://')
+    ..write(uri.host);
+  if (uri.hasPort) out.write(':${uri.port}');
+  out.write(uri.path);
+  if (uri.hasQuery) out.write('?<redacted>');
+  return out.toString();
+}
