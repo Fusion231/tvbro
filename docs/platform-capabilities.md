@@ -19,7 +19,7 @@ Build, installation and device-validation requirements are documented with the
 | Cloud pairing and profile sync | Optional configured service | Optional configured service | Manual and optional automatic sync | Shared TV implementation; device qualification pending | Shared TV implementation; device qualification pending |
 
 Saved VOD resume and automatic synchronization can have access requirements; see
-[Supporter details](https://tvbro.online/). Basic playback is not gated by these conveniences.
+[subscriptions.md](https://tvbro.online/). Basic playback is not gated by these conveniences.
 An EPG URL, matching channel IDs and provider archive support determine which guide
 and catch-up functions can work; an app cannot create missing provider data.
 

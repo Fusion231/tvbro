@@ -14,18 +14,21 @@ class ClientSourceTest(unittest.TestCase):
             repo, output = root / 'repo', root / 'export'
             code = repo / 'clients/player/lib'
             code.mkdir(parents=True)
-            (repo / 'clients/player/pubspec.yaml').write_text('name: test_app\n')
+            (repo / 'clients/player/pubspec.yaml').write_bytes(b'name: test_app\n')
             (repo / 'backend').mkdir()
             (repo / 'backend/server.mjs').write_text('private server')
             for number in range(400):
-                (code / (str(number) + '_' + 'source' * 15 + '.dart')).write_text('application source')
+                (code / (str(number) + '_' + 'source' * 15 + '.dart')).write_bytes(b'application source\n')
             subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            subprocess.run(['git', '-C', str(repo), 'config', 'core.autocrlf', 'false'], check=True)
             subprocess.run(['git', '-C', str(repo), 'add', '.'], check=True)
             subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Source export test',
                             '-c', 'user.email=test@example.invalid', '-c', 'core.hooksPath=' + str(root/'no-hooks'),
                             'commit', '-qm', 'fixture'], check=True)
+            subprocess.run(['git', '-C', str(repo), 'config', 'core.autocrlf', 'true'], check=True)
             source.export_git(repo, 'HEAD', output)
             self.assertEqual(len(list((output/'clients/player/lib').glob('*.dart'))), 400)
+            self.assertEqual((output/'clients/player/pubspec.yaml').read_bytes(), b'name: test_app\n')
             self.assertFalse((output/'backend').exists())
 
     def test_only_application_inputs_are_public(self):

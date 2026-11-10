@@ -86,7 +86,7 @@ def export_git(repo, revision, destination):
     if not any(name.endswith('pubspec.yaml') for name in selected):
         raise ValueError('No application manifest in selected revision.')
     executable = []
-    command = ['git', '-C', str(repo), 'archive', '--format=tar', revision]
+    command = ['git', '-c', 'core.autocrlf=false', '-C', str(repo), 'archive', '--format=tar', revision]
     with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
         with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
             for member in archive:
