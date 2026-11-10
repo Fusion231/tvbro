@@ -1,0 +1,17 @@
+{
+  "name": "tvbro-samsung-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Samsung Tizen 3+ platform view using compiled canonical TVBro Dart",
+  "scripts": {
+    "build": "node tools/build.cjs",
+    "test": "node --test test/*.test.cjs"
+  },
+  "devDependencies": {
+    "@babel/core": "7.28.5",
+    "@babel/preset-env": "7.28.5",
+    "acorn": "8.15.0",
+    "core-js-bundle": "3.47.0",
+    "pako": "2.1.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "id": "online.tvbro.titan",
+  "title": "TVBro",
+  "version": "0.1.2",
+  "entryPoint": "index.html",
+  "delivery": "hosted-html5",
+  "httpsRequired": true
+}

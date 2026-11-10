@@ -1,0 +1,14 @@
+{
+  "id": "online.tvbro.webos",
+  "version": "1.0.0",
+  "vendor": "TVBro",
+  "type": "web",
+  "main": "index.html",
+  "title": "TVBro",
+  "appDescription": "TVBro for LG webOS TV",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "resolution": "1280x720",
+  "disableBackHistoryAPI": true,
+  "requiredACG": []
+}

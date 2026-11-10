@@ -1,0 +1,10 @@
+{
+  "id": "online.tvbro.webos.epg",
+  "description": "TVBro private EPG disk service",
+  "services": [
+    {
+      "name": "online.tvbro.webos.epg",
+      "description": "TVBro private EPG disk service"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "directories": ["clients/player/", "clients/tv/"],
+  "files": [
+    ".gitattributes", ".gitignore", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "build-all.cmd",
+    "panel/package.json", "panel/src/crypto.js", "panel/src/pin.js", "panel/src/validate.js",
+    "panel/public/site/assets/app-home.webp", "panel/public/site/assets/app-phone.webp",
+    "docs/dvr.md", "docs/platform-capabilities.md",
+    "scripts/build-all.ps1", "scripts/build-ios.sh", "scripts/build-release.ps1", "scripts/build-tvbro.ps1",
+    "scripts/generate_altstore_source.dart", "scripts/package_linux_appimage.sh", "scripts/package_windows_msix.ps1",
+    "scripts/release-config.example.json", "scripts/run_low_end_tv_benchmark.ps1", "scripts/sign-release.ps1",
+    "scripts/verify_android_apk_certificate.sh", "scripts/verify_android_distribution_manifest.sh",
+    "scripts/verify_google_play_bundle.sh", "scripts/verify_release.dart", "scripts/verify_windows_msix.ps1",
+    "scripts/client-source.json", "scripts/client-README.md", "scripts/export_client_source.py", "scripts/test_client_source.py"
+  ],
+  "exclude": [
+    "clients/player/test/secret_keys_parity_test.dart",
+    "clients/player/test/linux_packaging_test.dart", "clients/player/test/msix_packaging_test.dart",
+    "**/.env", "**/.env.*", "**/*.env", "**/*.jks", "**/*.keystore", "**/*.pem", "**/*.key",
+    "**/*.p12", "**/*.pfx", "**/*.p8", "**/*.clixml", "**/key.properties", "**/*.local.json",
+    "**/.git/**", "**/.signing/**", "**/node_modules/**", "**/.dart_tool/**", "**/graphify-out/**",
+    "**/build/**", "**/output/**", "**/.gradle/**", "**/.kotlin/**", "**/.cxx/**", "**/Pods/**",
+    "clients/player/dart_define.json"
+  ],
+  "exceptions": ["clients/player/android/app/debug.keystore"]
+}

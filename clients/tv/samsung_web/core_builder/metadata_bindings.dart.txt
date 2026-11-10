@@ -1,0 +1,457 @@
+// Browser HttpClient vocabulary used verbatim by the canonical metadata clients.
+class ContentType {
+  final String mimeType;
+  const ContentType._(this.mimeType);
+  static const json = ContentType._('application/json; charset=utf-8');
+}
+
+extension _BrowserHttpClientOptions on HttpClient {
+  set idleTimeout(Duration? value) {}
+  set maxConnectionsPerHost(int? value) {}
+  Future<_BrowserHttpRequest> getUrl(Uri uri) async => _BrowserHttpRequest(this, uri, 'GET');
+  Future<_BrowserHttpRequest> postUrl(Uri uri) async => _BrowserHttpRequest(this, uri, 'POST');
+}
+
+extension _BrowserHttpHeaders on HttpHeaders {
+  void set(String name, Object value) {
+    if (name.isEmpty || name.contains(RegExp(r"[^!#$%&'*+.^_`|~0-9a-zA-Z-]")) ||
+        value.toString().contains(RegExp(r'[\r\n]'))) {
+      throw const FormatException('Invalid HTTP header');
+    }
+    _values[name.toLowerCase()] = value.toString();
+  }
+
+  set contentType(ContentType value) => set('content-type', value.mimeType);
+}
+
+class _BrowserHttpRequest {
+  final HttpClient client;
+  final Uri uri;
+  final String method;
+  final headers = HttpHeaders({});
+  final _body = StringBuffer();
+
+  _BrowserHttpRequest(this.client, this.uri, this.method);
+
+  void write(Object? value) {
+    if (_body.length > kMetadataJsonWorkload.maximumBodyBytes) {
+      throw const HttpWorkloadException('Metadata request exceeds the configured limit', isSizeLimit: true);
+    }
+    _body.write(value);
+    if (utf8.encode(_body.toString()).length > kMetadataJsonWorkload.maximumBodyBytes) {
+      throw const HttpWorkloadException('Metadata request exceeds the configured limit', isSizeLimit: true);
+    }
+  }
+
+  Future<HttpClientResponse> close() async {
+    if (client.closed) throw SocketException('Connection closed');
+    if (uri.scheme != 'https' || uri.host.isEmpty) throw const FormatException('Invalid metadata endpoint');
+    final transport = client.transport;
+    if (transport == null) throw StateError('A metadata transport is required');
+    final stopwatch = Stopwatch()..start();
+    var target = uri;
+    var targetMethod = method;
+    var targetBody = _body.toString();
+    final targetHeaders = Map<String, String>.of(headers._values);
+    for (var redirects = 0; ; redirects++) {
+      if (redirects > 5) throw SocketException('Metadata redirect limit exceeded');
+      final remaining = kMetadataJsonWorkload.totalTimeout - stopwatch.elapsed;
+      if (remaining <= Duration.zero) throw TimeoutException('Metadata request timed out');
+      final descriptor = <String, dynamic>{
+        'url': target.toString(),
+        'method': targetMethod,
+        'headers': Map<String, String>.of(targetHeaders),
+        'workload': 'metadata-json',
+        'maximumBodyBytes': kMetadataJsonWorkload.maximumBodyBytes,
+        'maximumDecodedBytes': kMetadataJsonWorkload.maximumDecodedBytes,
+        'totalTimeoutMs': remaining.inMilliseconds,
+        'idleTimeoutMs': kMetadataJsonWorkload.idleTimeout.inMilliseconds,
+        'pauseOnAuthenticationFailure': true,
+        if (targetMethod != 'GET' || targetBody.isNotEmpty) 'body': targetBody,
+      };
+      final responseText = await ProviderRequestGate.instance.run<String>(
+        target,
+        () async => (transport.callAsFunction(null, jsonEncode(descriptor).toJS)
+                as JSPromise<JSString>)
+            .toDart
+            .then((value) => value.toDart),
+        timeout: remaining,
+      );
+      final response = objectJson(responseText);
+      _throwMetadataTransportFailure(response);
+      final status = response['status'];
+      if (status is! int || status < 100 || status > 599) {
+        throw SocketException('Invalid metadata response');
+      }
+      final responseHeaders = <String, String>{};
+      if (response['headers'] is Map) {
+        for (final entry in (response['headers'] as Map).entries) {
+          if (entry.key is String && entry.value != null) {
+            responseHeaders[(entry.key as String).toLowerCase()] = entry.value.toString();
+          }
+        }
+      }
+      ProviderRequestGate.instance.recordResponse(
+        target,
+        status,
+        retryAfter: responseHeaders['retry-after'],
+        pauseOnAuthenticationFailure: true,
+      );
+      await ProviderRequestGate.instance.flushCooldowns();
+      ProviderRequestGate.instance.check(target);
+      final location = responseHeaders['location'];
+      if (status >= 300 && status < 400 && location != null) {
+        final redirected = target.resolve(location);
+        if (redirected.scheme != 'https' || redirected.userInfo.isNotEmpty) {
+          throw const FormatException('Invalid metadata redirect');
+        }
+        if (redirected.host != target.host) {
+          targetHeaders.removeWhere((name, _) => const {
+            'authorization', 'cookie', 'x-api-key', 'x-tvdb-pin',
+          }.contains(name.toLowerCase()));
+          target = _withoutMetadataCredentials(redirected);
+          targetMethod = 'GET';
+          targetBody = '';
+          targetHeaders.remove('content-type');
+        } else {
+          target = redirected;
+          if ([301, 302, 303].contains(status) && targetMethod == 'POST') {
+            targetMethod = 'GET';
+            targetBody = '';
+            targetHeaders.remove('content-type');
+          }
+        }
+        continue;
+      }
+      Uint8List bytes;
+      if (response['body'] is String) {
+        bytes = Uint8List.fromList(utf8.encode(response['body'] as String));
+      } else if (response['bodyBase64'] is String) {
+        final encoded = response['bodyBase64'] as String;
+        if (encoded.length > 4 * ((kMetadataJsonWorkload.maximumDecodedBytes + 2) ~/ 3)) {
+          throw const HttpWorkloadException('Metadata response exceeds the configured limit', isSizeLimit: true);
+        }
+        try {
+          bytes = Uint8List.fromList(base64Decode(encoded));
+        } on FormatException {
+          throw const HttpWorkloadException('Invalid metadata response', isSizeLimit: false);
+        }
+      } else {
+        bytes = Uint8List(0);
+      }
+      if (response['decoded'] == true) {
+        responseHeaders.remove('content-encoding');
+        responseHeaders.remove('content-length');
+      }
+      final maximum = response['decoded'] == true
+          ? kMetadataJsonWorkload.maximumDecodedBytes
+          : kMetadataJsonWorkload.maximumBodyBytes;
+      if (bytes.length > maximum) {
+        throw const HttpWorkloadException('Metadata response exceeds the configured limit', isSizeLimit: true);
+      }
+      return HttpClientResponse(status, bytes, HttpHeaders(responseHeaders));
+    }
+  }
+}
+
+Uri _withoutMetadataCredentials(Uri value) {
+  final query = <String, String>{
+    for (final entry in value.queryParameters.entries)
+      if (!const {'api_key', 'apikey', 'access_token', 'token'}.contains(entry.key.toLowerCase()))
+        entry.key: entry.value,
+  };
+  return query.isEmpty ? value.replace(query: '') : value.replace(queryParameters: query);
+}
+
+void _throwMetadataTransportFailure(Map<String, dynamic> response) {
+  switch (response['errorKind']) {
+    case 'provider-blocked':
+      throw ProviderRequestBlocked(
+        status: response['status'] as int,
+        retryAt: DateTime.parse(response['retryAt'] as String),
+      );
+    case 'cancelled':
+      throw const LoadCancelledException();
+    case 'limit':
+      throw const HttpWorkloadException('Metadata response exceeds the configured limit', isSizeLimit: true);
+    case 'network':
+      throw SocketException('Metadata request failed');
+    case 'capability':
+      throw UnsupportedError('Metadata transport is unavailable');
+    default:
+      if (response['errorKind'] != null) throw SocketException('Metadata request failed');
+  }
+}
+
+const _maximumMetadataRecords = 256;
+const _maximumMetadataCacheBytes = 1536 * 1024;
+const _maximumMetadataSnapshotBytes = 2 * 1024 * 1024;
+
+Map<String, dynamic> _externalMetadataJson(ExternalMetadata metadata) => {
+  'provider': metadata.provider,
+  'providerKey': metadata.providerKey,
+  'title': metadata.title,
+  'overview': metadata.overview,
+  'poster': metadata.poster,
+  'backdrop': metadata.backdrop,
+  'year': metadata.year,
+  'rating': metadata.rating,
+  'payload': metadata.payload,
+  'refreshedAt': metadata.refreshedAt.millisecondsSinceEpoch,
+};
+
+ExternalMetadata? _externalMetadataFromJson(Object? value) {
+  if (value is! Map || value.keys.any((key) => key is! String)) return null;
+  final data = <String, dynamic>{
+    for (final entry in value.entries)
+      if (entry.key != 'kind' && entry.key != 'id') entry.key as String: entry.value,
+  };
+  const fields = {
+    'provider', 'providerKey', 'title', 'overview', 'poster', 'backdrop',
+    'year', 'rating', 'payload', 'refreshedAt',
+  };
+  if (data.length != fields.length || !data.keys.toSet().containsAll(fields)) return null;
+  final provider = data['provider'], providerKey = data['providerKey'], payload = data['payload'];
+  final at = data['refreshedAt'], rating = data['rating'];
+  if (provider is! String || !const {'tmdb', 'tvdb', 'tvmaze', 'mdblist'}.contains(provider) ||
+      providerKey is! String || providerKey.length > 1024 || payload is! Map || at is! int || at < 0 ||
+      at > DateTime.now().add(const Duration(days: 1)).millisecondsSinceEpoch ||
+      rating != null && (rating is! num || !rating.isFinite)) return null;
+  for (final key in const ['title', 'overview', 'poster', 'backdrop', 'year']) {
+    final field = data[key];
+    if (field != null && (field is! String || field.length > 32768)) return null;
+  }
+  return ExternalMetadata(
+    provider: provider,
+    providerKey: providerKey,
+    title: data['title'] as String?,
+    overview: data['overview'] as String?,
+    poster: data['poster'] as String?,
+    backdrop: data['backdrop'] as String?,
+    year: data['year'] as String?,
+    rating: (rating as num?)?.toDouble(),
+    payload: Map<String, dynamic>.from(payload),
+    refreshedAt: DateTime.fromMillisecondsSinceEpoch(at),
+  );
+}
+
+class _WebMetadataCache {
+  final Future<void> Function(String?) _ensureCurrent;
+  final Map<String, ({ContentKind kind, String id, ExternalMetadata metadata, int size})> _records = {};
+  int _bytes = 0;
+
+  _WebMetadataCache(this._ensureCurrent);
+
+  String _key(String sourceId, MediaItem item, String provider) =>
+      jsonEncode([sourceId, item.kind.name, item.id, provider]);
+
+  ExternalMetadata? read(String sourceId, MediaItem item, String provider) {
+    final key = _key(sourceId, item, provider), record = _records.remove(key);
+    if (record == null) return null;
+    _records[key] = record;
+    return record.metadata;
+  }
+
+  Future<ExternalMetadata?> readExternalMetadata(String sourceId, MediaItem item, String provider) async =>
+      read(sourceId, item, provider);
+
+  Map<String, ExternalMetadata> readItems(String sourceId, List<MediaItem> items, String provider) => {
+    for (final item in items)
+      if (read(sourceId, item, provider) case final metadata?) item.id: metadata,
+  };
+
+  Future<Map<String, ExternalMetadata>> readExternalMetadataForItems(
+      String sourceId, List<MediaItem> items, String provider) async => readItems(sourceId, items, provider);
+
+  void write(String sourceId, MediaItem item, ExternalMetadata metadata) {
+    final key = _key(sourceId, item, metadata.provider);
+    final raw = jsonEncode({
+      'kind': item.kind.name, 'id': item.id, ..._externalMetadataJson(metadata),
+    });
+    final size = utf8.encode(raw).length;
+    if (item.id.isEmpty || item.id.length > 1024 || size > _maximumMetadataCacheBytes) return;
+    final previous = _records.remove(key);
+    if (previous != null) _bytes -= previous.size;
+    _records[key] = (kind: item.kind, id: item.id, metadata: metadata, size: size);
+    _bytes += size;
+    while (_records.length > _maximumMetadataRecords || _bytes > _maximumMetadataCacheBytes) {
+      final oldest = _records.keys.first;
+      _bytes -= _records.remove(oldest)!.size;
+    }
+  }
+
+  Future<void> cacheExternalMetadata(String sourceId, MediaItem item, ExternalMetadata metadata,
+      {String? expectedCacheIdentity}) async {
+    await _ensureCurrent(expectedCacheIdentity);
+    write(sourceId, item, metadata);
+  }
+
+  Future<void> updateMediaDisplayFields(String sourceId, List<MediaItem> items,
+      {String? expectedCacheIdentity}) async => _ensureCurrent(expectedCacheIdentity);
+
+  String key(String scope, String sourceId) => sha256.convert(utf8.encode(
+      jsonEncode(['external-metadata-v1', scope, sourceId]))).toString();
+
+  Map<String, dynamic> export(String scope, String sourceId) => {
+    'schema': 1,
+    'scopeKey': key(scope, sourceId),
+    'records': [
+      for (final record in _records.values)
+        {'kind': record.kind.name, 'id': record.id, ..._externalMetadataJson(record.metadata)},
+    ],
+  };
+
+  bool import(String scope, String sourceId, Object? raw) {
+    try {
+      final value = raw is String ? jsonDecode(raw) : raw;
+      if (value is! Map || value['schema'] != 1 || value['scopeKey'] != key(scope, sourceId) ||
+          value['records'] is! List || (value['records'] as List).length > _maximumMetadataRecords ||
+          utf8.encode(jsonEncode(value)).length > _maximumMetadataSnapshotBytes) return false;
+      final parsed = <({ContentKind kind, String id, ExternalMetadata metadata})>[];
+      final keys = <String>{};
+      var parsedBytes = 0;
+      for (final row in value['records'] as List) {
+        if (row is! Map || row['id'] is! String || (row['id'] as String).isEmpty ||
+            (row['id'] as String).length > 1024 || row['kind'] is! String) return false;
+        final kind = ContentKind.values.byName(row['kind'] as String);
+        if (kind == ContentKind.live) return false;
+        final metadata = _externalMetadataFromJson(row);
+        if (metadata == null) return false;
+        final recordKey = jsonEncode([sourceId, kind.name, row['id'], metadata.provider]);
+        if (!keys.add(recordKey)) return false;
+        final size = utf8.encode(jsonEncode(row)).length;
+        if (size > _maximumMetadataCacheBytes) return false;
+        parsedBytes += size;
+        parsed.add((kind: kind, id: row['id'] as String, metadata: metadata));
+      }
+      if (parsedBytes > _maximumMetadataCacheBytes) return false;
+      for (final record in parsed) {
+        write(sourceId, MediaItem(id: record.id, title: '', kind: record.kind), record.metadata);
+      }
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+}
+
+class _WebMetadata {
+  final Source source;
+  final JSFunction transport;
+  late final _WebMetadataCache db = _WebMetadataCache(_ensureCacheIdentityCurrent);
+  MetadataConfig config = const MetadataConfig();
+  List<MetadataProvider> metadataProviders = [];
+  String _language = 'eng';
+  String _configuration = '';
+  int _generation = 0;
+  bool _closed = false;
+
+  _WebMetadata(this.source, this.transport);
+
+  String _currentCacheIdentity() => sha256.convert(utf8.encode(
+      jsonEncode(['web-metadata-cache-v1', source.id, _generation, _configuration]))).toString();
+
+  Future<String?> _cacheIdentityForCurrentCall() async {
+    final expected = Zone.current[#tvMetadataCacheIdentity] as String? ?? _currentCacheIdentity();
+    await _ensureCacheIdentityCurrent(expected);
+    return expected;
+  }
+
+  Future<void> _ensureCacheIdentityCurrent(String? expected) async {
+    if (_closed || expected != null && expected != _currentCacheIdentity()) {
+      throw const LoadCancelledException();
+    }
+  }
+
+  Future<T> withCurrentCacheIdentity<T>(Future<T> Function() action) async {
+    final expected = await _cacheIdentityForCurrentCall();
+    return runZoned(() async {
+      final result = await action();
+      await _ensureCacheIdentityCurrent(expected);
+      return result;
+    }, zoneValues: {#tvMetadataCacheIdentity: expected});
+  }
+
+  Map<String, dynamic> configure(Map<String, dynamic> value, String language) {
+    if (_closed) throw const LoadCancelledException();
+    final next = MetadataConfig.fromJson(value);
+    final code = language == 'pol' || language == 'pl' ? 'pol' : 'eng';
+    final signature = jsonEncode([next.toJson(), code]);
+    if (_configuration != signature) {
+      _generation++;
+      for (final provider in metadataProviders) {
+        try { provider.close(); } catch (_) {}
+      }
+      config = next;
+      _language = code;
+      metadataProviders = runZoned(
+        () => buildMetadataProviders(config, language: _language),
+        zoneValues: {#tvTransport: transport},
+      );
+      _configuration = signature;
+    }
+    return {
+      'configured': config.hasTmdb || config.hasTvdb,
+      'externalLookupsAvailable': metadataProviders.isNotEmpty,
+      'provider': config.preferredVisualProvider,
+      'providers': metadataProviders.map((provider) => provider.provider).toList(),
+      'autoEnrich': config.autoEnrich,
+      'language': _language,
+    };
+  }
+
+  Future<MediaItem> details(MediaItem item, {bool sourceDetailsLoaded = false}) async {
+    var value = item;
+    if (!sourceDetailsLoaded && value.extra['details'] is! Map) {
+      await source.connect();
+      value = await source.mediaDetails(value);
+    }
+    return _applyExternalMetadata(value, action: 'details', includeDetails: true);
+  }
+
+  Future<MediaItem> refresh(MediaItem item, {bool sourceDetailsLoaded = false}) async {
+    var value = item;
+    if (!sourceDetailsLoaded && value.extra['details'] is! Map) {
+      await source.connect();
+      value = await source.mediaDetails(value);
+    }
+    await refreshExternalMetadata(value);
+    return (await _mergeCachedMetadata([value])).first;
+  }
+
+  Future<List<MediaItem>> children(MediaItem parent, List<MediaItem> items, {int limit = 40}) async {
+    final count = limit.clamp(0, 40).toInt();
+    if (count == 0 || items.isEmpty) return items;
+    final prefix = items.take(count).toList();
+    final enriched = await _applyChildExternalMetadata(parent, prefix, action: 'children');
+    return [...enriched, ...items.skip(prefix.length)];
+  }
+
+  Future<List<MediaItem>> enrich(List<MediaItem> items, {int limit = 40}) async {
+    if (!config.autoEnrich) return _mergeCachedMetadata(items);
+    return enrichMediaMetadata(items, limit: limit.clamp(0, 40).toInt());
+  }
+
+  String cacheKey(String scope) {
+    if (scope.isEmpty || scope.length > 2048) throw ArgumentError('Invalid metadata scope');
+    return db.key(scope, source.id);
+  }
+
+  Map<String, dynamic> exportMetadata(String scope) => db.export(scope, source.id);
+
+  bool importMetadata(String scope, Object? snapshot) => !_closed && db.import(scope, source.id, snapshot);
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _generation++;
+    for (final provider in metadataProviders) {
+      try { provider.close(); } catch (_) {}
+    }
+    metadataProviders = [];
+  }
+
+  void _logMetadata(String _) {}
+
+  // __LIBRARY_REPOSITORY_METADATA_METHODS__
+}

@@ -1,0 +1,495 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../data/app_database.dart';
+import '../data/diagnostics_log.dart';
+import '../data/library_repository.dart';
+import '../data/load_token.dart';
+import '../data/net.dart';
+import '../l10n/app_localizations.dart';
+import '../sources/source.dart';
+import '../widgets/routed_focus_node.dart';
+
+/// Pseudo-category id for the "Favorites" view (live and media). Not a provider
+/// category — it loads the full "All" set and is filtered client-side.
+const kFavoritesCategoryId = '__favorites__';
+
+/// Pseudo-category id for the cross-source ("All sources") live Favorites view.
+///
+/// Unlike [kFavoritesCategoryId] this is **not** a filter over the loaded
+/// catalog: its rows come from the cache across every configured source
+/// (`GlobalFavoritesController`), so it lists channels the active source has
+/// never heard of. Live only — movies/series stay per-source.
+const kAllSourcesFavoritesCategoryId = '__favorites_all__';
+
+/// Cap on how many items an automatic (post-load) metadata enrichment pass
+/// touches, so a large catalog doesn't fan out into a huge burst of API calls.
+const _autoEnrichLimit = 40;
+
+/// One "Continue watching" rail entry: the cached item + its saved position.
+class ContinueWatchingEntry {
+  final MediaItem item;
+  final PlaybackPosition position;
+
+  /// For an episode, the series it belongs to — the name the rail actually
+  /// leads with, because [item]'s own title is the *episode* name and a rail of
+  /// those reads as a list of unrelated titles.
+  ///
+  /// Null for movies (where the item title is already the right one) and for an
+  /// episode whose season or series row isn't cached, which the view falls back
+  /// from rather than showing a blank.
+  final String? seriesTitle;
+
+  const ContinueWatchingEntry({
+    required this.item,
+    required this.position,
+    this.seriesTitle,
+  });
+
+  /// The name to lead with: the series for an episode, the item otherwise.
+  String get displayTitle => seriesTitle ?? item.title;
+}
+
+/// Owns one media tab's (movies *or* series) browsing state and the async
+/// operations that mutate it — load, paging, search, and metadata enrichment —
+/// as a [ChangeNotifier] so the view rebuilds via `ListenableBuilder` instead of
+/// a `setState` on the whole screen. Pure derivations (visible-item filtering,
+/// the status line, the category list) stay in the screen, which reads these
+/// fields; navigation, favorites, and the search text box also stay there.
+///
+/// Both controllers (movie, series) live for the screen's lifetime, so their
+/// state survives switching tabs — the behaviour the old kind-keyed maps had.
+class MediaTabController extends ChangeNotifier {
+  final ContentKind kind;
+  final LibraryRepository repo;
+
+  /// Surfaces an enrichment failure to the user (the screen shows a snackbar);
+  /// only used for the explicit "refresh displayed metadata" action.
+  final void Function(String message)? onEnrichError;
+
+  MediaTabController({
+    required this.kind,
+    required this.repo,
+    this.onEnrichError,
+  }) : firstFocusNode = RoutedFocusNode('media.${kind.name}.first'),
+       scrollController = ScrollController();
+
+  /// Loaded page(s) for the current category (drives paging / "load more").
+  MediaLibrarySnapshot? snapshot;
+
+  /// Selected category id, or [kFavoritesCategoryId], or null for "All".
+  String? categoryId;
+
+  bool loading = false;
+  bool loadingMore = false;
+  bool searching = false;
+  bool enriching = false;
+  String? error;
+  ({int done, int total})? enrichmentProgress;
+
+  /// Provider search results (flat, non-paged) and the query they answer.
+  List<MediaItem> searchResults = const [];
+  String? searchQuery;
+
+  /// Last item played from this tab; autofocused on return when still visible.
+  String? lastPlayedId;
+
+  /// First-item focus node (the D-pad "home" of the grid) and the grid's own
+  /// scroll controller — per-tab so scroll position is independent.
+  final FocusNode firstFocusNode;
+  final ScrollController scrollController;
+
+  int _enrichGeneration = 0;
+  int _loadGeneration = 0;
+  int _continueWatchingGeneration = 0;
+  String? _pendingSearch;
+  bool _disposed = false;
+  LoadToken? _loadToken;
+
+  void _set(VoidCallback fn) {
+    if (_disposed) return;
+    fn();
+    notifyListeners();
+  }
+
+  /// The real category to fetch — the Favorites pseudo-category isn't a provider
+  /// category, so it loads the full "All" set and is filtered client-side.
+  String? get _loadCategory =>
+      categoryId == kFavoritesCategoryId ? null : categoryId;
+
+  /// "Continue watching" entries for this tab, newest first: in-progress
+  /// movies on the movie tab, in-progress episodes on the series tab.
+  List<ContinueWatchingEntry> continueWatching = const [];
+
+  /// Which position kind this tab resumes (episodes drive the series tab).
+  ContentKind get _resumeKind =>
+      kind == ContentKind.movie ? ContentKind.movie : ContentKind.episode;
+
+  /// Rebuild [continueWatching] from the saved positions, resolving ids
+  /// against the cached media items (unknown ids — e.g. items whose category
+  /// was never cached — are skipped rather than shown title-less).
+  Future<void> loadContinueWatching() async {
+    final generation = ++_continueWatchingGeneration;
+    final positions = await repo.db.readRecentPositions(repo.source.id);
+    if (_disposed || generation != _continueWatchingGeneration) return;
+    final wanted = positions.where((p) => p.kind == _resumeKind).toList();
+    if (wanted.isEmpty) {
+      if (continueWatching.isNotEmpty) {
+        _set(() => continueWatching = const []);
+      }
+      return;
+    }
+    final ids = [for (final p in wanted) p.itemId];
+    // Concurrent, not sequential: two independent reads of the same cache, and
+    // this runs on every return from the player.
+    final (items, seriesTitles) = await (
+      repo.db.readMediaItemsByIds(repo.source.id, _resumeKind, ids),
+      _seriesTitles(ids),
+    ).wait;
+    if (_disposed || generation != _continueWatchingGeneration) return;
+    final byId = {for (final item in items) item.id: item};
+    _set(() {
+      continueWatching = [
+        for (final position in wanted)
+          if (byId[position.itemId] case final item?)
+            ContinueWatchingEntry(
+              item: item,
+              position: position,
+              seriesTitle: seriesTitles[position.itemId],
+            ),
+      ];
+    });
+  }
+
+  /// Series names for the rail's episodes, or an empty map.
+  ///
+  /// Only the series tab has ancestors to resolve; the movie tab's item title
+  /// is already the one to show.
+  ///
+  /// **Fails soft**, and separately from the item read it runs beside: this is
+  /// a display nicety, and losing it degrades to the episode title — which is
+  /// what the rail showed before the lookup existed. Letting it throw would
+  /// take the whole rail down (and, through `.wait`, as a `ParallelWaitError`
+  /// that says nothing about which half failed) for a missing label.
+  Future<Map<String, String>> _seriesTitles(List<String> ids) async {
+    if (_resumeKind != ContentKind.episode) return const {};
+    try {
+      return await repo.db.readSeriesTitlesForEpisodes(repo.source.id, ids);
+    } catch (error) {
+      DiagnosticsLog.instance.add(
+        'library',
+        'continue-watching series titles unavailable: ${redactText('$error')}',
+      );
+      return const {};
+    }
+  }
+
+  /// Drops one entry from "Continue watching" — clears its saved resume
+  /// position so it won't reappear, and updates the in-memory list
+  /// immediately rather than waiting on a full [loadContinueWatching] reload.
+  Future<void> removeFromContinueWatching(ContinueWatchingEntry entry) async {
+    // A read started before this removal must not put its old position back.
+    _continueWatchingGeneration++;
+    _set(
+      () => continueWatching = continueWatching
+          .where((e) => e.item.id != entry.item.id)
+          .toList(),
+    );
+    await repo.db.clearPlaybackPosition(
+      repo.source.id,
+      entry.position.kind,
+      entry.item.id,
+    );
+  }
+
+  /// Puts back an entry [removeFromContinueWatching] just dropped, for the
+  /// Undo action on its snackbar.
+  ///
+  /// Removal is otherwise unconfirmed and irreversible — a ~19 px control (now
+  /// a 44 px target) sitting directly under a tile whose tap starts playback —
+  /// so the mis-tap needs a way back. Restoring the row locally as well as the
+  /// DB position keeps the rail identical to what the user was looking at,
+  /// rather than making them wait for the next [loadContinueWatching].
+  Future<void> restoreContinueWatching(ContinueWatchingEntry entry) async {
+    await repo.db.savePlaybackPosition(
+      repo.source.id,
+      entry.position.kind,
+      entry.item.id,
+      position: entry.position.position,
+      duration: entry.position.duration,
+    );
+    await loadContinueWatching();
+  }
+
+  Future<void> load({bool forceRefresh = false}) async {
+    final gen = ++_loadGeneration;
+    // A newer load supersedes any still-running one — cancel its token so it
+    // stops writing to the cache once this one has started.
+    _loadToken?.cancel();
+    final token = LoadToken();
+    _loadToken = token;
+    final categoryToLoad = _loadCategory;
+    _set(() {
+      _cancelEnrich();
+      loading = true;
+      loadingMore = false;
+      searching = false;
+      error = null;
+    });
+    unawaited(loadContinueWatching());
+    try {
+      repo.loadToken = token;
+      final snap = await repo.loadMedia(
+        kind,
+        categoryId: categoryToLoad,
+        forceRefresh: forceRefresh,
+      );
+      if (_disposed || gen != _loadGeneration) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'loaded ${kind.name} source=${repo.source.name} items=${snap.items.length} category=${categoryToLoad ?? '<all>'} force=$forceRefresh cache=${snap.fromCache} pages=${snap.loadedPages}/${snap.totalPages}',
+      );
+      _set(() {
+        snapshot = snap;
+        loading = false;
+      });
+      if (repo.autoEnrichMetadata) {
+        unawaited(_enrich(snap.items, maxItems: _autoEnrichLimit));
+      }
+    } catch (e) {
+      final message = sourceLoadErrorMessage(e);
+      if (_disposed || gen != _loadGeneration) return;
+      // See LiveController.load: the friendly message is a bucket, so the
+      // exception's own text (status + URL) goes in redacted beside it.
+      DiagnosticsLog.instance.add(
+        'library',
+        '${kind.name} source load failed source=${repo.source.name} '
+            'reason=${e.runtimeType} message=$message '
+            'detail=${redactText(e.toString())}',
+      );
+      _set(() {
+        error = message;
+        loading = false;
+      });
+    }
+  }
+
+  Future<void> loadMore() async {
+    if (loadingMore) return;
+    if (loading) return;
+    final gen = _loadGeneration;
+    final categoryToLoad = _loadCategory;
+    final existingIds = {
+      for (final item in snapshot?.items ?? const <MediaItem>[]) item.id,
+    };
+    _set(() {
+      _cancelEnrich();
+      loadingMore = true;
+      error = null;
+    });
+    try {
+      // Subordinate op: reuse the current token rather than minting a new
+      // one — it doesn't bump `_loadGeneration`, so it isn't itself a fresh
+      // dataset load, just an extension of the one already in flight.
+      repo.loadToken = _loadToken;
+      final current = snapshot;
+      final snap = current != null && current.categoryId == categoryToLoad
+          ? await repo.loadMoreMediaFromSnapshot(current)
+          : await repo.loadMoreMedia(kind, categoryId: categoryToLoad);
+      if (_disposed || gen != _loadGeneration) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'load more ${kind.name} source=${repo.source.name} items=${snap.items.length} category=${categoryToLoad ?? '<all>'} pages=${snap.loadedPages}/${snap.totalPages}',
+      );
+      _set(() {
+        snapshot = snap;
+        loadingMore = false;
+      });
+      if (repo.autoEnrichMetadata) {
+        final newlyLoaded = snap.items
+            .where((item) => !existingIds.contains(item.id))
+            .toList();
+        unawaited(_enrich(newlyLoaded, maxItems: _autoEnrichLimit));
+      }
+    } catch (e) {
+      if (_disposed || gen != _loadGeneration) return;
+      _set(() {
+        error = sourceLoadErrorMessage(e);
+        loadingMore = false;
+      });
+    }
+  }
+
+  Future<void> search(String query) async {
+    _pendingSearch = query;
+    final gen = _loadGeneration;
+    final categoryToLoad = _loadCategory;
+    _set(() {
+      _cancelEnrich();
+      searching = true;
+      loadingMore = false;
+      error = null;
+    });
+    try {
+      final results = await repo.searchMedia(
+        kind,
+        query,
+        categoryId: categoryToLoad,
+      );
+      // A newer keystroke superseded this search — drop the stale result.
+      if (_disposed || _pendingSearch != query || gen != _loadGeneration) {
+        return;
+      }
+      DiagnosticsLog.instance.add(
+        'library',
+        'search ${kind.name} source=${repo.source.name} query="$query" results=${results.length} category=${categoryToLoad ?? '<all>'}',
+      );
+      _set(() {
+        searchResults = results;
+        searchQuery = query;
+        searching = false;
+      });
+      if (repo.autoEnrichMetadata) {
+        unawaited(_enrich(results, maxItems: _autoEnrichLimit));
+      }
+    } catch (e) {
+      if (_disposed || _pendingSearch != query || gen != _loadGeneration) {
+        return;
+      }
+      _set(() {
+        error = sourceLoadErrorMessage(e);
+        searching = false;
+      });
+    }
+  }
+
+  /// Clear an active search (query dropped below the 2-char threshold).
+  void clearSearch() {
+    _pendingSearch = null;
+    _set(() {
+      _cancelEnrich();
+      searching = false;
+      searchResults = const [];
+      searchQuery = null;
+    });
+  }
+
+  /// Switch category: reset any search and reload from the provider.
+  Future<void> setCategory(String? value) async {
+    _set(() {
+      categoryId = value;
+      _pendingSearch = null;
+      searchResults = const [];
+      searchQuery = null;
+    });
+    await load();
+  }
+
+  /// If currently viewing Favorites, fall back to "All" (used when the last
+  /// favorite is removed and the view would otherwise be empty/unselectable).
+  void resetFavoritesCategoryToAll() {
+    if (categoryId == kFavoritesCategoryId) {
+      _set(() => categoryId = null);
+    }
+  }
+
+  void setLastPlayed(String id) {
+    lastPlayedId = id; // no rebuild needed; read on next build
+  }
+
+  /// Explicit "refresh displayed metadata" action over the given visible items.
+  Future<void> enrichVisible(List<MediaItem> visible) =>
+      _enrich(visible, showErrors: true);
+
+  void cancelEnrich() => _set(_cancelEnrich);
+
+  void _cancelEnrich() {
+    _enrichGeneration++;
+    enriching = false;
+    enrichmentProgress = null;
+  }
+
+  Future<void> _enrich(
+    List<MediaItem> items, {
+    bool showErrors = false,
+    int? maxItems,
+  }) async {
+    final generation = ++_enrichGeneration;
+    final targets = items
+        .where(
+          (item) =>
+              item.kind == ContentKind.movie ||
+              item.kind == ContentKind.series ||
+              item.kind == ContentKind.episode,
+        )
+        .take(maxItems ?? items.length)
+        .toList();
+    if (targets.isEmpty) return;
+    _set(() {
+      enriching = true;
+      enrichmentProgress = (done: 0, total: targets.length);
+    });
+    var done = 0;
+    try {
+      const chunkSize = 20;
+      for (var start = 0; start < targets.length; start += chunkSize) {
+        if (_enrichGeneration != generation) return;
+        final chunk = targets.skip(start).take(chunkSize).toList();
+        final enriched = await repo.enrichMediaMetadata(chunk);
+        if (_disposed || _enrichGeneration != generation) return;
+        done += chunk.length;
+        final enrichedById = {for (final item in enriched) item.id: item};
+        _set(() {
+          _replaceItems(enrichedById);
+          enrichmentProgress = (done: done, total: targets.length);
+        });
+        await Future<void>.delayed(Duration.zero);
+      }
+      if (_disposed || _enrichGeneration != generation) return;
+      _set(() {
+        enriching = false;
+        enrichmentProgress = null;
+      });
+    } catch (e) {
+      if (_disposed || _enrichGeneration != generation) return;
+      _set(() => enriching = false);
+      if (showErrors) {
+        onEnrichError?.call(
+          tr('Metadata enrichment failed. {message}', {
+            'message': sourceLoadErrorMessage(e),
+          }),
+        );
+      }
+    }
+  }
+
+  /// Replace items in place across the loaded snapshot and search results (used
+  /// by enrichment and after opening an item fetches fuller details).
+  void replaceItems(Map<String, MediaItem> replacements) =>
+      _set(() => _replaceItems(replacements));
+
+  void _replaceItems(Map<String, MediaItem> replacements) {
+    if (replacements.isEmpty) return;
+    final snap = snapshot;
+    if (snap != null) {
+      snapshot = snap.copyWith(
+        items: [for (final item in snap.items) replacements[item.id] ?? item],
+      );
+    }
+    if (searchResults.isNotEmpty) {
+      searchResults = [
+        for (final item in searchResults) replacements[item.id] ?? item,
+      ];
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _loadToken?.cancel();
+    firstFocusNode.dispose();
+    scrollController.dispose();
+    super.dispose();
+  }
+}

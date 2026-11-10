@@ -1,0 +1,6 @@
+/dist/
+/output/
+/.buildResult/
+**/.buildResult/
+*.wgt
+*.ipk

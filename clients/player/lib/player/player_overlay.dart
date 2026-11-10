@@ -1,0 +1,3464 @@
+import 'dart:async';
+import 'dart:io' show Platform;
+import 'dart:math' as math;
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+
+import '../sources/source.dart';
+import '../l10n/app_localizations.dart';
+import '../theme.dart';
+import '../widgets/image_utils.dart';
+import 'dvr_controls.dart';
+import 'playback_backend.dart';
+import 'seek_controller.dart';
+import 'zap_command.dart';
+import 'zap_quick_list.dart';
+
+/// The narrow slice of a media_kit [Player] the embedded overlay reads and
+/// drives. Extracted as an interface purely so the overlay can be widget-tested
+/// without a real libmpv engine (constructing a [Player] needs libmpv, which is
+/// absent under plain `flutter test`): production wraps the real [Player] in
+/// [PlayerBackedEmbeddedControls], tests supply a stub. Keeps the same
+/// `.stream`/`.state` accessor shape the widget already used, so the body is
+/// unchanged beyond the field rename.
+abstract class EmbeddedControls {
+  PlayerStream get stream;
+  PlayerState get state;
+  Future<void> setVolume(double volume);
+  Future<void> seek(Duration to);
+  Future<void> setRate(double rate);
+  Future<void> setAudioTrack(AudioTrack track);
+  Future<void> setSubtitleTrack(SubtitleTrack track);
+}
+
+/// Production [EmbeddedControls] backed by a real media_kit [Player].
+class PlayerBackedEmbeddedControls implements EmbeddedControls {
+  const PlayerBackedEmbeddedControls(this._player);
+  final Player _player;
+
+  @override
+  PlayerStream get stream => _player.stream;
+  @override
+  PlayerState get state => _player.state;
+  @override
+  Future<void> setVolume(double volume) => _player.setVolume(volume);
+  @override
+  Future<void> seek(Duration to) => _player.seek(to);
+  @override
+  Future<void> setRate(double rate) => _player.setRate(rate);
+  @override
+  Future<void> setAudioTrack(AudioTrack track) => _player.setAudioTrack(track);
+  @override
+  Future<void> setSubtitleTrack(SubtitleTrack track) =>
+      _player.setSubtitleTrack(track);
+}
+
+/// Presentation payload for the in-player live-zapping banner (Phase 3 — the
+/// shared Flutter overlay's own render of it; see docs/player.md "Live
+/// zapping"). Pure and dependency-free — no [LiveZapController], no
+/// `SourceConfig` — so this file and its widget tests stay libmpv-free and the
+/// zap controller stays the only thing that reasons about the launch range.
+///
+/// Deliberately the **cursor's** presentation, not the playing channel's:
+/// [epgNow]/[epgNext] come from `LiveZapController.cursorEpg`, which is what
+/// lets a held key's banner show where it has got to before anything actually
+/// resolves — the bottom bar beside it keeps showing the channel actually on
+/// screen. Mirrors Kotlin's `PlayerUiState` zap fields
+/// (`ZAP_BANNER_VISIBLE_MS`, `channelIdentityLabel`, `showsChannelIdentity`).
+@immutable
+class ZapBannerState {
+  const ZapBannerState({
+    required this.revision,
+    required this.channelNumber,
+    required this.channelName,
+    this.logoUrl,
+    this.digits = '',
+    this.message,
+    required this.position,
+    required this.total,
+    this.epgNow,
+    this.epgNext,
+  });
+
+  /// Bumped on every cursor move/digit/message — `LiveZapController
+  /// .bannerRevision`, the Dart mirror of Kotlin's `zapBannerAtMs`. The
+  /// overlay restarts its dwell timer whenever this changes, so a held key
+  /// keeps the banner up instead of letting an earlier press's timer run out.
+  final int revision;
+
+  /// The cursor channel's provider number, when it has one.
+  final int? channelNumber;
+  final String channelName;
+
+  /// The cursor channel's logo, when the provider gave one. Never itself
+  /// decides whether the identity row renders — see [showsIdentity].
+  final String? logoUrl;
+
+  /// Half-typed channel number, shown as a digit readout. `''` when none.
+  final String digits;
+
+  /// A transient note ("No channel 123", a failed zap).
+  final String? message;
+
+  /// 1-based cursor position in the zap range, and its size. `0`/`0` when
+  /// unknown (e.g. a one-entry degraded range).
+  final int position;
+  final int total;
+
+  /// The **cursor's** now/next pair — `LiveZapController.cursorEpg`, never the
+  /// playing channel's `epg`.
+  final Programme? epgNow;
+  final Programme? epgNext;
+
+  /// `12 · BBC One`, or just the name when the provider gave no number, or
+  /// null when there is no name at all to show. Mirrors Kotlin's
+  /// `channelIdentityLabel()`.
+  String? get identityLabel {
+    final name = channelName.trim();
+    if (name.isEmpty) return null;
+    final number = channelNumber;
+    return number != null ? '$number · $name' : name;
+  }
+
+  /// Whether the identity run says something the ordinary title/bottom bar
+  /// doesn't already: a channel number, a half-typed number, or a transient
+  /// note. Mirrors Kotlin's `showsChannelIdentity`.
+  bool get showsIdentity =>
+      channelNumber != null || digits.isNotEmpty || message != null;
+
+  /// Whether this banner state outlives the plain dwell timer: a half-typed
+  /// number and a transient note are mid-interaction states, so hiding them
+  /// on the ordinary timer would take the feedback away while the user is
+  /// still typing (or still reading why a zap failed). Mirrors the extra
+  /// clause in Kotlin's `showZapBanner`.
+  bool get outlivesTimer => digits.isNotEmpty || message != null;
+}
+
+/// Embedded media_kit presentation. Playback lifecycle and platform handoff
+/// stay in [PlayerScreen]; this widget only describes the visible controls.
+class PlayerVideoSurface extends StatefulWidget {
+  final Player player;
+  final VideoController? controller;
+  final String title;
+  final String? sourceName;
+  final Programme? epgNow;
+  final Programme? epgNext;
+  final bool isLive;
+  final bool canFavorite;
+  final bool favorite;
+  final bool liveSynced;
+  final DvrControls dvr;
+  final VoidCallback? onStartTimeshift;
+  final VoidCallback? onToggleRecording;
+  final ValueChanged<Duration>? onDvrSeek;
+  final VoidCallback? onPlaybackSettings;
+  final List<MediaItem> episodes;
+  final String? currentEpisodeId;
+  final ValueChanged<MediaItem>? onSelectEpisode;
+
+  /// In-player live-zapping banner state (Phase 3), or null on any route that
+  /// doesn't zap (VOD, catch-up, a live open with no zap range). See
+  /// [ZapBannerState].
+  final ZapBannerState? zap;
+
+  /// The in-player quick list (Phase 6), or null on any route that doesn't
+  /// zap. See [ZapQuickListState].
+  final ZapQuickListState? quickList;
+
+  /// Whether this route has a zap session at all — i.e. whether the quick
+  /// list can be opened. Drives the control row's quick-list button, which is
+  /// the only way a mouse or a finger can reach the list.
+  final bool zapEnabled;
+
+  /// Sends `zap:list` (open the quick list). Null off a zapping route.
+  final VoidCallback? onOpenQuickList;
+
+  /// Pointer/touch input for the same quick-list commands the route's keys use.
+  final ValueChanged<ZapCommand>? onQuickListCommand;
+
+  /// Label of the aspect mode playback is *currently* in ("Fit"/"Fill"/"16:9"/
+  /// "4:3"). Rendered as the aspect control's text, exactly as all four native
+  /// overlays do — Dart owns the mode sequence (`PlayerScreen._aspectModes`),
+  /// so this overlay showing a bare icon left it the only surface that hid the
+  /// state it is itself the source of truth for.
+  final String aspectLabel;
+
+  /// How the embedded surface frames the picture for the current aspect mode.
+  ///
+  /// The embedded path is composited by **Flutter**, not by mpv: `media_kit`'s
+  /// `Video` draws the texture with a `BoxFit`, so the mpv `panscan`/
+  /// `keepaspect` properties that frame the *native* surfaces do not reach it.
+  /// Both come off the same `_AspectMode`, so the two surfaces — which swap on
+  /// one machine depending only on whether the stream is HDR — cannot end up
+  /// framing differently.
+  final BoxFit videoFit;
+
+  /// Maps colorimetry to the badge/info label. Injected by [PlayerScreen]
+  /// (its `_dynamicRangeLabel`, which folds in the async HDR10+ probe) so the
+  /// label logic stays single-sourced in `dynamicRangeLabelFrom` — this file
+  /// can't import player_screen.dart without a cycle.
+  final String Function(VideoParams params) dynamicRangeLabel;
+  final VoidCallback onBack;
+  final VoidCallback onToggleFavorite;
+  final Future<void> Function() onPlayPause;
+  final ValueChanged<Duration>? onSeekBy;
+  final ValueChanged<Duration>? onSeek;
+  final Future<void> Function() onGoLive;
+  final Future<void> Function() onCycleAspect;
+
+  /// Overrides [PlayerVideoSurfaceState.togglePlayerFullscreen] for the
+  /// on-screen button and the pointer double-tap.
+  ///
+  /// `media_kit_video`'s `toggleFullscreen` drives its own window handling,
+  /// which does nothing under this app's custom Windows runner — so the button
+  /// was dead on the whole Windows SDR preview→fullscreen path while still
+  /// advertising itself. [PlayerScreen] supplies a handler that goes through
+  /// the runner's own `setFullscreen` channel there, and leaves this null
+  /// wherever the embedded toggle is the right one.
+  final VoidCallback? onRequestFullscreen;
+
+  const PlayerVideoSurface({
+    super.key,
+    this.onRequestFullscreen,
+    required this.player,
+    required this.controller,
+    required this.title,
+    required this.sourceName,
+    required this.epgNow,
+    required this.epgNext,
+    required this.isLive,
+    required this.canFavorite,
+    required this.favorite,
+    required this.liveSynced,
+    this.dvr = const DvrControls(),
+    this.onStartTimeshift,
+    this.onToggleRecording,
+    this.onDvrSeek,
+    this.onPlaybackSettings,
+    this.episodes = const [],
+    this.currentEpisodeId,
+    this.onSelectEpisode,
+    this.zap,
+    this.quickList,
+    this.zapEnabled = false,
+    this.onOpenQuickList,
+    this.onQuickListCommand,
+    required this.aspectLabel,
+    required this.videoFit,
+    required this.dynamicRangeLabel,
+    required this.onBack,
+    required this.onToggleFavorite,
+    required this.onPlayPause,
+    this.onSeekBy,
+    this.onSeek,
+    required this.onGoLive,
+    required this.onCycleAspect,
+  });
+
+  @override
+  State<PlayerVideoSurface> createState() => PlayerVideoSurfaceState();
+}
+
+class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
+  VideoState? _videoState;
+  late final EmbeddedControls _controls = PlayerBackedEmbeddedControls(
+    widget.player,
+  );
+  final GlobalKey<EmbeddedPlayerControlsState> _controlsKey = GlobalKey();
+
+  void togglePlayerFullscreen() {
+    final override = widget.onRequestFullscreen;
+    if (override != null) {
+      override();
+      return;
+    }
+    final state = _videoState;
+    if (state != null && state.mounted) {
+      unawaited(toggleFullscreen(state.context));
+    }
+  }
+
+  /// Single-press Back/Escape peel for the embedded overlay, called by
+  /// [PlayerScreen]'s Escape binding: one rung per press — info panel, then
+  /// visible chrome — returning true while it still has something to peel, so
+  /// the exit only happens once there's nothing left. See
+  /// [EmbeddedPlayerControlsState.handleBackPeel]. No-op (false) on the
+  /// non-desktop default-controls path where the overlay isn't mounted.
+  bool handleBackPeel() => _controlsKey.currentState?.handleBackPeel() ?? false;
+
+  /// Brings the chrome back on **any** input, called by every one of
+  /// [PlayerScreen]'s keyboard bindings.
+  ///
+  /// Without this a keyboard-only user could strand the overlay hidden: the
+  /// chrome auto-hides after 4 s, Space then pauses, and `_scheduleHide` bails
+  /// on `!playing` — so nothing was left that could set `_visible` back to
+  /// true except a mouse hover or a tap. Arrow-key seeking was invisible for
+  /// the same reason. Every other overlay in the app (Android, Windows GDI,
+  /// the Linux Lua OSD) already reveals on any key; this brings the embedded
+  /// path in line. No-op where the overlay isn't mounted.
+  void revealChrome() => _controlsKey.currentState?.revealChrome();
+
+  bool handleTvKey(LogicalKeyboardKey key) =>
+      PlaybackBackend.usesCustomSurface(widget.player) &&
+      (_controlsKey.currentState?.handleTvKey(key) ?? false);
+
+  /// Whether the overlay's bars are currently on screen.
+  ///
+  /// Read by [PlayerScreen]'s key map to decide who owns the arrow keys on a
+  /// live stream: with the chrome **hidden** they zap channels, with it
+  /// visible they stay volume / control traversal. False where the overlay
+  /// isn't mounted, which is the conservative answer — an unmounted overlay
+  /// has no controls to navigate.
+  bool get chromeVisible => _controlsKey.currentState?.chromeVisible ?? false;
+
+  // Keyboard counterparts of the overlay's own buttons. These exist so the
+  // embedded surface answers the same keys as the Linux native mpv/Lua OSD:
+  // `m`/`i`/`s`/volume were bound there and nowhere here, so on Linux the same
+  // physical key did different things depending on whether the stream happened
+  // to be HDR-on-Wayland (native) or anything else (embedded).
+  void toggleMute() => _controlsKey.currentState?.toggleMute();
+  void adjustVolume(double delta) =>
+      _controlsKey.currentState?.adjustVolume(delta);
+  void toggleInfo() => _controlsKey.currentState?.toggleInfo();
+  Future<String?> showPlaybackSettings({
+    List<Map<String, String>> options = const [],
+  }) async => _controlsKey.currentState?.showPlaybackSettings(options: options);
+  void toggleOverlayFavorite() => _controlsKey.currentState?.toggleFavorite();
+
+  @override
+  Widget build(BuildContext context) {
+    final customVideo = PlaybackBackend.buildVideo(
+      widget.player,
+      fit: widget.videoFit,
+    );
+    if (customVideo != null) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [customVideo, _buildEmbeddedControls(fullscreenToggle: false)],
+      );
+    }
+    // Embedded surfaces that get the full-featured Flutter overlay, so they
+    // stay at parity with the native Windows GDI / Android Compose / iOS UIKit
+    // overlays:
+    //  * Linux — always (the embedded path is the default fullscreen path).
+    //  * Windows — the SDR preview→fullscreen handoff, where the native HWND
+    //    path is skipped.
+    //  * iOS — the **mpv engine** path (`selectIosEngine`). That is not a rare
+    //    fallback: an extension-less Stalker/MAG `create_link` locator routes
+    //    to mpv by rule, so for a Stalker user this overlay *is* the player.
+    //    media_kit's stock Material controls were wrong there twice over — they
+    //    ignore `isLive` and expose the HLS live window as a scrubbable
+    //    duration, violating "Live = no seek bar", and they carry none of the
+    //    app's chrome (EPG, badges, go-to-live, favorite, track menus).
+    // Android keeps media_kit's default Material controls: its embedded surface
+    // is a true fallback (only reached when `HdrPlayerActivity` can't launch)
+    // and it must stay usable from an Android TV D-pad, which this overlay's
+    // Material sliders/menus are not built for.
+    //
+    // [touch] tunes the overlay for a finger instead of a pointer — see the
+    // flag's doc on [EmbeddedPlayerControls].
+    if (Platform.isLinux || Platform.isWindows || Platform.isIOS) {
+      return Video(
+        controller: widget.controller!,
+        fit: widget.videoFit,
+        controls: (state) {
+          _videoState = state;
+          return _buildEmbeddedControls();
+        },
+      );
+    }
+    return MaterialDesktopVideoControlsTheme(
+      normal: _desktopTheme(),
+      fullscreen: _desktopTheme(),
+      child: MaterialVideoControlsTheme(
+        normal: _mobileTheme(),
+        fullscreen: _mobileTheme(),
+        child: Video(controller: widget.controller!, fit: widget.videoFit),
+      ),
+    );
+  }
+
+  Widget _buildEmbeddedControls({bool fullscreenToggle = true}) =>
+      EmbeddedPlayerControls(
+        key: _controlsKey,
+        controls: _controls,
+        touch: Platform.isIOS,
+        fullscreenToggle: fullscreenToggle,
+        title: widget.title,
+        sourceName: widget.sourceName,
+        epgNow: widget.epgNow,
+        epgNext: widget.epgNext,
+        isLive: widget.isLive,
+        canFavorite: widget.canFavorite,
+        favorite: widget.favorite,
+        liveSynced: widget.liveSynced,
+        dvr: widget.dvr,
+        onStartTimeshift: widget.onStartTimeshift,
+        onToggleRecording: widget.onToggleRecording,
+        onDvrSeek: widget.onDvrSeek,
+        onPlaybackSettings: widget.onPlaybackSettings,
+        episodes: widget.episodes,
+        currentEpisodeId: widget.currentEpisodeId,
+        onSelectEpisode: widget.onSelectEpisode,
+        zap: widget.zap,
+        quickList: widget.quickList,
+        zapEnabled: widget.zapEnabled,
+        onOpenQuickList: widget.onOpenQuickList,
+        onQuickListCommand: widget.onQuickListCommand,
+        aspectLabel: widget.aspectLabel,
+        dynamicRangeLabel: widget.dynamicRangeLabel,
+        onBack: widget.onBack,
+        onToggleFavorite: widget.onToggleFavorite,
+        onPlayPause: widget.onPlayPause,
+        onSeekBy: widget.onSeekBy,
+        onSeek: widget.onSeek,
+        onGoLive: widget.onGoLive,
+        onCycleAspect: widget.onCycleAspect,
+        onToggleFullscreen: togglePlayerFullscreen,
+      );
+
+  MaterialDesktopVideoControlsThemeData _desktopTheme() {
+    return MaterialDesktopVideoControlsThemeData(
+      seekBarThumbColor: AppColors.accent,
+      seekBarPositionColor: AppColors.accent,
+      toggleFullscreenOnDoublePress: true,
+      displaySeekBar: !widget.isLive,
+      topButtonBar: _topBar(desktop: true),
+      bottomButtonBar: [
+        const MaterialDesktopPlayOrPauseButton(),
+        const MaterialDesktopVolumeButton(),
+        if (!widget.isLive) const MaterialDesktopPositionIndicator(),
+        const Spacer(),
+        const MaterialDesktopFullscreenButton(),
+      ],
+    );
+  }
+
+  MaterialVideoControlsThemeData _mobileTheme() {
+    return MaterialVideoControlsThemeData(
+      seekBarThumbColor: AppColors.accent,
+      seekBarPositionColor: AppColors.accent,
+      buttonBarButtonColor: Colors.white,
+      backdropColor: Colors.black.withValues(alpha: 0.20),
+      displaySeekBar: !widget.isLive,
+      automaticallyImplySkipNextButton: false,
+      automaticallyImplySkipPreviousButton: false,
+      topButtonBar: _topBar(desktop: false),
+    );
+  }
+
+  List<Widget> _topBar({required bool desktop}) => [
+    desktop
+        ? MaterialDesktopCustomButton(
+            onPressed: widget.onBack,
+            icon: const Icon(Icons.arrow_back),
+          )
+        : MaterialCustomButton(
+            onPressed: widget.onBack,
+            icon: const Icon(Icons.arrow_back),
+          ),
+    const SizedBox(width: 8),
+    Flexible(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            widget.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (widget.epgNow case final now?)
+            Text(
+              _programmeLine(now, widget.epgNext),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            ),
+        ],
+      ),
+    ),
+    if (widget.isLive) ...[const SizedBox(width: 10), const _LiveBadge()],
+    const Spacer(),
+    if (widget.canFavorite) ...[
+      const SizedBox(width: 8),
+      desktop
+          ? MaterialDesktopCustomButton(
+              onPressed: widget.onToggleFavorite,
+              icon: _favoriteIcon(),
+            )
+          : MaterialCustomButton(
+              onPressed: widget.onToggleFavorite,
+              icon: _favoriteIcon(),
+            ),
+    ],
+  ];
+
+  Widget _favoriteIcon() => Icon(
+    widget.favorite ? Icons.star_rounded : Icons.star_outline_rounded,
+    color: widget.favorite ? AppColors.accent : Colors.white,
+  );
+
+  static String _hm(DateTime time) =>
+      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+
+  static String _programmeLine(Programme now, Programme? next) {
+    final current = '${_hm(now.start)} – ${_hm(now.stop)} · ${now.title}';
+    if (next == null) return current;
+    return '$current  •  ${tr('Next')} ${_hm(next.start)} – ${_hm(next.stop)} · ${next.title}';
+  }
+}
+
+/// Full-featured Flutter overlay for the embedded media_kit surface, shared by
+/// Linux (X11 and Wayland) and the Windows SDR preview→fullscreen handoff (which
+/// stays on the embedded texture rather than the native HWND). It drives the
+/// shared media_kit [Player] directly — no platform native bridge — while
+/// exposing the same controls and stream information as the Windows native GDI
+/// overlay, so the two Windows paths stay at parity.
+/// Public only so it can be widget-tested directly with a stub
+/// [EmbeddedControls] (no libmpv engine); in the app it is built solely by
+/// [PlayerVideoSurface].
+class EmbeddedPlayerControls extends StatefulWidget {
+  const EmbeddedPlayerControls({
+    super.key,
+    required this.controls,
+    required this.title,
+    required this.sourceName,
+    required this.epgNow,
+    required this.epgNext,
+    required this.isLive,
+    required this.canFavorite,
+    required this.favorite,
+    required this.liveSynced,
+    this.dvr = const DvrControls(),
+    this.onStartTimeshift,
+    this.onToggleRecording,
+    this.onDvrSeek,
+    this.onPlaybackSettings,
+    this.episodes = const [],
+    this.currentEpisodeId,
+    this.onSelectEpisode,
+    this.zap,
+    this.quickList,
+    this.zapEnabled = false,
+    this.onOpenQuickList,
+    this.onQuickListCommand,
+    required this.aspectLabel,
+    required this.dynamicRangeLabel,
+    required this.onBack,
+    required this.onToggleFavorite,
+    required this.onPlayPause,
+    this.onSeekBy,
+    this.onSeek,
+    required this.onGoLive,
+    required this.onCycleAspect,
+    required this.onToggleFullscreen,
+    this.touch = false,
+    this.fullscreenToggle = true,
+  });
+
+  final EmbeddedControls controls;
+  final String title;
+  final String? sourceName;
+  final Programme? epgNow;
+  final Programme? epgNext;
+  final bool isLive;
+  final bool canFavorite;
+  final bool favorite;
+  final bool liveSynced;
+  final DvrControls dvr;
+  final VoidCallback? onStartTimeshift;
+  final VoidCallback? onToggleRecording;
+  final ValueChanged<Duration>? onDvrSeek;
+  final VoidCallback? onPlaybackSettings;
+
+  /// Ordered siblings of the current series episode. Films/live have none.
+  final List<MediaItem> episodes;
+  final String? currentEpisodeId;
+  final ValueChanged<MediaItem>? onSelectEpisode;
+
+  /// In-player live-zapping banner state (Phase 3), or null on any route that
+  /// doesn't zap. See [ZapBannerState].
+  final ZapBannerState? zap;
+
+  /// The in-player quick list (Phase 6), or null on any route that doesn't
+  /// zap. See [ZapQuickListState].
+  final ZapQuickListState? quickList;
+
+  /// Whether this route can open the quick list — see
+  /// [PlayerVideoSurface.zapEnabled]. The button is drawn only when this and
+  /// [isLive] are both true and [onOpenQuickList] is wired.
+  final bool zapEnabled;
+
+  /// Sends `zap:list`. See [PlayerVideoSurface.onOpenQuickList].
+  final VoidCallback? onOpenQuickList;
+
+  /// Keeps pointer/touch selection on the route's existing zap command path.
+  final ValueChanged<ZapCommand>? onQuickListCommand;
+
+  /// Current aspect mode label — see [PlayerVideoSurface.aspectLabel].
+  final String aspectLabel;
+  final String Function(VideoParams params) dynamicRangeLabel;
+  final VoidCallback onBack;
+  final VoidCallback onToggleFavorite;
+  final Future<void> Function() onPlayPause;
+  final ValueChanged<Duration>? onSeekBy;
+  final ValueChanged<Duration>? onSeek;
+  final Future<void> Function() onGoLive;
+  final Future<void> Function() onCycleAspect;
+
+  /// Enters/exits fullscreen. Injected (rather than calling media_kit's
+  /// `toggleFullscreen(context)` inline) so the double-tap and fullscreen-button
+  /// behavior is exercisable in a widget test without a `Video` ancestor.
+  ///
+  /// Unused when [touch] is set — the route is already fullscreen there.
+  /// Touch double taps seek through VOD instead (see [touch]).
+  final VoidCallback onToggleFullscreen;
+
+  /// TV video is already fullscreen; it has no desktop window to toggle.
+  final bool fullscreenToggle;
+
+  /// Tunes the overlay for a **finger** rather than a mouse pointer. False
+  /// everywhere but iOS, so Linux/Windows keep their existing pointer behavior
+  /// byte-for-byte; every difference below is additive and gated on this flag.
+  ///
+  /// Four things change, each to agree with the native iOS
+  /// `IptvsPlayerViewController` this overlay now sits beside (the two are
+  /// reached by different *streams* on the same device — AVPlayer vs mpv — so a
+  /// user can meet both in one session and they must not behave differently):
+  ///
+  ///  1. **Tap is the Back ladder.** With no hardware Back and no hover, touch
+  ///     is the ladder's input (docs/tv-navigation.md, Back-ladder section):
+  ///     a tap peels the info panel, else *hides* visible chrome, else reveals
+  ///     it. That is Swift's `playerTapAction` — `nextPlayerBackAction` with the
+  ///     terminal rung swapped from exit to show — reproduced here. On a pointer
+  ///     platform a tap only ever *shows* (hover already handles reveal, and
+  ///     hiding out from under the cursor is wrong), which is why this is gated.
+  ///     The explicit control still exits outright, skipping the ladder, exactly
+  ///     as the back arrow does on Windows/Linux and the **X** does on native
+  ///     iOS — it takes that platform's glyph and label here.
+  ///  2. **No fullscreen affordance.** The Flutter route *is* fullscreen on iOS;
+  ///     media_kit's `toggleFullscreen` would push a second route with its own
+  ///     `Video`, above the one [PlayerScreen] owns. The native controller has
+  ///     no fullscreen button either. A double tap on either side seeks VOD by
+  ///     ten seconds; live retains immediate single-tap show/hide behavior.
+  ///  3. **≥44pt hit targets** (Apple HIG) in *both* axes, instead of the 44×40
+  ///     / 34×32 chips sized for a cursor. 44 is a floor, not a target: the
+  ///     roomy metrics sit at 48 and the dense ones (item 5) sit exactly on 44,
+  ///     never below.
+  ///  4. **Responsive controls.** Below [kTouchReflowWidth] the badges move
+  ///     under the title and the volume/utility row below the centered
+  ///     transport. The bottom controls also split when their visible buttons
+  ///     would overlap the centered play/seek/episode group at wider sizes.
+  ///     [kCompactControlsWidth] independently collapses optional volume and
+  ///     Go to live labels.
+  ///  5. **Dense vertical metrics below [kShortOverlayHeight]** — a phone in
+  ///     landscape is 320–440pt tall, and the desktop-sized paddings left it
+  ///     with 49pt of visible video. Padding and icon sizes shrink; the control
+  ///     set does not change and the VOD seek slider (the one real drag target)
+  ///     keeps its height. See [EmbeddedOverlayMetrics].
+  ///  6. **The info panel is banded between the two bars** rather than placed
+  ///     at a hard-coded offset, and scrolls when the card cannot fit. See
+  ///     [_infoPanel].
+  ///  7. **Dynamic Type is clamped** to [kTouchMaxTextScale] — the native
+  ///     controller ignores it outright, and unclamped it overflows the chrome
+  ///     column on a landscape phone.
+  ///
+  /// Auto-hide timing is deliberately *not* varied: this overlay's flat 4s sits
+  /// between the native controller's 3.5s (VOD) and 4.5s (live), and a shared
+  /// widget diverging by half a second buys nothing.
+  final bool touch;
+
+  @override
+  State<EmbeddedPlayerControls> createState() => EmbeddedPlayerControlsState();
+}
+
+// ---------------------------------------------------------------------------
+// Badge labels
+//
+// The top-bar badges are the same six facts on every surface, so they are
+// formatted by the same rules everywhere: Kotlin `PlayerUiState.resolutionBadge`
+// /`hdrBadge`/`fpsBadge`/`sourceBadge`, Swift `BadgeFormatting`, the Windows GDI
+// `ResolutionBadge`/`HdrBadge`/`FormatFps`/`TruncateBadge`, and these. This
+// overlay used to format them its own way — `3840×2160` where every native says
+// `4K`, `50.00 FPS` where they say `50fps`, the *full* dynamic-range label
+// (including a bare `SDR` badge no native shows) where they show a compact
+// `HDR10`/`DV` or nothing — which, on Windows, meant the SDR and HDR surfaces of
+// the same channel disagreed about what the picture was.
+//
+// Public and pure so they can be tested directly (`test/player_overlay_test.dart`).
+// ---------------------------------------------------------------------------
+
+/// `4K`/`1440p`/`1080p`/`720p`/`SD`, or null when the size isn't known yet.
+/// The thresholds are deliberately loose (a 1088-tall stream is still 1080p).
+String? resolutionBadgeLabel({int? width, int? height}) {
+  if (width == null || height == null || width <= 0 || height <= 0) return null;
+  if (height >= 2000 || width >= 3500) return '4K';
+  if (height >= 1400 || width >= 2400) return '1440p';
+  if (height >= 1000 || width >= 1800) return '1080p';
+  if (height >= 700 || width >= 1200) return '720p';
+  return 'SD';
+}
+
+/// Compact HDR badge from an already-formatted dynamic-range label
+/// (`dynamicRangeLabelFrom`), or null when the stream is SDR/unknown — no
+/// overlay in the app badges "SDR", it simply says nothing.
+String? hdrBadgeLabel(String dynamicRange) {
+  if (dynamicRange.toLowerCase().contains('dolby')) return 'DV';
+  if (dynamicRange.contains('HDR10+')) return 'HDR10+';
+  if (dynamicRange.contains('HDR10')) return 'HDR10';
+  if (dynamicRange.contains('HLG')) return 'HLG';
+  if (dynamicRange.startsWith('HDR')) return 'HDR';
+  return null;
+}
+
+/// `50fps` / `23.976fps`, or null when the rate isn't known.
+String? fpsBadgeLabel(double? fps) =>
+    fps == null || fps <= 0 ? null : '${trimmedDecimal(fps)}fps';
+
+/// A number the way every player label in this repo renders one: rounded to 3
+/// decimals, then stripped of trailing zeros (`25`, `23.976`, `0.75`).
+String trimmedDecimal(double value) {
+  final rounded = (value * 1000).round() / 1000;
+  if (rounded == rounded.truncateToDouble()) return rounded.toInt().toString();
+  var text = rounded.toStringAsFixed(3);
+  while (text.endsWith('0')) {
+    text = text.substring(0, text.length - 1);
+  }
+  return text.endsWith('.') ? text.substring(0, text.length - 1) : text;
+}
+
+/// Source name, truncated so a long provider label can't crowd the bar; null
+/// when blank.
+String? sourceBadgeLabel(String? name) {
+  final trimmed = name?.trim() ?? '';
+  if (trimmed.isEmpty) return null;
+  return trimmed.length > 20 ? '${trimmed.substring(0, 19)}…' : trimmed;
+}
+
+/// The clock badge. Pointer surfaces (Windows/Linux) carry the **dated** form
+/// their native counterparts do (GDI `%a %d %b · %H:%M`, Android TV's
+/// `EEE d MMM · HH:mm`); the touch surface stays bare `HH:mm`, matching the iOS
+/// controller's `playerClockHm`. Weekday/month names are hand-rolled English
+/// rather than localized — the C-locale `wcsftime` the GDI overlay uses prints
+/// exactly these, and parity with the surface next door is the point.
+String playerClockLabel(DateTime now, {required bool dated}) {
+  final hm =
+      '${now.hour.toString().padLeft(2, '0')}:'
+      '${now.minute.toString().padLeft(2, '0')}';
+  if (!dated) return hm;
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  // Unpadded day ("Sat 8 Aug"), matching Kotlin's `EEE d MMM · HH:mm` — checked
+  // against the Compose overlay on an Android TV emulator, which is also why
+  // the GDI overlay's `%d` became `%#d`.
+  return '${tr(days[now.weekday - 1])} ${now.day} ${tr(months[now.month - 1])} · $hm';
+}
+
+/// Width below which the control row can no longer carry its optional pieces:
+/// the volume slider collapses to the mute button and "Go to live" drops its
+/// text label. Applies on **both** paths, and is measured against the bar's
+/// *inner* constraints (inside its padding), which is where it has always been
+/// evaluated — deriving it from the surface size instead would shift the
+/// effective collapse point by the bar's 32–40pt of padding.
+///
+/// This is a *feature-collapse* threshold, not a reflow one. The touch reflow
+/// has its own, narrower [kTouchReflowWidth].
+const double kCompactControlsWidth = 720;
+
+/// Width below which the touch layout reflows onto two rows: the badges get
+/// their own row under the title, and the button cluster its own row under the
+/// transport.
+///
+/// Deliberately equal to the native iOS overlay's `PlayerDimens.compactWidth`
+/// (`PlayerControlsView.applyCompactLayout`), because the two overlays are
+/// reached by different *streams* on the same device — AVPlayer vs mpv — and a
+/// user who meets both in one session must not see them reflow at different
+/// widths. This used to reuse [kCompactControlsWidth]'s 720, which reflowed a
+/// 667×375 phone in landscape (iPhone SE/8 class) that the native overlay keeps
+/// on one row: stacking rows is exactly the wrong answer on the *shortest*
+/// surface the app targets, and it left 49pt of visible video.
+const double kTouchReflowWidth = 560;
+
+/// Upper bound on text scaling inside the touch overlay chrome.
+///
+/// The native `IptvsPlayerViewController` sizes every label with a fixed
+/// `UIFont.systemFont(ofSize:)` — no `UIFontMetrics`, no `preferredFont` — so it
+/// ignores Dynamic Type outright. A user meets both overlays on one device
+/// (AVPlayer vs mpv on the same channel), so the Flutter one growing to 2× while
+/// the native one stays put is itself a parity break, on top of being a layout
+/// one: at 2× the two bars alone exceed a 375–393pt-tall landscape phone and the
+/// chrome column overflows.
+///
+/// 1.3 rather than 1.0 deliberately keeps *some* of the accessibility benefit —
+/// it is the largest bound at which the worst real surface (667×375, VOD, full
+/// control set) still fits — instead of matching native's total refusal to
+/// scale. The chrome is icons and short badges; the readable content here is the
+/// video.
+///
+/// Pointer platforms are untouched: they have no Dynamic Type equivalent driving
+/// this, and their windows are never short enough for it to bind.
+const double kTouchMaxTextScale = 1.3;
+
+/// Height below which the touch layout switches to its dense vertical metrics.
+///
+/// Separates "phone in landscape" (320–440pt tall across the whole iPhone
+/// range) from everything else: the shortest iPhone *portrait* height is 568
+/// and iPad landscape is 768/834, so an iPad in landscape correctly keeps the
+/// roomy metrics. Density is purely vertical — it never changes which controls
+/// exist, and never takes a hit target below Apple's 44pt floor.
+const double kShortOverlayHeight = 500;
+
+/// The vertical metrics the overlay chrome is laid out with, resolved once per
+/// build from the surface size and [EmbeddedPlayerControls.touch].
+///
+/// Exists so the *pointer* path is size-invariant **by construction** rather
+/// than by inspection: `EmbeddedOverlayMetrics.of(anySize, touch: false)`
+/// returns one fixed token set at every size, so a regression that leaks a
+/// touch-only metric onto Linux/Windows is a failing pure test rather than
+/// something a reviewer has to catch by eye. It also mirrors the native
+/// overlay's model — a `PlayerDimens` token table plus one `isCompact`
+/// decision — so the two layouts can be compared by reading two tables.
+@immutable
+class EmbeddedOverlayMetrics {
+  const EmbeddedOverlayMetrics._({
+    required this.reflow,
+    required this.dense,
+    required this.topPadTop,
+    required this.topPadBottom,
+    required this.badgeGap,
+    required this.epgGap,
+    required this.bottomPadTop,
+    required this.bottomPadBottom,
+    required this.buttonWidth,
+    required this.buttonHeight,
+    required this.buttonCompactWidth,
+    required this.buttonCompactHeight,
+    required this.buttonIcon,
+    required this.buttonCompactIcon,
+    required this.infoPanelWidth,
+    required this.infoPanelPad,
+    required this.infoRowPad,
+  });
+
+  /// Resolves the metrics for a surface. [touch] is the only thing that can
+  /// make the result size-dependent: with it false, every size maps to the same
+  /// instance-equal token set (the pointer path's shipped values).
+  factory EmbeddedOverlayMetrics.of(Size surface, {required bool touch}) {
+    if (!touch) return _pointer;
+    final dense = surface.height < kShortOverlayHeight;
+    return EmbeddedOverlayMetrics._(
+      reflow: surface.width < kTouchReflowWidth,
+      dense: dense,
+      topPadTop: dense ? 6 : 12,
+      topPadBottom: dense ? 10 : 28,
+      badgeGap: dense ? 4 : 8,
+      // The live EPG strip's internal gaps (title row / progress / next). 6 is
+      // the value all three native overlays use (Compose `Spacer(6.dp)`, the
+      // iOS `epgStrip` stack spacing, the GDI strip's 30/46px row offsets);
+      // dense shaves it for a landscape phone, where the strip now costs three
+      // rows instead of one.
+      epgGap: dense ? 4 : 6,
+      bottomPadTop: dense ? 14 : 36,
+      bottomPadBottom: dense ? 8 : 14,
+      // A finger needs Apple's 44pt minimum in *both* axes. 44 is the floor,
+      // not a target: the roomy mode sits above it and dense sits exactly on
+      // it, so no touch control is ever smaller than a fingertip.
+      buttonWidth: dense ? 44 : 48,
+      buttonHeight: dense ? 44 : 48,
+      buttonCompactWidth: 44,
+      buttonCompactHeight: 44,
+      buttonIcon: dense ? 20 : 22,
+      buttonCompactIcon: dense ? 18 : 20,
+      // Matches the native `PlayerDimens.infoPanelWidth`.
+      infoPanelWidth: 260,
+      infoPanelPad: dense ? 14 : 18,
+      infoRowPad: dense ? 2 : 4,
+    );
+  }
+
+  /// The pointer path's metrics: the values Linux and Windows have shipped,
+  /// returned for every surface size.
+  static const _pointer = EmbeddedOverlayMetrics._(
+    reflow: false,
+    dense: false,
+    topPadTop: 12,
+    topPadBottom: 28,
+    badgeGap: 8,
+    epgGap: 6,
+    bottomPadTop: 36,
+    bottomPadBottom: 14,
+    // Deliberately shorter than they are wide — fine for a cursor, and not for
+    // a thumb, which is what [EmbeddedOverlayMetrics.of] overrides under touch.
+    buttonWidth: 44,
+    buttonHeight: 40,
+    buttonCompactWidth: 34,
+    buttonCompactHeight: 32,
+    buttonIcon: 20,
+    buttonCompactIcon: 18,
+    infoPanelWidth: 320,
+    infoPanelPad: 18,
+    infoRowPad: 4,
+  );
+
+  /// Two-row reflow (badges under the title, cluster under the transport).
+  /// Always false on the pointer path.
+  final bool reflow;
+
+  /// Dense vertical metrics for a short (landscape-phone) surface. Always false
+  /// on the pointer path.
+  final bool dense;
+
+  final double topPadTop;
+  final double topPadBottom;
+  final double badgeGap;
+
+  /// Vertical gap between the live EPG strip's three rows (title+range,
+  /// programme progress, "Next ·"). See [_liveEpgStrip].
+  final double epgGap;
+  final double bottomPadTop;
+  final double bottomPadBottom;
+  final double buttonWidth;
+  final double buttonHeight;
+  final double buttonCompactWidth;
+  final double buttonCompactHeight;
+  final double buttonIcon;
+  final double buttonCompactIcon;
+  final double infoPanelWidth;
+  final double infoPanelPad;
+  final double infoRowPad;
+
+  @override
+  bool operator ==(Object other) =>
+      other is EmbeddedOverlayMetrics &&
+      other.reflow == reflow &&
+      other.dense == dense &&
+      other.topPadTop == topPadTop &&
+      other.topPadBottom == topPadBottom &&
+      other.badgeGap == badgeGap &&
+      other.epgGap == epgGap &&
+      other.bottomPadTop == bottomPadTop &&
+      other.bottomPadBottom == bottomPadBottom &&
+      other.buttonWidth == buttonWidth &&
+      other.buttonHeight == buttonHeight &&
+      other.buttonCompactWidth == buttonCompactWidth &&
+      other.buttonCompactHeight == buttonCompactHeight &&
+      other.buttonIcon == buttonIcon &&
+      other.buttonCompactIcon == buttonCompactIcon &&
+      other.infoPanelWidth == infoPanelWidth &&
+      other.infoPanelPad == infoPanelPad &&
+      other.infoRowPad == infoRowPad;
+
+  @override
+  int get hashCode => Object.hash(
+    reflow,
+    dense,
+    topPadTop,
+    topPadBottom,
+    badgeGap,
+    epgGap,
+    bottomPadTop,
+    bottomPadBottom,
+    buttonWidth,
+    buttonHeight,
+    buttonCompactWidth,
+    buttonCompactHeight,
+    buttonIcon,
+    buttonCompactIcon,
+    infoPanelWidth,
+    infoPanelPad,
+    infoRowPad,
+  );
+}
+
+class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
+  final _tvFocusScope = FocusScopeNode(debugLabel: 'TV player controls');
+  final _tvPlayFocus = FocusNode(debugLabel: 'TV play pause');
+  double? _dvrDragFraction;
+  Timer? _hideTimer;
+  Timer? _clockTimer;
+  StreamSubscription<bool>? _playingSub;
+  StreamSubscription<Duration>? _seekPositionSub;
+  late final PlaybackSeekController _seeks = PlaybackSeekController(
+    position: () => widget.controls.state.position,
+    duration: () => widget.controls.state.duration,
+    seek: (target) => widget.controls.seek(target),
+  );
+  StreamSubscription<Tracks>? _tracksSub;
+  StreamSubscription<Track>? _trackSub;
+  StreamSubscription<VideoParams>? _paramsSub;
+  bool _visible = true;
+  bool _showInfo = false;
+
+  /// How long the zap banner stays up after a press, before it fades — the
+  /// Dart mirror of Kotlin's `ZAP_BANNER_VISIBLE_MS`.
+  static const kZapBannerVisible = Duration(seconds: 3);
+
+  Timer? _zapTimer;
+
+  /// Whether the banner's own dwell timer is currently up. Distinct from
+  /// [ZapBannerState.outlivesTimer]: a plain cursor move (a channel number,
+  /// nothing typed) is only visible while this is true, whereas a half-typed
+  /// digit buffer or a transient message stays up regardless (see
+  /// `EmbeddedPlayerControlsState._zapBannerVisible`).
+  bool _zapBannerUp = false;
+
+  /// True while a track/subtitle/speed `PopupMenuButton` route is open.
+  ///
+  /// Cancelling the timer in `_show(keep: true)` is not enough on its own:
+  /// `_playingSub` re-arms one on the next `playing` edge, which a live stream
+  /// produces routinely. Without this flag the bars would be pulled out from
+  /// under an open menu — and because the bars are removed from the tree when
+  /// `_visible` goes false, `PopupMenuButton`'s `showMenu(...).then` guards on
+  /// `mounted` and drops the result: the user's track selection would be
+  /// silently discarded. See [_scheduleHide].
+  bool _menuOpen = false;
+
+  /// Drives the quick list's own scroll — the selection model scrolls itself
+  /// (`index * itemExtent`), it never relies on a row being focusable.
+  final ScrollController _quickListScroll = ScrollController();
+
+  /// Resolved at the top of every [build] and read by the layout helpers below,
+  /// rather than threaded through eight signatures. Size-invariant (and equal
+  /// to the shipped pointer values) whenever `widget.touch` is false.
+  EmbeddedOverlayMetrics _m = EmbeddedOverlayMetrics._pointer;
+
+  bool get _quickListOpen => widget.isLive && (widget.quickList?.open ?? false);
+  int get _episodeIndex => widget.episodes.indexWhere(
+    (episode) => episode.id == widget.currentEpisodeId,
+  );
+  bool get _hasEpisodes =>
+      !widget.isLive && widget.onSelectEpisode != null && _episodeIndex >= 0;
+  double _doubleTapX = 0;
+  double _verticalDragDistance = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _visible = !_quickListOpen;
+    _seekPositionSub = widget.controls.stream.position.listen(_seeks.confirm);
+    _playingSub = widget.controls.stream.playing.listen((_) {
+      if (mounted) setState(() {});
+      _scheduleHide();
+    });
+    _tracksSub = widget.controls.stream.tracks.listen((_) => _refresh());
+    _trackSub = widget.controls.stream.track.listen((_) => _refresh());
+    _paramsSub = widget.controls.stream.videoParams.listen((_) => _refresh());
+    _clockTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _refresh(),
+    );
+    _scheduleHide();
+    if (widget.zap != null) _armZapBanner();
+    if (_quickListOpen) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _revealQuickListRow(),
+      );
+    }
+  }
+
+  @override
+  void didUpdateWidget(EmbeddedPlayerControls oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.currentEpisodeId != oldWidget.currentEpisodeId) _seeks.reset();
+    final zap = widget.zap;
+    // Keyed on `revision`, not identity: `LiveZapController.bannerRevision` is
+    // bumped on every cursor move/digit/message (`_notify`), so a held key
+    // produces a new revision on every press and restarts the dwell timer —
+    // the Dart mirror of Kotlin's `LaunchedEffect(state.zapBannerAtMs)`.
+    if (zap != null &&
+        (oldWidget.zap == null || oldWidget.zap!.revision != zap.revision)) {
+      _armZapBanner();
+    }
+    final list = widget.quickList;
+    if (_quickListOpen && list != oldWidget.quickList) {
+      // The list owns the surface until it closes. A hover/key reveal must
+      // not put transport controls above the cursor or return focus to them.
+      _hideNow();
+      _showInfo = false;
+      // After this frame: the `ListView` may have no clients yet on the frame
+      // the list opens on.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _revealQuickListRow(),
+      );
+    }
+  }
+
+  /// (Re)starts the banner's own dwell timer, deliberately **not** through
+  /// [appMotion] — that helper returns [Duration.zero] under the "remove
+  /// animations" accessibility flag, which would make the banner vanish
+  /// before it could ever be read. Only the *fade* (the [AnimatedOpacity] in
+  /// [_zapBanner]) goes through [appMotion]; how long the banner stays up is
+  /// a dwell time, not a transition, and must survive that setting intact.
+  void _armZapBanner() {
+    _zapTimer?.cancel();
+    if (mounted) setState(() => _zapBannerUp = true);
+    _zapTimer = Timer(kZapBannerVisible, () {
+      _zapTimer = null;
+      if (mounted) setState(() => _zapBannerUp = false);
+    });
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  void _show({bool keep = false}) {
+    if (_quickListOpen) return;
+    if (!_visible && mounted) setState(() => _visible = true);
+    // `keep` must *cancel*, not merely skip re-arming. `_scheduleHide` owns the
+    // only other `_hideTimer.cancel()`, so skipping it left an already-armed
+    // timer running — open a menu one second after the chrome appeared and the
+    // bars still vanished three seconds later, taking the open menu's own
+    // button out of the tree with them. `PopupMenuButton` guards its result
+    // callback on `mounted`, so that dropped the selection *and* left
+    // `_menuOpen` pinned true, after which the overlay never auto-hid again.
+    if (keep) {
+      _hideTimer?.cancel();
+      return;
+    }
+    _scheduleHide();
+  }
+
+  /// Public counterpart of [_show] for [PlayerVideoSurfaceState.revealChrome] —
+  /// see its doc for why any keyboard input has to reach here.
+  void revealChrome() => _show();
+
+  /// Route-level TV shortcuts yield to the existing focused Material control.
+  bool handleTvKey(LogicalKeyboardKey key) {
+    if (widget.fullscreenToggle ||
+        _quickListOpen ||
+        _menuOpen ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return false;
+    }
+    final activate =
+        key == LogicalKeyboardKey.select || key == LogicalKeyboardKey.enter;
+    final direction = switch (key) {
+      LogicalKeyboardKey.arrowLeft => TraversalDirection.left,
+      LogicalKeyboardKey.arrowRight => TraversalDirection.right,
+      LogicalKeyboardKey.arrowUp => TraversalDirection.up,
+      LogicalKeyboardKey.arrowDown => TraversalDirection.down,
+      _ => null,
+    };
+    if (!activate && direction == null) return false;
+    final focused = FocusManager.instance.primaryFocus;
+    if (!_visible ||
+        !_tvFocusScope.hasFocus ||
+        focused is FocusScopeNode ||
+        focused?.context == null) {
+      _show(keep: true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_quickListOpen && _visible) _tvPlayFocus.requestFocus();
+      });
+      return true;
+    }
+    _show(keep: true);
+    Actions.maybeInvoke(
+      focused!.context!,
+      activate ? const ActivateIntent() : DirectionalFocusIntent(direction!),
+    );
+    return true;
+  }
+
+  /// Whether the bars are on screen — see
+  /// [PlayerVideoSurfaceState.chromeVisible].
+  bool get chromeVisible => _visible && !_quickListOpen;
+
+  /// Mute/unmute — the keyboard counterpart of the volume button.
+  void toggleMute() {
+    final volume = widget.controls.state.volume;
+    unawaited(widget.controls.setVolume(volume > 0 ? 0 : 100));
+    _show();
+  }
+
+  /// Nudge the volume by [delta] (media_kit's scale is 0–100).
+  void adjustVolume(double delta) {
+    final volume = (widget.controls.state.volume + delta).clamp(0.0, 100.0);
+    unawaited(widget.controls.setVolume(volume));
+    _show();
+  }
+
+  /// Open/close the info panel.
+  void toggleInfo() {
+    if (_quickListOpen) return;
+    setState(() => _showInfo = !_showInfo);
+    _show();
+  }
+
+  /// Toggle the favorite star, when this stream can be favorited at all.
+  void toggleFavorite() {
+    if (!widget.canFavorite) return;
+    widget.onToggleFavorite();
+    _show();
+  }
+
+  void _onMenuOpened() {
+    _menuOpen = true;
+    _show(keep: true);
+  }
+
+  void _onMenuClosed() {
+    _menuOpen = false;
+    _scheduleHide();
+  }
+
+  void _scheduleHide() {
+    _hideTimer?.cancel();
+    // `_menuOpen` matters because `_playingSub` calls this on *every* `playing`
+    // transition, including the buffering→playing edge a live stream produces
+    // routinely — so an open track/subtitle/speed menu would otherwise have
+    // the bars yanked out from under it 4 s later. Android pins via
+    // `state.pinned`, iOS via `AutoHidePolicy.shouldSchedule(pinned:)` and the
+    // Lua OSD via `not open_menu`; this overlay was the only one that didn't.
+    if (_quickListOpen ||
+        !widget.controls.state.playing ||
+        _showInfo ||
+        _menuOpen) {
+      return;
+    }
+    _hideTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _visible = false);
+    });
+  }
+
+  /// One rung of the Back/Escape ladder, returning true when it had something
+  /// to peel (so the press is consumed instead of exiting the player).
+  ///
+  /// The ladder is the app-wide one — **menu → info → hide chrome → exit**
+  /// (docs/tv-navigation.md), the same table Kotlin's
+  /// `nextPlayerBackAction`, the Windows GDI overlay and the Lua OSD's
+  /// `handle_back` answer. This used to peel the info panel *only*, so on the
+  /// one surface Windows SDR live actually uses, Escape with the chrome up
+  /// skipped straight out to the channel list — two rungs at once.
+  ///
+  /// The modal `PopupMenuButton` menus aren't a rung this method can see: they
+  /// are routes with their own barrier, so Escape is answered by the menu
+  /// route (which pops itself) and never reaches [PlayerScreen]'s binding at
+  /// all. That is the menu rung, just owned by the Navigator.
+  ///
+  /// The on-screen back arrow deliberately skips the ladder and exits outright
+  /// — as it does on every other surface.
+  bool handleBackPeel() {
+    if (_quickListOpen) {
+      widget.onQuickListCommand?.call(const ZapCommand(ZapCommandKind.back));
+      return true;
+    }
+    if (_showInfo) {
+      setState(() => _showInfo = false);
+      _scheduleHide();
+      return true;
+    }
+    if (_visible) {
+      _hideNow();
+      return true;
+    }
+    return false;
+  }
+
+  void _hideNow() {
+    _hideTimer?.cancel();
+    if (_visible && mounted) setState(() => _visible = false);
+  }
+
+  /// One tap on the scrim / exposed video area.
+  ///
+  /// Under [EmbeddedPlayerControls.touch] this is the iOS Back ladder, and it
+  /// is deliberately the same table as Swift's `playerTapAction`
+  /// (`PlayerBackPolicy.swift`): info panel first, then hide visible chrome,
+  /// else reveal it. (The list menus are modal `PopupMenuButton` routes whose
+  /// own barrier eats the outside tap, so they self-close on the same single
+  /// press — they are the ladder's first rung in effect, just not one this
+  /// handler ever sees.) A desktop click toggles playback after dismissing
+  /// any open panel; TV controls keep their reveal-only surface tap.
+  void _handleSurfaceTap() {
+    if (_quickListOpen) {
+      widget.onQuickListCommand?.call(
+        const ZapCommand(ZapCommandKind.closeList),
+      );
+      return;
+    }
+    if (_showInfo) {
+      handleBackPeel();
+      return;
+    }
+    if (widget.touch && _visible) {
+      _hideNow();
+      return;
+    }
+    if (!widget.touch && widget.fullscreenToggle) {
+      unawaited(widget.onPlayPause());
+    }
+    _show();
+  }
+
+  void _seekBy(Duration delta) {
+    final callback = widget.onSeekBy;
+    if (callback != null) {
+      callback(delta);
+    } else {
+      _seeks.relative(delta);
+    }
+    _show();
+  }
+
+  void _seekTo(Duration target) {
+    final callback = widget.onSeek;
+    if (callback != null) {
+      callback(target);
+    } else {
+      _seeks.absolute(target);
+    }
+  }
+
+  Widget _surfaceGestures() => LayoutBuilder(
+    builder: (context, constraints) {
+      final touchSeek = widget.touch && !widget.isLive && !_quickListOpen;
+      final episodeSwipe = widget.touch && _hasEpisodes && !_quickListOpen;
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _handleSurfaceTap,
+        onDoubleTapDown: touchSeek
+            ? (details) => _doubleTapX = details.localPosition.dx
+            : null,
+        onDoubleTap: _quickListOpen
+            ? null
+            : touchSeek
+            ? () => _seekBy(
+                Duration(
+                  seconds: _doubleTapX < constraints.maxWidth / 2 ? -10 : 10,
+                ),
+              )
+            : widget.touch || !widget.fullscreenToggle
+            ? null
+            : widget.onToggleFullscreen,
+        onVerticalDragStart: episodeSwipe
+            ? (_) => _verticalDragDistance = 0
+            : null,
+        onVerticalDragUpdate: episodeSwipe
+            ? (details) => _verticalDragDistance += details.delta.dy
+            : null,
+        onVerticalDragEnd: episodeSwipe
+            ? (_) {
+                if (_verticalDragDistance < -48) unawaited(_openEpisodes());
+              }
+            : null,
+      );
+    },
+  );
+
+  Future<void> _openEpisodes() async {
+    if (!_hasEpisodes || _menuOpen) return;
+    final size = MediaQuery.sizeOf(context);
+    final cardWidth = _m.dense ? 156.0 : 176.0;
+    final scroll = ScrollController(
+      initialScrollOffset: math.max(
+        0.0,
+        _episodeIndex * cardWidth - size.width / 2 + cardWidth / 2,
+      ),
+    );
+    _onMenuOpened();
+    final selected = await showModalBottomSheet<MediaItem>(
+      context: context,
+      backgroundColor: AppColors.panel,
+      constraints: BoxConstraints(maxWidth: size.width),
+      builder: (sheetContext) => MediaQuery.withClampedTextScaling(
+        maxScaleFactor: kTouchMaxTextScale,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            key: const ValueKey('episode-strip'),
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        tr('Episodes'),
+                        style: const TextStyle(
+                          color: AppColors.textHi,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: tr('Close episodes'),
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                SizedBox(
+                  height: _m.dense ? 108 : 130,
+                  child: ListView.builder(
+                    controller: scroll,
+                    scrollDirection: Axis.horizontal,
+                    itemExtent: cardWidth,
+                    itemCount: widget.episodes.length,
+                    itemBuilder: (context, index) {
+                      final episode = widget.episodes[index];
+                      final current = episode.id == widget.currentEpisodeId;
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Semantics(
+                          selected: current,
+                          button: true,
+                          child: Material(
+                            color: current
+                                ? AppColors.accent.withValues(alpha: 0.22)
+                                : Colors.black26,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                              side: BorderSide(
+                                color: current
+                                    ? AppColors.accent
+                                    : Colors.white12,
+                              ),
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: InkWell(
+                              onTap: () => Navigator.pop(sheetContext, episode),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Expanded(child: _episodeImage(episode)),
+                                  Padding(
+                                    padding: const EdgeInsets.all(8),
+                                    child: Text(
+                                      episode.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: AppColors.textHi,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    scroll.dispose();
+    if (!mounted) return;
+    _onMenuClosed();
+    if (selected != null && selected.id != widget.currentEpisodeId) {
+      widget.onSelectEpisode?.call(selected);
+    }
+  }
+
+  Widget _episodeImage(MediaItem episode) {
+    final image = episode.backdrop ?? episode.poster;
+    const fallback = Center(
+      child: Icon(Icons.play_circle_outline, color: AppColors.textLo),
+    );
+    if (image == null || image.isEmpty) return fallback;
+    return CachedNetworkImage(
+      imageUrl: image,
+      fit: BoxFit.cover,
+      placeholder: (_, _) => fallback,
+      errorWidget: (_, url, error) => fallback,
+    );
+  }
+
+  @override
+  void dispose() {
+    _tvPlayFocus.dispose();
+    _tvFocusScope.dispose();
+    _hideTimer?.cancel();
+    _clockTimer?.cancel();
+    _zapTimer?.cancel();
+    _quickListScroll.dispose();
+    _playingSub?.cancel();
+    _seekPositionSub?.cancel();
+    _seeks.dispose();
+    _tracksSub?.cancel();
+    _trackSub?.cancel();
+    _paramsSub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _m = EmbeddedOverlayMetrics.of(
+      MediaQuery.sizeOf(context),
+      touch: widget.touch,
+    );
+    final overlay = _buildOverlay(context);
+    if (!widget.fullscreenToggle) {
+      return FocusScope(node: _tvFocusScope, child: overlay);
+    }
+    // Bound Dynamic Type inside the chrome — see [kTouchMaxTextScale]. Applied
+    // here (above the whole subtree) rather than per-label so nothing can be
+    // added later that escapes it. No-op on the pointer path.
+    return widget.touch
+        ? MediaQuery.withClampedTextScaling(
+            maxScaleFactor: kTouchMaxTextScale,
+            child: overlay,
+          )
+        : overlay;
+  }
+
+  Widget _buildOverlay(BuildContext context) {
+    return MouseRegion(
+      cursor: _visible || _quickListOpen
+          ? SystemMouseCursors.basic
+          : SystemMouseCursors.none,
+      onHover: (_) => _show(),
+      child: Stack(
+        children: [
+          // Tap-to-pause / double-tap-fullscreen lives on a background layer
+          // *behind* the bars, not as an ancestor of them. A double-tap
+          // recognizer holds the gesture arena for kDoubleTapTimeout (~300ms)
+          // on every tap it can see; when it wrapped the whole overlay it
+          // sat in the arena for every control press too, delaying each one
+          // by that timeout and making the overlay feel heavy. As a sibling
+          // below the bars it only sees taps on the exposed video area, so
+          // button/menu taps resolve immediately.
+          Positioned.fill(child: _surfaceGestures()),
+          // The pointer path keeps its two independently-`Positioned` bars and
+          // the fixed-offset info panel — the tree Linux and Windows ship.
+          // Touch replaces all three with one full-height column, so the panel
+          // is banded between the bars by construction (see [_touchChrome]).
+          _zapBanner(),
+          if (!_quickListOpen)
+            if (!widget.touch) ...[
+              if (_visible) ...[_topBar(), _bottomBar(context)],
+              if (_showInfo) _infoPanel(),
+            ] else
+              _touchChrome(context),
+          _quickListPanel(context),
+        ],
+      ),
+    );
+  }
+
+  /// The touch chrome: top bar, a flexible band, bottom bar — top to bottom in
+  /// one column.
+  ///
+  /// The band exists to hold the info panel. Placing the panel at a hard-coded
+  /// `top:` offset meant duplicating the top bar's height as a literal, which
+  /// was wrong by ~74pt the moment the badges reflowed onto their own row (it
+  /// opened *inside* the bar), and it had no lower bound at all, so on a
+  /// landscape phone the card ran straight through the bottom bar. Banding it
+  /// between the two bars mirrors the native overlay's
+  /// `infoPanel.top == topBar.bottom + 12` / `bottom <= bottomBar.top - 12` and
+  /// cannot drift when either bar changes height.
+  ///
+  /// Where this deliberately diverges from native: the card scrolls instead of
+  /// being allowed to overlap. UIKit resolves the same squeeze by lowering the
+  /// constraint priority, because it has no scroll fallback there; on a 375pt
+  /// landscape phone the full card genuinely cannot fit, and scrolling is the
+  /// better answer.
+  ///
+  /// The band must **not** absorb taps: `Column`, `Align` and an empty
+  /// `SizedBox` all decline to hit-test their empty area, so a press between
+  /// the bars still reaches the background gesture layer and drives the Back
+  /// ladder (docs/tv-navigation.md). Do not wrap it in anything opaque.
+  Widget _touchChrome(BuildContext context) => Positioned.fill(
+    child: Column(
+      // Tight width for the children, matching what `Positioned(left: 0,
+      // right: 0)` gave the bars — the default (`center`) would let each bar
+      // shrink to its intrinsic width and strand its gradient mid-screen.
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_visible) _topBarBody(),
+        Expanded(
+          child: _showInfo
+              ? Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    0,
+                    12,
+                    20 + _barInsets.right,
+                    12,
+                  ),
+                  child: Align(
+                    alignment: Alignment.topRight,
+                    // Keeps the card's natural height while it fits, scrolls
+                    // once it doesn't.
+                    child: SingleChildScrollView(child: _infoPanelCard()),
+                  ),
+                )
+              : const SizedBox.expand(),
+        ),
+        if (_visible) _bottomBarBody(context),
+      ],
+    ),
+  );
+
+  /// System-bar/cutout insets for the overlay chrome.
+  ///
+  /// This overlay is the Android *fallback* path (used when `HdrPlayerActivity`
+  /// can't be launched), and it renders in the ordinary Flutter window, which
+  /// under edge-to-edge enforcement is **not** immersive — nothing here calls
+  /// `SystemChrome.setEnabledSystemUIMode`, so the status and navigation bars
+  /// genuinely sit over the video. Without this the Back button hides under the
+  /// status bar and the scrubber under the navigation bar. Zero on desktop.
+  EdgeInsets get _barInsets => MediaQuery.paddingOf(context);
+
+  /// Under [EmbeddedPlayerControls.touch], makes a bar swallow taps that miss
+  /// its controls.
+  ///
+  /// The bars are `Container`s, which don't hit-test themselves, so a tap on
+  /// the gradient between two buttons falls through to the background layer —
+  /// harmless while that layer only ever *shows* the chrome, but under the touch
+  /// ladder it would hide everything the user was reaching for. UIKit's bars
+  /// absorb by default, so this is also what keeps the two iOS overlays
+  /// agreeing. Left untouched on pointer platforms, where that fall-through is
+  /// also what carries double-tap-to-fullscreen over the bars.
+  Widget _absorbChromeTaps(Widget bar) => widget.touch
+      ? GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _show,
+          child: bar,
+        )
+      : bar;
+
+  // Both bars keep their gradient full-bleed (it has to reach the screen edge to
+  // stay readable over video) and inset only their content — the same split the
+  // native Compose overlay uses.
+  //
+  // The pointer path anchors each bar with its own `Positioned`; the touch path
+  // stacks the same two bodies in a column (see [_touchChrome]). Only the
+  // wrapper differs — the bodies below are shared verbatim.
+  Widget _topBar() =>
+      Positioned(left: 0, right: 0, top: 0, child: _topBarBody());
+
+  Widget _topBarBody() => _absorbChromeTaps(
+    Container(
+      padding: EdgeInsets.fromLTRB(
+        16 + _barInsets.left,
+        _m.topPadTop + _barInsets.top,
+        16 + _barInsets.right,
+        _m.topPadBottom,
+      ),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xB3000000), Color(0x00000000)],
+        ),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // On a narrow touch surface the badges can't share the row with the
+          // title: capped at 0.55 of a ~390pt bar they leave the title ~30pt.
+          // Give them their own row instead — the same reparenting the native
+          // iOS overlay's `applyCompactLayout` does with its
+          // `compactBadgeRow`, and at the same width, so the two agree. The
+          // two halves of that reflow move together: see [_m].reflow.
+          final stackBadges = _m.reflow;
+          final titleRow = Row(
+            children: [
+              _button(
+                // The explicit exit control takes the host platform's glyph:
+                // an X on iOS, matching the native controller's `xmark`
+                // (docs/tv-navigation.md). Same role either way — it skips
+                // the ladder and exits outright.
+                widget.touch ? Icons.close : Icons.arrow_back,
+                widget.touch ? tr('Exit') : tr('Back'),
+                widget.onBack,
+              ),
+              const SizedBox(width: 8),
+              // Title only — the programme lives in the bottom bar's EPG strip
+              // ([_liveEpgStrip]), exactly as all three native overlays lay it
+              // out. This used to carry a second, compacted "HH:mm – HH:mm ·
+              // now • Next …" line under the title, which was the single most
+              // visible way the Windows SDR overlay didn't look like the
+              // Windows GDI one it is supposed to be at parity with.
+              Expanded(
+                child: Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Badges are capped to a fraction of the bar and wrap onto a
+              // second line when the window is narrow, so a full EPG + long
+              // resolution/HDR/FPS/source/clock set can never overflow the
+              // row.
+              if (!stackBadges)
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: constraints.maxWidth * 0.55,
+                  ),
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: _badges(),
+                  ),
+                ),
+            ],
+          );
+          if (!stackBadges) return titleRow;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              titleRow,
+              SizedBox(height: _m.badgeGap),
+              Wrap(spacing: 6, runSpacing: 6, children: _badges()),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+
+  /// Top-right badge cluster, in the order every native overlay uses: source,
+  /// LIVE, resolution, dynamic range, fps, clock (Kotlin `TopBadges`, iOS
+  /// `badgesStack`, the Windows GDI cluster). The **LIVE pill belongs here**,
+  /// not in the bottom bar where this overlay used to keep it — that placement
+  /// was the other half of the Windows SDR/HDR mismatch, and it left the bottom
+  /// bar showing a lone pill on a channel with no guide data.
+  List<Widget> _badges() {
+    final params = widget.controls.state.videoParams;
+    final resolution = resolutionBadgeLabel(
+      width: params.w ?? widget.controls.state.width,
+      height: params.h ?? widget.controls.state.height,
+    );
+    final hdr = hdrBadgeLabel(widget.dynamicRangeLabel(params));
+    final fps = fpsBadgeLabel(_realVideoTrack().fps);
+    final source = sourceBadgeLabel(widget.sourceName);
+    return [
+      if (source != null) _badge(source),
+      if (widget.isLive) _LiveBadge(synced: widget.liveSynced),
+      if (resolution != null) _badge(resolution),
+      if (hdr != null) _badge(hdr),
+      if (fps != null) _badge(fps),
+      _badge(playerClockLabel(DateTime.now(), dated: !widget.touch)),
+    ];
+  }
+
+  Widget _bottomBar(BuildContext context) =>
+      Positioned(left: 0, right: 0, bottom: 0, child: _bottomBarBody(context));
+
+  Widget _bottomBarBody(BuildContext context) => _absorbChromeTaps(
+    Container(
+      // The gradient fills this (bottom-anchored) container. It ramps to a
+      // solid dark value by ~45% down — where the two-row live bar (progress +
+      // controls) begins — instead of fading linearly to dark only at the very
+      // bottom, so both rows sit on a real backdrop rather than near-transparent
+      // scrim. The top inset sets how high the transparent fade starts.
+      padding: EdgeInsets.fromLTRB(
+        20 + _barInsets.left,
+        _m.bottomPadTop,
+        20 + _barInsets.right,
+        _m.bottomPadBottom + _barInsets.bottom,
+      ),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0x00000000), Color(0x99000000), Color(0xCC000000)],
+          stops: [0.0, 0.45, 1.0],
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // The identity run — a channel number, a half-typed number, or a
+          // transient note — drawn only when it says something the top bar's
+          // title does not, exactly like Kotlin's `showsChannelIdentity`. A
+          // session that never zaps therefore renders byte-identically to
+          // before: nothing sets [ZapBannerState.channelNumber] until a
+          // cursor moves.
+          if (widget.isLive && (widget.zap?.showsIdentity ?? false)) ...[
+            _zapIdentityRow(widget.zap!),
+            const SizedBox(height: 10),
+          ],
+          if (widget.isLive) _liveEpgStrip() else _positionRebuild(_seekBar),
+          if (widget.dvr.available) _dvrBar(),
+          // A live channel with no guide renders no strip at all, so it gets no
+          // gap either — the natives shrink the whole bar in that case
+          // (`BottomControlsHeight`), and a floating gap above the transport is
+          // the closest this stacked layout gets to that.
+          SizedBox(
+            height: widget.isLive
+                ? (widget.epgNow == null ? 0 : _m.epgGap + 2)
+                : 4,
+          ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < kCompactControlsWidth;
+              final transport = <Widget>[
+                if (_hasEpisodes)
+                  if (_episodeIndex > 0)
+                    _button(Icons.skip_previous, tr('Previous episode'), () {
+                      widget.onSelectEpisode!(
+                        widget.episodes[_episodeIndex - 1],
+                      );
+                    })
+                  else
+                    SizedBox(width: _m.buttonWidth + 6),
+                if (!widget.isLive)
+                  _button(
+                    Icons.replay_10,
+                    tr('Back 10 seconds'),
+                    () => _seekBy(const Duration(seconds: -10)),
+                  ),
+                _button(
+                  widget.controls.state.playing
+                      ? Icons.pause
+                      : Icons.play_arrow,
+                  widget.controls.state.playing ? tr('Pause') : tr('Play'),
+                  () => unawaited(widget.onPlayPause()),
+                  focusNode: widget.fullscreenToggle ? null : _tvPlayFocus,
+                ),
+                if (!widget.isLive)
+                  _button(
+                    Icons.forward_10,
+                    tr('Forward 10 seconds'),
+                    () => _seekBy(const Duration(seconds: 10)),
+                  ),
+                if (_hasEpisodes)
+                  if (_episodeIndex + 1 < widget.episodes.length)
+                    _button(Icons.skip_next, tr('Next episode'), () {
+                      widget.onSelectEpisode!(
+                        widget.episodes[_episodeIndex + 1],
+                      );
+                    })
+                  else
+                    SizedBox(width: _m.buttonWidth + 6),
+              ];
+              final cluster = <Widget>[
+                // The quick-list opener, **immediately left of "Go to live"**
+                // — the one slot every surface puts it in (Android's
+                // `RightCluster`, the Windows GDI `BottomLayout`, the Lua
+                // OSD's right-to-left cluster), the same way the favorite
+                // star has one slot. Without it the list was keyboard/remote
+                // only: a mouse or a finger had no way to open it at all.
+                //
+                // Not a toggle, so the accent tints nothing here — pressing
+                // it opens the list, which takes the screen from this row
+                // (see [didUpdateWidget]), and the list's own Back closes it.
+                if (widget.isLive &&
+                    widget.zapEnabled &&
+                    widget.onOpenQuickList != null)
+                  _button(
+                    Icons.format_list_bulleted,
+                    // The desktop overlays bind `G` (Windows' key ring, the
+                    // Lua OSD, and this route's own `keyG`); a finger has no
+                    // keyboard to be told about.
+                    widget.touch ? tr('Channel list') : tr('Channel list (G)'),
+                    widget.onOpenQuickList!,
+                    semanticsLabel: tr('Channel list'),
+                  ),
+                // "Go to live", as a plain text chip — the same control every
+                // other overlay now draws, in the same chip chrome as the
+                // aspect label beside it. It used to be a Material
+                // `TextButton.icon` (the one Material-themed control left in a
+                // row of app chips), while Android/iOS/Windows labelled the
+                // same button **"LIVE"** — a second "LIVE" on a screen that
+                // already carries the LIVE *status* badge in the top bar, and a
+                // label that never said what pressing it does. All four
+                // surfaces already declared "Go to live" as the control's
+                // accessible name, so this only makes the visible label agree
+                // with what they were telling a screen reader. Below the
+                // compact width it collapses to its icon (the natives never
+                // reach that width, and the accessible name is unchanged).
+                if (widget.isLive && !widget.liveSynced)
+                  compact
+                      ? _button(
+                          Icons.skip_next,
+                          tr('Go to live'),
+                          () => unawaited(widget.onGoLive()),
+                        )
+                      : _textButton(
+                          tr('Go to live'),
+                          tr('Go to live'),
+                          () => unawaited(widget.onGoLive()),
+                        ),
+                // The favorite star, immediately after "Go to live" — the
+                // slot the Android overlay puts it in
+                // (`RightCluster`). It used to sit in the top bar among the
+                // badges at *compact* size, which made it a different size from
+                // every other control on two of the three surfaces and a
+                // different size again from Android's. Here it is an ordinary
+                // member of this row and takes the row's geometry, so all three
+                // overlays draw one star in one place at one size.
+                if (widget.canFavorite)
+                  _button(
+                    widget.favorite
+                        ? Icons.star_rounded
+                        : Icons.star_outline_rounded,
+                    widget.favorite ? tr('Remove favorite') : tr('Add favorite'),
+                    widget.onToggleFavorite,
+                    color: widget.favorite ? AppColors.accent : Colors.white,
+                  ),
+                if (_audioTracks().length > 1) _audioMenu(),
+                // Only when the stream actually carries a subtitle track:
+                // media_kit always reports the synthetic `auto`/`no` pair, so
+                // an unconditional button opened a menu offering nothing but
+                // "Auto"/"Off" on the majority of live IPTV channels. Same
+                // predicate as Android's `showSubtitleButton`, iOS's
+                // `PlayerChromeState.showSubtitleButton` and the Windows
+                // overlay's `!subtitle_tracks.empty()`.
+                if (_subtitleTracks().isNotEmpty) _subtitleMenu(),
+                // The *current* mode as the button's text, matching all four
+                // native overlays (Android `TextControlButton`, iOS
+                // `PlayerTextButton`, the Windows `DrawTextButton`, the Lua
+                // `text_button`). Dart owns the mode sequence, so an icon
+                // here made the only surface that knows the answer the only
+                // one not showing it — with four modes the user cycled blind.
+                _textButton(
+                  tr(widget.aspectLabel),
+                  tr('Cycle aspect ratio'),
+                  () => unawaited(widget.onCycleAspect()),
+                  semanticsLabel: tr('Aspect ratio, {aspect}', {
+                    'aspect': tr(widget.aspectLabel),
+                  }),
+                ),
+                if (_hasEpisodes)
+                  _textButton(
+                    tr('Episodes'),
+                    tr('Episodes'),
+                    () => unawaited(_openEpisodes()),
+                  ),
+                _button(Icons.settings_outlined, tr('Playback settings'), () {
+                  final openSettings = widget.onPlaybackSettings;
+                  if (openSettings != null) {
+                    openSettings();
+                  } else {
+                    unawaited(showPlaybackSettings());
+                  }
+                }),
+                // The iOS route is already fullscreen and media_kit's
+                // `toggleFullscreen` would push a second `Video` route above
+                // the one PlayerScreen owns — the native controller has no
+                // fullscreen button either.
+                if (!widget.touch && widget.fullscreenToggle)
+                  _button(
+                    Icons.fullscreen,
+                    tr('Fullscreen (F)'),
+                    widget.onToggleFullscreen,
+                  ),
+              ];
+              final transportWidth = transport.length * (_m.buttonWidth + 6);
+              final volumeWidth = _m.buttonWidth + 6 + (compact ? 0 : 150);
+              double textSlot(String label) {
+                final text = TextPainter(
+                  text: TextSpan(
+                    text: label,
+                    style: DefaultTextStyle.of(context).style.merge(
+                      const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  textDirection: Directionality.of(context),
+                  textScaler: MediaQuery.textScalerOf(context),
+                  maxLines: 1,
+                )..layout();
+                final width = math.max(_m.buttonWidth, text.width + 16) + 6;
+                text.dispose();
+                return width;
+              }
+
+              final buttonSlot = math.max(_m.buttonWidth + 6, 48.0);
+              final clusterWidth =
+                  cluster.length * buttonSlot +
+                  textSlot(tr(widget.aspectLabel)) -
+                  buttonSlot +
+                  (_hasEpisodes ? textSlot(tr('Episodes')) - buttonSlot : 0) +
+                  (widget.isLive && !widget.liveSynced && !compact
+                      ? textSlot(tr('Go to live')) - buttonSlot
+                      : 0);
+              // Reserve equal side widths so play stays at the picture's
+              // midpoint, regardless of the utility buttons on the right.
+              final sideWidth = math.max(
+                volumeWidth + (widget.isLive ? 0 : 120),
+                clusterWidth,
+              );
+              final twoRow =
+                  _m.reflow ||
+                  transportWidth + sideWidth * 2 > constraints.maxWidth;
+              final left = Row(
+                children: [
+                  _volumeControls(context, showSlider: !compact),
+                  if (!widget.isLive)
+                    Flexible(child: _positionRebuild(_timeLabel)),
+                ],
+              );
+              final right = Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: cluster,
+              );
+              final centered = Row(
+                mainAxisSize: MainAxisSize.min,
+                children: transport,
+              );
+              if (!twoRow) {
+                return Row(
+                  children: [
+                    Expanded(child: left),
+                    centered,
+                    Expanded(child: right),
+                  ],
+                );
+              }
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Center(child: centered),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(child: left),
+                      SizedBox(
+                        width: math.min(
+                          clusterWidth,
+                          constraints.maxWidth - volumeWidth,
+                        ),
+                        child: right,
+                      ),
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    ),
+  );
+
+  /// Scopes per-position-tick rebuilds to the only widgets that actually read
+  /// the position (the VOD seek bar and time label). The rest of the overlay
+  /// rebuilds on its own coarser triggers (playing/tracks/videoParams/clock) —
+  /// wrapping the whole Stack in this stream rebuilt every control several
+  /// times a second, even for live streams that never render position at all.
+  Widget _positionRebuild(Widget Function() builder) => StreamBuilder<Duration>(
+    stream: widget.controls.stream.position,
+    initialData: widget.controls.state.position,
+    builder: (_, _) => builder(),
+  );
+
+  /// Mute toggle + volume slider, rebuilt from the volume stream so the thumb
+  /// tracks the value live — the surrounding overlay doesn't listen to volume
+  /// (it would rebuild every control on each drag tick), so without this the
+  /// slider read a stale `state.volume` and appeared frozen.
+  Widget _volumeControls(
+    BuildContext context, {
+    bool showSlider = true,
+  }) => StreamBuilder<double>(
+    stream: widget.controls.stream.volume,
+    initialData: widget.controls.state.volume,
+    builder: (context, snapshot) {
+      final volume = (snapshot.data ?? 0).clamp(0.0, 100.0);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _button(
+            volume == 0 ? Icons.volume_off : Icons.volume_up,
+            tr('Mute'),
+            () => unawaited(widget.controls.setVolume(volume > 0 ? 0 : 100)),
+          ),
+          if (showSlider)
+            SizedBox(
+              width: 150,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 4,
+                  activeTrackColor: AppColors.accent,
+                  inactiveTrackColor: AppColors.line,
+                  thumbColor: AppColors.accent,
+                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                ),
+                // media_kit volume is 0–100; Slider's default max is 1.0 and it
+                // asserts value <= max, so the range must be explicit.
+                child: ExcludeFocus(
+                  excluding: !widget.fullscreenToggle,
+                  child: Slider(
+                    max: 100,
+                    value: volume,
+                    semanticFormatterCallback: (value) => '${value.round()}%',
+                    onChanged: (value) {
+                      _show(keep: true);
+                      unawaited(widget.controls.setVolume(value));
+                    },
+                    onChangeEnd: (_) => _scheduleHide(),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      );
+    },
+  );
+
+  Widget _seekBar() {
+    final duration = widget.controls.state.duration;
+    final position = widget.controls.state.position;
+    final maximum = duration.inMilliseconds > 0
+        ? duration.inMilliseconds.toDouble()
+        : 1.0;
+    return ExcludeFocus(
+      excluding: !widget.fullscreenToggle,
+      child: Slider(
+        value: position.inMilliseconds.clamp(0, maximum.toInt()).toDouble(),
+        max: maximum,
+        // Without this a screen reader announces the raw millisecond count
+        // ("4425000") on every scrub step. Both natives announce a time.
+        semanticFormatterCallback: (value) =>
+            _duration(Duration(milliseconds: value.round())),
+        onChanged: duration <= Duration.zero
+            ? null
+            : (value) => unawaited(
+                Future.sync(
+                  () => _seekTo(Duration(milliseconds: value.round())),
+                ),
+              ),
+      ),
+    );
+  }
+
+  Widget _dvrBar() {
+    final dvr = widget.dvr;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Wrap(
+          spacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            if (dvr.active)
+              Text(
+                tr('Timeshift on'),
+                style: const TextStyle(color: Colors.white70),
+              )
+            else
+              TextButton.icon(
+                onPressed: dvr.busy ? null : widget.onStartTimeshift,
+                icon: const Icon(Icons.history, size: 18),
+                label: Text(tr('Timeshift')),
+              ),
+            TextButton.icon(
+              onPressed: dvr.busy ? null : widget.onToggleRecording,
+              icon: Icon(
+                dvr.recording ? Icons.stop_circle : Icons.fiber_manual_record,
+                color: Colors.redAccent,
+                size: 18,
+              ),
+              label: Text(dvr.recording ? tr('Stop recording') : tr('Record')),
+            ),
+            if (dvr.active) ...[
+              _button(Icons.replay_10, tr('Rewind local buffer 10 seconds'), () {
+                widget.onDvrSeek?.call(
+                  dvr.clamp(dvr.position - const Duration(seconds: 10)),
+                );
+              }),
+              _button(
+                Icons.forward_10,
+                tr('Forward local buffer 10 seconds'),
+                () {
+                  widget.onDvrSeek?.call(
+                    dvr.clamp(dvr.position + const Duration(seconds: 10)),
+                  );
+                },
+              ),
+            ],
+          ],
+        ),
+        if (dvr.active)
+          ExcludeFocus(
+            excluding: !widget.fullscreenToggle,
+            child: Slider(
+              key: const ValueKey('dvr-timeline'),
+              value: _dvrDragFraction ?? dvr.fraction,
+              onChanged: dvr.busy || dvr.length == Duration.zero
+                  ? null
+                  : (value) => setState(() => _dvrDragFraction = value),
+              onChangeEnd: dvr.busy
+                  ? null
+                  : (value) {
+                      setState(() => _dvrDragFraction = null);
+                      widget.onDvrSeek?.call(dvr.positionAt(value));
+                    },
+              semanticFormatterCallback: (value) => tr('{time} in local buffer', {
+                'time': _duration(dvr.positionAt(value)),
+              }),
+            ),
+          ),
+        if (dvr.message.isNotEmpty)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              dvr.message,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// The live EPG strip, where the VOD scrubber sits — three stacked rows:
+  /// programme title + its `HH:mm – HH:mm` range, a thin elapsed-progress bar,
+  /// then the next programme.
+  ///
+  /// This is a **structural copy of the three native overlays** (Kotlin
+  /// `LiveEpgStrip`, iOS `epgStrip`, the Windows GDI `epg_title`/`epg_time`/
+  /// `epg_progress`/`epg_next` rects), because this overlay is what the Windows
+  /// *SDR* path shows and it must look like the GDI overlay the same user sees
+  /// on an HDR channel. It replaced a one-row `LIVE ▸ progress ▸ title` layout
+  /// that shared no geometry, no typography and no field order with any of
+  /// them, and pushed the programme labels into the top bar instead.
+  ///
+  /// No guide for this channel → the strip is *omitted*, not rendered empty: a
+  /// progress bar stuck at 0.0 reads as "still loading" forever, and all three
+  /// natives drop it in this case too (`HasLiveEpg`, `epgStrip.isHidden`,
+  /// `state.epgNow?.let`). The LIVE pill is unaffected — it lives in the top
+  /// bar's badge cluster ([_badges]), the way every native overlay carries it.
+  Widget _liveEpgStrip() {
+    final now = widget.epgNow;
+    if (now == null) return const SizedBox.shrink();
+    return _liveEpgStripFor(now, widget.epgNext);
+  }
+
+  /// [_liveEpgStrip]'s body, parameterised on a programme pair rather than
+  /// `widget.epgNow`/`widget.epgNext` — shared with the zap banner, whose
+  /// strip is the **cursor's** guide ([ZapBannerState.epgNow]/`epgNext`), not
+  /// the playing channel's. Zero behaviour change for the bottom bar, which
+  /// still calls this only through the [_liveEpgStrip] wrapper above.
+  Widget _liveEpgStripFor(Programme now, Programme? next) {
+    final total = now.stop.difference(now.start).inSeconds;
+    final elapsed = DateTime.now().difference(now.start).inSeconds;
+    final progress = total <= 0 ? 0.0 : (elapsed / total).clamp(0.0, 1.0);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            // The title gives way (it is the only elastic piece); the range is
+            // rigid, matching the natives' compression-resistance split.
+            Expanded(
+              child: Text(
+                now.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: AppColors.textHi,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              _programmeRange(now),
+              maxLines: 1,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            ),
+          ],
+        ),
+        SizedBox(height: _m.epgGap),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(value: progress, minHeight: 4),
+        ),
+        if (next != null) ...[
+          SizedBox(height: _m.epgGap),
+          Text(
+            '${tr('Next')} · ${_programmeRange(next)} · ${next.title}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// `HH:mm – HH:mm` for a programme, the one range format every overlay in the
+  /// app renders (Kotlin `clockHm`, Swift `playerEpgRangeLabel`, the GDI
+  /// `FormatClockHm` pair, the Lua `hm_ms` pair).
+  static String _programmeRange(Programme programme) =>
+      '${_hm(programme.start)} – ${_hm(programme.stop)}';
+
+  // ── Live zapping (Phase 3 — the shared Flutter overlay's own banner) ──────
+  //
+  // See docs/player.md "Live zapping" and the Kotlin analogue this mirrors:
+  // `PlayerControls.kt`'s `ZapBanner`/`ChannelIdentityRow` and
+  // `PlayerUiState.kt`'s `ZAP_BANNER_VISIBLE_MS`/`showsChannelIdentity`/
+  // `channelIdentityLabel`.
+
+  /// Whether the banner card is actually on screen right now: it needs a live
+  /// zap in progress, the chrome hidden (the banner is the only
+  /// acknowledgement a keypress gets while the bars are gone — showing both at
+  /// once would be redundant and the bar wins, matching Kotlin's mutually
+  /// exclusive `AnimatedVisibility`s), and either the plain dwell timer still
+  /// running or a mid-interaction state that outlives it.
+  bool get _zapBannerVisible {
+    final zap = widget.zap;
+    if (zap == null || !widget.isLive || chromeVisible) return false;
+    // The quick list is the acknowledgement while it is up — and it sits in
+    // the same lower-left region. Showing both would print the cursor's
+    // channel twice, in two places, saying two different things (the banner
+    // follows the *zap* cursor, the list its own).
+    if (widget.quickList?.open ?? false) return false;
+    return _zapBannerUp || zap.outlivesTimer;
+  }
+
+  /// The zap banner: a small floating card above where the transport row
+  /// would sit, built from exactly two pieces — the identity run and the live
+  /// EPG strip — rather than a layout of its own, so a channel seen through
+  /// the banner and the same channel seen with the controls up read
+  /// identically (mirrors Kotlin's `ZapBanner` doc comment verbatim).
+  ///
+  /// Always present in the tree while [ZapBannerState.zap] is non-null and
+  /// the stream is live, faded to invisible via [AnimatedOpacity] rather than
+  /// conditionally built — an [AnimatedOpacity] that gets unmounted mid-fade
+  /// jumps instead of fading, and [IgnorePointer] keeps it from stealing taps
+  /// meant for the background reveal layer while invisible.
+  Widget _zapBanner() {
+    final zap = widget.zap;
+    // A `Positioned`, never a bare `SizedBox.shrink()`, even when there is
+    // nothing to draw: this is a child of the same `Stack` as the top/bottom
+    // bars, whose own children are *all* `Positioned` — a `RenderStack` with
+    // no non-positioned children sizes itself to fill its incoming
+    // constraints, but the moment one non-positioned child appears (even a
+    // zero-size one) it switches to sizing itself from its non-positioned
+    // children instead, collapsing the whole Stack — and every bar in it —
+    // toward zero size.
+    if (zap == null || !widget.isLive) {
+      return const Positioned(
+        left: 0,
+        right: 0,
+        bottom: 0,
+        child: SizedBox.shrink(),
+      );
+    }
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          // The fade is the only part of this that goes through [appMotion] —
+          // see [_armZapBanner] for why the 3s dwell itself must not.
+          duration: appMotion(context, const Duration(milliseconds: 180)),
+          opacity: _zapBannerVisible ? 1 : 0,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              20 + _barInsets.left,
+              0,
+              20 + _barInsets.right,
+              _m.bottomPadBottom + _barInsets.bottom,
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.panel,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _zapIdentityRow(zap),
+                    if (zap.epgNow case final now?) ...[
+                      const SizedBox(height: 10),
+                      _liveEpgStripFor(now, zap.epgNext),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// `12 · BBC One`, with a half-typed channel number leading it and any
+  /// transient note (or the position/total) trailing it.
+  ///
+  /// Shared by the banner and the bottom bar so the two can't drift — the
+  /// Dart mirror of Kotlin's `ChannelIdentityRow`, which the doc comment on
+  /// it explains is shared for exactly the same reason. Self-gates to nothing
+  /// when there is truly nothing to show (no identity label, no digits, no
+  /// message); whether the row belongs in the *bottom bar* at all is a
+  /// separate decision the caller makes on [ZapBannerState.showsIdentity].
+  Widget _zapIdentityRow(ZapBannerState z) {
+    final identity = z.identityLabel;
+    if (identity == null && z.digits.isEmpty && z.message == null) {
+      return const SizedBox.shrink();
+    }
+    final logo = z.logoUrl;
+    final logosDisabled = debugDisableNetworkChannelLogos;
+    final showLogo = !logosDisabled && logo != null && logo.isNotEmpty;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        if (showLogo) ...[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: CachedNetworkImage(
+              imageUrl: logo,
+              width: 28,
+              height: 28,
+              fit: BoxFit.cover,
+              memCacheWidth: imageCacheSize(context, 28),
+              placeholder: (_, _) => _zapLogoFallback(),
+              errorWidget: (_, url, error) {
+                logImageFailure(error, url);
+                return _zapLogoFallback();
+              },
+            ),
+          ),
+          const SizedBox(width: 10),
+        ],
+        if (z.digits.isNotEmpty) ...[
+          Text(
+            z.digits,
+            style: const TextStyle(
+              color: AppColors.accent,
+              fontSize: 24,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 12),
+        ],
+        if (identity != null)
+          Expanded(
+            child: Text(
+              identity,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppColors.textHi,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          )
+        else
+          const Spacer(),
+        if (z.message case final message?) ...[
+          const SizedBox(width: 8),
+          // Flexible, not rigid: a long transient note (a full channel name
+          // in "Couldn't play …") has no natural ceiling, and next to a
+          // digit readout plus an `Expanded` identity label it is the one
+          // piece left that can still overflow a narrow, heavily-scaled bar.
+          Flexible(
+            child: Text(
+              message,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.danger, fontSize: 12),
+            ),
+          ),
+        ] else if (z.total > 0 && z.position > 0) ...[
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              '${z.position}/${z.total}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// The 28×28 fallback drawn in place of the channel logo — same shape for
+  /// the loading placeholder and a fetch error, matching every other logo
+  /// call site in the app (`image_utils.dart`'s [logImageFailure] doc): a
+  /// screen that flickers between two different fallbacks reads as broken.
+  Widget _zapLogoFallback() => Container(
+    width: 28,
+    height: 28,
+    decoration: BoxDecoration(
+      color: AppColors.panelHi,
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: const Icon(Icons.live_tv_rounded, size: 16, color: AppColors.textLo),
+  );
+
+  // ── The quick list (Phase 6 — the shared Flutter overlay's own view) ─────
+  //
+  // A **mode of one list**, drawn from [ZapQuickListState] and nothing else:
+  // no controller, no repository, no `SourceConfig`, exactly as the banner is
+  // drawn from [ZapBannerState] — which is what keeps this file and
+  // `test/player_overlay_test.dart` libmpv-free.
+  //
+  // It is a **selection model, not a focus ring** (docs/tv-navigation.md):
+  // rows are not focus targets, there is one selected index, and the keys are
+  // owned by the route's own `CallbackShortcuts` — the same arrangement the
+  // zap banner has ("a readout, never a focus target"), and the only one that
+  // works over a list whose rows are windowed out of a 250k-row range. The
+  // row extent is explicit so index→offset is exact, exactly as the live
+  // tab's two lists require.
+
+  /// Base height of one quick-list row (title + secondary line), before text
+  /// scaling. The Dart mirror of the live tab's `kChannelRowExtent*`
+  /// constants and, once the native renderers land, of their row metrics.
+  static const double kQuickListRowExtent = 56;
+
+  /// Ceiling on the text scale the row extent follows, matching
+  /// `kMaxLiveTextScale`'s reasoning: past this the row would eat the panel,
+  /// and the text is clipped (never overflowed) instead.
+  static const double kQuickListMaxTextScale = 1.6;
+
+  double get _quickListRowExtent {
+    final scaled = MediaQuery.textScalerOf(context).scale(kQuickListRowExtent);
+    final scale = scaled / kQuickListRowExtent;
+    final clamped = scale < 1
+        ? 1.0
+        : scale > kQuickListMaxTextScale
+        ? kQuickListMaxTextScale
+        : scale;
+    return kQuickListRowExtent * clamped;
+  }
+
+  /// Keeps the cursor on screen. The list is already *windowed* by Dart, so
+  /// this scrolls within the window — `index * extent` arithmetic, never an
+  /// `ensureVisible` on a row that may not be built.
+  void _revealQuickListRow() {
+    final state = widget.quickList;
+    if (state == null || !state.open) return;
+    if (!_quickListScroll.hasClients) return;
+    final offsetIndex = state.selectedInWindow;
+    if (offsetIndex < 0) return;
+    final extent = _quickListRowExtent;
+    final position = _quickListScroll.position;
+    final target =
+        (offsetIndex * extent) - (position.viewportDimension - extent) / 2;
+    final max = position.maxScrollExtent;
+    _quickListScroll.jumpTo(target < 0 ? 0 : (target > max ? max : target));
+  }
+
+  Widget _quickListPanel(BuildContext context) {
+    final state = widget.quickList;
+    // A `Positioned` even with nothing to draw — see [_zapBanner] for why a
+    // single non-positioned child would collapse this whole `Stack`.
+    if (state == null || !state.open || !widget.isLive) {
+      return const Positioned(left: 0, top: 0, child: SizedBox.shrink());
+    }
+    final width = math.min(
+      420.0,
+      MediaQuery.sizeOf(context).width - _barInsets.horizontal - 40,
+    );
+    return Positioned(
+      left: 20 + _barInsets.left,
+      top: 24 + _barInsets.top,
+      bottom: 24 + _barInsets.bottom,
+      width: width,
+      // Blank panel space consumes taps too: the video layer behind it must
+      // not reveal controls or toggle fullscreen while the user is browsing.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {},
+        child: DecoratedBox(
+          key: const ValueKey('player.quickList.panel'),
+          decoration: BoxDecoration(
+            color: AppColors.panel,
+            border: Border.all(color: AppColors.line),
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+                child: Row(
+                  children: [
+                    if (widget.onQuickListCommand != null)
+                      _quickListAction(
+                        icon: Icons.arrow_back_rounded,
+                        label: tr('Back'),
+                        command: ZapCommandKind.back,
+                      ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            switch (state.mode) {
+                              ZapQuickListMode.categories => tr('Categories'),
+                              ZapQuickListMode.channels => tr(
+                                'Categories › Channels',
+                              ),
+                              ZapQuickListMode.schedule => tr(
+                                "Channels › Today's guide",
+                              ),
+                            },
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textLo,
+                              fontSize: 11,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            state.heading,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textHi,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (state.total > 0) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        '${state.selectedIndex + 1}/${state.total}',
+                        maxLines: 1,
+                        style: const TextStyle(
+                          color: AppColors.textLo,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                    if (widget.onQuickListCommand != null)
+                      _quickListAction(
+                        icon: Icons.close_rounded,
+                        label: tr('Close channel list'),
+                        command: ZapCommandKind.closeList,
+                      ),
+                  ],
+                ),
+              ),
+              Expanded(child: _quickListBody(state)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Pointer controls deliberately have no FocusNode: the route still owns
+  // every remote key and the selected row may be outside the rendered window.
+  Widget _quickListAction({
+    required IconData icon,
+    required String label,
+    required ZapCommandKind command,
+    VoidCallback? onPressed,
+  }) {
+    void handle() {
+      if (onPressed != null) {
+        onPressed();
+      } else {
+        widget.onQuickListCommand?.call(ZapCommand(command));
+      }
+    }
+
+    return Semantics(
+      button: true,
+      label: label,
+      onTap: handle,
+      excludeSemantics: true,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: handle,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Icon(icon, size: 20, color: AppColors.textLo),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _activateQuickListRow(ZapQuickListRow row, ZapCommandKind command) {
+    final state = widget.quickList;
+    final send = widget.onQuickListCommand;
+    if (!_quickListOpen || state == null || send == null) return;
+    final delta = row.index - state.selectedIndex;
+    if (delta != 0) send(ZapCommand(ZapCommandKind.move, delta));
+    send(ZapCommand(command));
+  }
+
+  Widget _quickListBody(ZapQuickListState state) {
+    if (state.loading && state.rows.isEmpty) {
+      return const Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (state.rows.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Text(
+          state.emptyLabel ?? tr('Nothing here'),
+          style: const TextStyle(color: AppColors.textLo),
+        ),
+      );
+    }
+    return ListView.builder(
+      controller: _quickListScroll,
+      padding: const EdgeInsets.only(bottom: 10),
+      // Explicit, so the reveal above is exact index arithmetic — the rule
+      // every selection model in this app follows.
+      itemExtent: _quickListRowExtent,
+      itemCount: state.rows.length,
+      itemBuilder: (context, i) => _quickListRowTile(
+        state.rows[i],
+        selected: i == state.selectedInWindow,
+      ),
+    );
+  }
+
+  Widget _quickListRowTile(ZapQuickListRow row, {required bool selected}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: Semantics(
+        selected: selected,
+        button: widget.onQuickListCommand != null,
+        child: MouseRegion(
+          cursor: widget.onQuickListCommand != null
+              ? SystemMouseCursors.click
+              : MouseCursor.defer,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onQuickListCommand == null
+                ? null
+                : () => _activateQuickListRow(row, ZapCommandKind.activate),
+            child: Container(
+              decoration: BoxDecoration(
+                color: selected ? AppColors.panelHi : Colors.transparent,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              // The accent ring is painted over the child, never laid out as a
+              // border — a selection affordance that changes constraints is the
+              // poster-reload bug (docs/tv-navigation.md, `FocusableCard`).
+              foregroundDecoration: selected
+                  ? BoxDecoration(
+                      border: Border.all(color: AppColors.accent, width: 2),
+                      borderRadius: BorderRadius.circular(10),
+                    )
+                  : null,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              // An unbounded main axis makes a `RenderFlex` overflow structurally
+              // impossible whatever the text metrics do — the same ClipRect +
+              // OverflowBox split the live tab's fixed-extent rows use, and for the
+              // same reason (predicting text height is a hint, never a guarantee).
+              child: ClipRect(
+                child: OverflowBox(
+                  minHeight: 0,
+                  maxHeight: double.infinity,
+                  alignment: Alignment.centerLeft,
+                  child: Row(
+                    children: [
+                      if (row.playing) ...[
+                        Icon(
+                          Icons.play_arrow_rounded,
+                          size: 16,
+                          color: AppColors.accent,
+                          semanticLabel:
+                              row.kind == ZapQuickListRowKind.category
+                              ? tr('Current category')
+                              : tr('Playing channel'),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      Expanded(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              row.label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: selected
+                                    ? Colors.white
+                                    : AppColors.textHi,
+                                fontSize: 14,
+                                fontWeight: selected
+                                    ? FontWeight.w700
+                                    : FontWeight.w600,
+                              ),
+                            ),
+                            if (row.secondary case final secondary?)
+                              Text(
+                                secondary,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppColors.textLo,
+                                  fontSize: 12,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      if (row.badge case final badge?) ...[
+                        const SizedBox(width: 8),
+                        _badge(badge),
+                      ],
+                      if (row.kind == ZapQuickListRowKind.channel &&
+                          widget.onQuickListCommand != null)
+                        _quickListAction(
+                          icon: Icons.chevron_right_rounded,
+                          label: tr('Programme guide'),
+                          command: ZapCommandKind.descend,
+                          onPressed: () => _activateQuickListRow(
+                            row,
+                            ZapCommandKind.descend,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _timeLabel() => Text(
+    '${_duration(widget.controls.state.position)} / ${_duration(widget.controls.state.duration)}',
+    // Inert on a pointer platform (the label is never width-constrained
+    // there); under the touch two-row layout it keeps a long `1:23:45 /
+    // 2:00:00` on one line instead of wrapping the transport row.
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    style: const TextStyle(color: Colors.white70),
+  );
+
+  // The menu buttons carry their accessible name on the `Icon` rather than on
+  // the `PopupMenuButton`: its `tooltip` becomes `semanticsTooltip`, which is a
+  // *hint*, not a name, so the control announced as an unnamed button. An
+  // `Icon.semanticLabel` merges into the enclosing button node instead — the
+  // standard way to name an icon-only Material button, and it leaves the
+  // button's own tap semantics (which open the menu) intact.
+  Widget _audioMenu() => PopupMenuButton<String>(
+    tooltip: tr('Audio track'),
+    icon: Icon(
+      Icons.audiotrack,
+      color: Colors.white,
+      semanticLabel: tr('Audio track'),
+    ),
+    onOpened: _onMenuOpened,
+    onCanceled: _onMenuClosed,
+    onSelected: (id) {
+      final track = _audioTracks().firstWhere((track) => track.id == id);
+      unawaited(widget.controls.setAudioTrack(track));
+      _onMenuClosed();
+    },
+    itemBuilder: (_) => [
+      for (final track in _audioTracks())
+        PopupMenuItem(value: track.id, child: Text(_audioLabel(track))),
+    ],
+  );
+
+  Widget _subtitleMenu() {
+    // The full list (including the synthetic Auto/Off entries) — turning
+    // subtitles off is a real choice. Whether the *button* exists at all is
+    // decided by [_subtitleTracks], which counts only real tracks.
+    final tracks = widget.controls.state.tracks.subtitle;
+    return PopupMenuButton<String>(
+      tooltip: tr('Subtitles'),
+      icon: Icon(
+        Icons.subtitles,
+        color: Colors.white,
+        semanticLabel: tr('Subtitles'),
+      ),
+      onOpened: _onMenuOpened,
+      onCanceled: _onMenuClosed,
+      onSelected: (id) {
+        final track = tracks.firstWhere((track) => track.id == id);
+        unawaited(widget.controls.setSubtitleTrack(track));
+        _onMenuClosed();
+      },
+      itemBuilder: (_) => [
+        for (final track in tracks)
+          PopupMenuItem(value: track.id, child: Text(_subtitleLabel(track))),
+      ],
+    );
+  }
+
+  Future<String?> showPlaybackSettings({
+    List<Map<String, String>> options = const [],
+  }) async {
+    if (_menuOpen) return null;
+    _onMenuOpened();
+    try {
+      final selected = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: Text(tr('Playback settings')),
+          children: [
+            if (!widget.isLive)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, 'speed'),
+                child: Text(tr('Playback speed')),
+              ),
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, 'info'),
+              child: Text(tr('Stream information')),
+            ),
+            for (final option in options)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, option['id']),
+                child: Text(option['label']!),
+              ),
+          ],
+        ),
+      );
+      if (!mounted) return null;
+      if (selected == 'info') {
+        setState(() => _showInfo = true);
+      } else if (selected == 'speed') {
+        final rate = await showDialog<double>(
+          context: context,
+          builder: (context) => SimpleDialog(
+            title: Text(tr('Playback speed')),
+            children: [
+              for (final rate in const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
+                SimpleDialogOption(
+                  onPressed: () => Navigator.pop(context, rate),
+                  child: Text(rate == 1 ? tr('Normal (1.0×)') : '$rate×'),
+                ),
+            ],
+          ),
+        );
+        if (rate != null && mounted) await widget.controls.setRate(rate);
+      } else {
+        return selected;
+      }
+      return null;
+    } finally {
+      if (mounted) _onMenuClosed();
+    }
+  }
+
+  /// The label/value pairs the info card renders, read off the live player
+  /// state. Split out of [_infoPanel] so both the pointer wrapper and the touch
+  /// band build the same card from the same source.
+  /// Only rows the player can actually answer. A row whose value is unknown is
+  /// **omitted**, not rendered as a placeholder: all three native info panels
+  /// drop blank rows, and "Resolution 0×0" / "Video Unknown" read as broken
+  /// playback rather than as missing metadata — which they routinely are during
+  /// the first moments of a load, before the first frame decodes.
+  List<(String, String)> _infoRows() {
+    final params = widget.controls.state.videoParams;
+    final video = _realVideoTrack();
+    final audio = _realAudioTrack();
+    final width = params.w ?? video.w;
+    final height = params.h ?? video.h;
+    final range = widget.dynamicRangeLabel(params);
+    final videoCodec = _codecOrNull(video.codec);
+    final audioLine = [
+      _codecOrNull(audio.codec),
+      audio.channels,
+    ].whereType<String>().where((e) => e.isNotEmpty).join(' · ');
+    return <(String, String)>[
+      if (width != null && height != null && width > 0 && height > 0)
+        (tr('Resolution'), '$width×$height'),
+      if (range.isNotEmpty) (tr('Dynamic range'), range),
+      if (videoCodec != null) (tr('Video'), videoCodec),
+      if (audioLine.isNotEmpty) (tr('Audio'), audioLine),
+      // Through `trimmedDecimal`, like every other number this app renders.
+      // `toStringAsFixed(3)` printed a whole rate as "25.000 FPS" — three
+      // decimals of nothing — while the badge a few pixels above already said
+      // "25fps", so the panel was the only thing disagreeing with itself.
+      if (video.fps case final fps? when fps > 0)
+        (tr('Frame rate'), '${trimmedDecimal(fps)} FPS'),
+    ];
+  }
+
+  /// The pointer path's info panel: the card at a fixed offset below the top
+  /// bar. Unused under [EmbeddedPlayerControls.touch] — see [_touchChrome].
+  Widget _infoPanel() {
+    return Positioned(
+      // Tracks the (inset) top bar so the panel stays below it, not under the
+      // status bar — see [_barInsets]. This 76 is a *literal* for the top
+      // bar's height, which only holds because the pointer bar never reflows;
+      // the touch path bands the card between the real bars instead, since
+      // there the number went stale the moment the badges stacked. See
+      // [_touchChrome].
+      top: 76 + _barInsets.top,
+      right: 20 + _barInsets.right,
+      child: _infoPanelCard(),
+    );
+  }
+
+  /// The stream-information card itself, shared by the pointer path's
+  /// fixed-offset [Positioned] and the touch path's band.
+  Widget _infoPanelCard() {
+    final content = _infoRows();
+    return SizedBox(
+      // The full width is wider than the usable width of a small phone in
+      // portrait once both insets and the right offset are taken out, so clamp
+      // rather than let the card run off the left edge. No-op on any
+      // desktop-sized surface.
+      width: math.min(
+        _m.infoPanelWidth,
+        MediaQuery.sizeOf(context).width -
+            _barInsets.horizontal -
+            40, // the 20pt right offset, mirrored as a left margin
+      ),
+      // Absorb taps so a press on the panel itself doesn't fall through to the
+      // background tap-outside handler and immediately re-close it.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {},
+        child: Material(
+          color: AppColors.panel.withValues(alpha: 0.96),
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+          child: Padding(
+            padding: EdgeInsets.all(_m.infoPanelPad),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  tr('Stream information'),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                for (final row in content)
+                  Padding(
+                    padding: EdgeInsets.symmetric(vertical: _m.infoRowPad),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 115,
+                          child: Text(
+                            row.$1,
+                            style: const TextStyle(color: AppColors.textLo),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            row.$2,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Rounded-rect chip button matching the native Windows GDI / Android Compose
+  // overlays (dark translucent fill, accent-tinted when active) rather than a
+  // bare Material IconButton, so the embedded overlay reads the same across the
+  // two Windows paths. [active] highlights a toggled control (e.g. an open
+  // menu); [color] overrides the icon tint (e.g. the accent favourite star).
+  Widget _button(
+    IconData icon,
+    String tooltip,
+    VoidCallback onPressed, {
+    Color? color,
+    bool active = false,
+    bool compact = false,
+    String? semanticsLabel,
+    FocusNode? focusNode,
+  }) => _chrome(
+    tooltip: tooltip,
+    semanticsLabel: semanticsLabel,
+    focusNode: focusNode,
+    onPressed: onPressed,
+    compact: compact,
+    active: active,
+    // A finger needs Apple's 44pt minimum in *both* axes, which is the floor
+    // every touch value in [EmbeddedOverlayMetrics] respects — the dense
+    // short-surface mode sits exactly on it. The pointer sizes are deliberately
+    // shorter than they are wide, which is fine for a cursor and not for a
+    // thumb.
+    child: SizedBox(
+      width: compact ? _m.buttonCompactWidth : _m.buttonWidth,
+      height: compact ? _m.buttonCompactHeight : _m.buttonHeight,
+      child: Icon(
+        icon,
+        size: compact ? _m.buttonCompactIcon : _m.buttonIcon,
+        color: color ?? (active ? Colors.white : AppColors.textHi),
+      ),
+    ),
+  );
+
+  /// The text-labelled sibling of [_button] — the aspect-mode control, whose
+  /// *label is its state*, matching all four native overlays. Keeps the same
+  /// chip styling and the same ≥44pt floor (as a *minimum*, so a wider label
+  /// like "16:9" grows the chip instead of clipping).
+  Widget _textButton(
+    String label,
+    String tooltip,
+    VoidCallback onPressed, {
+    String? semanticsLabel,
+  }) => _chrome(
+    tooltip: tooltip,
+    semanticsLabel: semanticsLabel,
+    onPressed: onPressed,
+    child: ConstrainedBox(
+      constraints: BoxConstraints(
+        minWidth: _m.buttonWidth,
+        minHeight: _m.buttonHeight,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Center(
+          widthFactor: 1,
+          heightFactor: 1,
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: AppColors.textHi,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  /// Shared chip chrome for [_button]/[_textButton]: the rounded translucent
+  /// fill matching the native Windows GDI / Android Compose overlays (rather
+  /// than a bare Material `IconButton`), plus the accessible name.
+  ///
+  /// **The name has to be a `label`, not the `Tooltip`.** Flutter maps a
+  /// tooltip to `semanticsTooltip`, which is a *hint* — every control here
+  /// therefore announced as an unnamed button with a trailing description,
+  /// while both native overlays set real names. This matters most on iOS's mpv
+  /// path, which for a Stalker/MAG portal is the primary player.
+  ///
+  /// `excludeSemantics` + an explicit `onTap` is deliberate: it collapses the
+  /// Tooltip's and the `InkWell`'s own annotations into this single node, so
+  /// the label can't be announced twice or land beside a second, unnamed
+  /// button node. Semantics exclusion doesn't affect hit testing, so the
+  /// pointer/touch path is unchanged.
+  Widget _chrome({
+    required String tooltip,
+    required String? semanticsLabel,
+    required VoidCallback onPressed,
+    required Widget child,
+    bool compact = false,
+    bool active = false,
+    FocusNode? focusNode,
+  }) {
+    void handle() {
+      _show();
+      onPressed();
+    }
+
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: compact ? 2 : 3),
+      child: Semantics(
+        label: semanticsLabel ?? tooltip,
+        button: true,
+        onTap: handle,
+        excludeSemantics: true,
+        child: Tooltip(
+          message: tooltip,
+          child: Material(
+            color: active
+                ? Color.alphaBlend(
+                    AppColors.accent.withValues(alpha: 0.30),
+                    AppColors.panel,
+                  )
+                : AppColors.panel.withValues(alpha: 0.85),
+            borderRadius: BorderRadius.circular(compact ? 10 : 12),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              focusNode: focusNode,
+              onTap: handle,
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _badge(String text) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: AppColors.panel.withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      text,
+      style: const TextStyle(
+        color: Color(0xFFCED2E0),
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
+
+  List<AudioTrack> _audioTracks() => widget.controls.state.tracks.audio
+      .where((track) => track.id != 'auto' && track.id != 'no')
+      .toList(growable: false);
+
+  /// Real subtitle tracks — the synthetic `auto`/`no` pair media_kit always
+  /// reports is excluded, so "the stream has subtitles" means what it says.
+  /// Empty on most live IPTV channels, which is why the button is gated on it.
+  List<SubtitleTrack> _subtitleTracks() => widget.controls.state.tracks.subtitle
+      .where((track) => track.id != 'auto' && track.id != 'no')
+      .toList(growable: false);
+
+  VideoTrack _realVideoTrack() => widget.controls.state.tracks.video.firstWhere(
+    (track) => track.id != 'auto' && track.id != 'no',
+    orElse: () => widget.controls.state.track.video,
+  );
+
+  AudioTrack _realAudioTrack() =>
+      _audioTracks().firstOrNull ?? widget.controls.state.track.audio;
+
+  static String _audioLabel(AudioTrack track) => [
+    track.language?.toUpperCase(),
+    track.title,
+    _codec(track.codec),
+    track.channels,
+  ].whereType<String>().where((value) => value.isNotEmpty).join(' · ');
+
+  static String _subtitleLabel(SubtitleTrack track) {
+    if (track.id == 'auto') return tr('Auto');
+    if (track.id == 'no') return tr('Off');
+    return track.title?.trim().isNotEmpty == true
+        ? track.title!
+        : (track.language?.toUpperCase() ?? tr('Subtitle {number}', {'number': track.id}));
+  }
+
+  static String _codec(String? codec) =>
+      codec == null || codec.isEmpty ? tr('Unknown') : codec.toUpperCase();
+
+  /// [_codec] without the "Unknown" placeholder — the info panel omits a row it
+  /// can't answer rather than filling it in.
+  static String? _codecOrNull(String? codec) =>
+      codec == null || codec.isEmpty ? null : codec.toUpperCase();
+  static String _hm(DateTime time) =>
+      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+  static String _duration(Duration value) {
+    final hours = value.inHours;
+    final minutes = value.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return hours > 0
+        ? '$hours:$minutes:$seconds'
+        : '${value.inMinutes}:$seconds';
+  }
+}
+
+String? playerLoadingMessage({
+  required bool opening,
+  required bool buffering,
+  required bool seeking,
+  required bool playing,
+  required bool completed,
+  required bool reconnecting,
+  required bool hasError,
+}) {
+  if (hasError) return null;
+  if (reconnecting) return tr('Reconnecting…');
+  if (completed) return null;
+  if (opening) return tr('Loading stream…');
+  if (seeking) return tr('Loading after seeking…');
+  if (buffering && playing) return tr('Buffering…');
+  return null;
+}
+
+class PlayerLoadingIndicator extends StatelessWidget {
+  const PlayerLoadingIndicator({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    child: Center(
+      child: Semantics(
+        liveRegion: true,
+        child: Container(
+          margin: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: AppColors.panel.withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(
+                  strokeWidth: 3,
+                  color: AppColors.accent,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Flexible(
+                child: Text(
+                  message,
+                  style: const TextStyle(color: AppColors.textHi, fontSize: 14),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class PlayerErrorOverlay extends StatelessWidget {
+  final bool canRetry;
+  final String message;
+  final VoidCallback onBack;
+  final VoidCallback onRetry;
+
+  const PlayerErrorOverlay({
+    super.key,
+    required this.message,
+    required this.onBack,
+    required this.onRetry,
+    this.canRetry = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.black.withValues(alpha: 0.88),
+      alignment: Alignment.center,
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline, color: AppColors.textLo, size: 48),
+          const SizedBox(height: 12),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppColors.textLo),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            alignment: WrapAlignment.center,
+            children: [
+              FilledButton.icon(
+                onPressed: onBack,
+                icon: const Icon(Icons.arrow_back),
+                label: Text(tr('Back')),
+              ),
+              if (canRetry)
+                FilledButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh),
+                  label: Text(tr('Retry')),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LiveBadge extends StatelessWidget {
+  const _LiveBadge({this.synced = true});
+
+  final bool synced;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: synced ? AppColors.live : Colors.white24,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.fiber_manual_record, size: 8, color: Colors.white),
+          SizedBox(width: 5),
+          Text(
+            tr('LIVE'),
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
