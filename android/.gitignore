@@ -1,0 +1,18 @@
+gradle-wrapper.jar
+/.gradle
+/captures/
+/gradlew
+/gradlew.bat
+/local.properties
+GeneratedPluginRegistrant.java
+.cxx/
+
+# Remember to never publicly share your *release* keystore.
+# See https://flutter.dev/to/reference-keystore
+key.properties
+**/*.keystore
+**/*.jks
+# Exception: a fixed *debug* keystore is intentionally committed so every CI APK
+# is signed with the same key and installs over the previous one on a test device
+# (no uninstall needed). Standard public android debug creds — not a release secret.
+!app/debug.keystore

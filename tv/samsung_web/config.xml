@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets"
+        xmlns:tizen="http://tizen.org/ns/widgets"
+        id="https://tvbro.online/samsung" version="0.1.38" viewmodes="maximized">
+  <name>TVBro</name>
+  <description>TVBro for Samsung Smart TV</description>
+  <content src="index.html" />
+  <icon src="icon.png" />
+  <access origin="*" subdomains="true" />
+  <feature name="http://tizen.org/feature/network.internet" />
+  <feature name="http://tizen.org/feature/screen.size.all" />
+  <tizen:application id="TVBroWebTV.TVBro" package="TVBroWebTV" required_version="3.0" />
+  <tizen:profile name="tv-samsung" />
+  <tizen:privilege name="http://tizen.org/privilege/internet" />
+  <tizen:privilege name="http://tizen.org/privilege/download" />
+  <tizen:privilege name="http://tizen.org/privilege/system" />
+  <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice" />
+  <tizen:privilege name="http://tizen.org/privilege/application.launch" />
+  <tizen:privilege name="http://tizen.org/privilege/filesystem.read" />
+  <tizen:privilege name="http://tizen.org/privilege/filesystem.write" />
+  <tizen:content-security-policy>default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: http: https:; media-src http: https: blob:; connect-src http: https:; font-src 'self'; object-src 'self'</tizen:content-security-policy>
+  <tizen:setting screen-orientation="landscape" context-menu="disable" hwkey-event="enable" />
+</widget>

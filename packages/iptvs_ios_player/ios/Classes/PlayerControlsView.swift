@@ -1,0 +1,1317 @@
+import AVKit
+import UIKit
+
+/// Everything the overlay can ask the player to do. One enum + one closure
+/// instead of a fourteen-method delegate protocol: the view makes no decisions,
+/// so every case is a bare "the user pressed this".
+enum PlayerControlsAction {
+  /// The **X**. An explicit Exit that skips the Back ladder entirely, matching
+  /// every other platform's on-screen back control (docs/player.md, Windows:
+  /// "the on-screen back-*arrow* button still exits directly").
+  case close
+  case playPause
+  case seekBy(Int64)
+  case seekToFraction(Double)
+  case previousEpisode
+  case nextEpisode
+  case selectEpisode(String)
+  case toggleEpisodes
+  case closeEpisodes
+  case toggleMute
+  case toggleFavorite
+  case goLive
+  case zapCommand(String)
+  case dvrCommand(String, Int64?)
+  case cycleAspect
+  case enterPictureInPicture
+  case toggleMenu(PlayerMenu)
+  case toggleInfo
+  case selectMenuOption(String)
+  /// Retry from the terminal error surface. Its sibling "Back" button reuses
+  /// ``close`` — on the Dart overlay that button pops the route, which is what
+  /// ``close`` already does here.
+  case retry
+  /// AVKit is about to put the AirPlay route sheet on screen, and is done with
+  /// it. Not a user command like the rest — a report, so the controller can pin
+  /// the chrome for the sheet's lifetime. None of the interaction inside an
+  /// AVKit-presented sheet reaches this overlay, so without these two the
+  /// auto-hide timer runs to completion behind it.
+  case routePickerWillPresent
+  case routePickerDidDismiss
+}
+
+/// The native player's control overlay — the port of Android's `ControlsOverlay`
+/// + `TopBar` + `BottomBar` + `TransportControls` + `RightCluster`
+/// (`.../player/PlayerControls.kt`), and the direct counterpart of the Windows
+/// GDI overlay's two bars.
+///
+/// **Two structural invariants, both load-bearing and both inherited from step
+/// 3:**
+///
+/// 1. **Scrim full-bleed, controls inset to the safe area.** The gradient runs
+///    to the physical edge — under the notch/Dynamic Island and the home
+///    indicator — because that is the only way it reads over video that itself
+///    reaches the edge. Every *control* lives inside `safeContainer`, which is
+///    pinned to `safeAreaLayoutGuide`. This is the same split as the Compose
+///    overlay's `safeDrawingPadding()` groups and the Windows overlay's bar
+///    insets; new chrome goes inside `safeContainer`, never against `bounds`.
+/// 2. **The view holds no policy.** Which buttons exist, what the badges read,
+///    which menu is open and what "behind the live edge" means are all
+///    `PlayerChromeState` in `Core`, where `swift test` can reach them. This
+///    file lays views out and forwards taps.
+///
+/// Playback status stays outside the visibility gate so waiting for a stream
+/// never becomes a frozen picture without an explanation.
+final class PlayerControlsView: UIView {
+  var onAction: ((PlayerControlsAction) -> Void)?
+
+  // MARK: Scrim + containers
+
+  private let topScrim = PlayerGradientView(colors: [PlayerColors.scrimTop, .clear])
+  private let bottomScrim = PlayerGradientView(colors: [.clear, PlayerColors.scrimBottom])
+  private let safeContainer = UIView()
+
+  // MARK: Top bar
+
+  private let topBar = UIStackView()
+  private let titleRow = UIStackView()
+  private let compactBadgeRow = UIStackView()
+  private let badgesStack = UIStackView()
+  private let titleLabel = UILabel()
+  private lazy var closeButton = PlayerIconButton(
+    systemName: "xmark",
+    accessibilityLabel: "Close player",
+    fallbackTitle: "Close"
+  ) { [weak self] in self?.onAction?(.close) }
+  private let sourceBadge = PlayerBadgeLabel()
+  private let liveBadge = PlayerBadgeLabel(font: PlayerFonts.livePill)
+  private let resolutionBadge = PlayerBadgeLabel()
+  private let hdrBadge = PlayerBadgeLabel()
+  private let fpsBadge = PlayerBadgeLabel()
+  /// Wall clock, rightmost — the same slot Android's TV overlay and the Windows
+  /// GDI overlay put theirs in.
+  ///
+  /// **Not gated the way Android gates its clock.** There it is TV-only
+  /// (`PlayerUiState.isTv`), because a phone already shows the system clock in
+  /// its status bar. This controller *hides* the status bar
+  /// (`prefersStatusBarHidden`), and — the load-bearing half — the same phone
+  /// reaches the shared Flutter overlay on every mpv-routed channel, which shows
+  /// an `HH:mm` badge unconditionally. An extension-less Stalker `create_link`
+  /// locator routes to mpv by `selectIosEngine` rule 4 while an `.m3u8` one
+  /// routes here, so one session on one device meets both surfaces; a gate would
+  /// mean the clock appearing and disappearing per channel.
+  private let clockBadge = PlayerBadgeLabel()
+  private lazy var episodesButton = PlayerIconButton(
+    systemName: "rectangle.stack",
+    accessibilityLabel: "Episodes",
+    fallbackTitle: "Episodes"
+  ) { [weak self] in self?.onAction?(.toggleEpisodes) }
+
+  // MARK: Bottom bar
+
+  private let bottomBar = UIStackView()
+  private let dvrControls = PlayerDvrControlsView()
+  private let scrubberRow = UIStackView()
+  private let positionLabel = UILabel()
+  private let durationLabel = UILabel()
+  private let scrubber = PlayerScrubberView()
+
+  private let epgStrip = UIStackView()
+  private let epgTitleRow = UIStackView()
+  private let epgTitleLabel = UILabel()
+  private let epgRangeLabel = UILabel()
+  private let epgProgress = PlayerProgressBarView()
+  private let epgNextLabel = UILabel()
+
+  private let primaryRow = UIView()
+  private let secondaryRow = UIStackView()
+  private let accessoryRow = UIStackView()
+  private let transportStack = UIStackView()
+  private let clusterStack = UIStackView()
+  private let clusterScroll = UIScrollView()
+  private var accessoryConstraints: [NSLayoutConstraint] = []
+  private var clusterWidthConstraint: NSLayoutConstraint?
+
+  private lazy var playPauseButton = PlayerIconButton(
+    systemName: "play.fill",
+    accessibilityLabel: "Play",
+    fallbackTitle: "Play"
+  ) { [weak self] in self?.onAction?(.playPause) }
+  private lazy var previousEpisodeButton = PlayerIconButton(
+    systemName: "backward.end.fill",
+    accessibilityLabel: "Previous episode",
+    fallbackTitle: "Previous episode"
+  ) { [weak self] in self?.onAction?(.previousEpisode) }
+  private lazy var nextEpisodeButton = PlayerIconButton(
+    systemName: "forward.end.fill",
+    accessibilityLabel: "Next episode",
+    fallbackTitle: "Next episode"
+  ) { [weak self] in self?.onAction?(.nextEpisode) }
+  private lazy var previousChannelButton = PlayerIconButton(
+    systemName: "chevron.down",
+    accessibilityLabel: PlayerStrings.text("Previous channel"),
+    fallbackTitle: PlayerStrings.text("Previous channel")
+  ) { [weak self] in self?.onAction?(.zapCommand("zap:down")) }
+  private lazy var nextChannelButton = PlayerIconButton(
+    systemName: "chevron.up",
+    accessibilityLabel: PlayerStrings.text("Next channel"),
+    fallbackTitle: PlayerStrings.text("Next channel")
+  ) { [weak self] in self?.onAction?(.zapCommand("zap:up")) }
+  private lazy var back10Button = PlayerIconButton(
+    systemName: "gobackward.10",
+    accessibilityLabel: "Back 10 seconds",
+    fallbackTitle: "-10"
+  ) { [weak self] in self?.onAction?(.seekBy(-10_000)) }
+  private lazy var forward10Button = PlayerIconButton(
+    systemName: "goforward.10",
+    accessibilityLabel: "Forward 10 seconds",
+    fallbackTitle: "+10"
+  ) { [weak self] in self?.onAction?(.seekBy(10_000)) }
+  private lazy var muteButton = PlayerIconButton(
+    systemName: "speaker.wave.2.fill",
+    accessibilityLabel: "Mute",
+    fallbackTitle: "Mute"
+  ) { [weak self] in self?.onAction?(.toggleMute) }
+  /// "Jump to the live edge", shown only once playback is behind it. The label
+  /// is the action, not the state: it used to read "LIVE", duplicating the LIVE
+  /// *status* badge in the top bar — which greys at the very moment this button
+  /// appears — with a word that says nothing about what tapping it does. The
+  /// accessible name was already "Go to live" on every surface; the visible
+  /// title now agrees with it, as it does on Android, Windows and Linux.
+  private lazy var goLiveButton = PlayerTextButton(
+    title: "Go to live",
+    accessibilityLabel: "Go to live"
+  ) { [weak self] in self?.onAction?(.goLive) }
+  private lazy var quickListButton = PlayerIconButton(
+    systemName: "list.bullet",
+    accessibilityLabel: PlayerStrings.text("Channel list"),
+    fallbackTitle: PlayerStrings.text("Channels")
+  ) { [weak self] in self?.onAction?(.zapCommand("zap:list")) }
+  private lazy var favoriteButton = PlayerIconButton(
+    systemName: "star",
+    accessibilityLabel: "Add to favorites",
+    fallbackTitle: "Fav"
+  ) { [weak self] in self?.onAction?(.toggleFavorite) }
+  private lazy var settingsButton = PlayerIconButton(
+    systemName: "gearshape",
+    accessibilityLabel: "Playback settings",
+    fallbackTitle: "Settings"
+  ) { [weak self] in self?.onAction?(.toggleMenu(.settings)) }
+  private lazy var audioButton = PlayerIconButton(
+    systemName: "waveform",
+    accessibilityLabel: "Audio track",
+    fallbackTitle: "Audio"
+  ) { [weak self] in self?.onAction?(.toggleMenu(.audio)) }
+  private lazy var subtitlesButton = PlayerIconButton(
+    systemName: "captions.bubble",
+    accessibilityLabel: "Subtitles",
+    fallbackTitle: "CC"
+  ) { [weak self] in self?.onAction?(.toggleMenu(.subtitles)) }
+  private lazy var aspectButton = PlayerTextButton(
+    title: PlayerAspectMode.fit.label,
+    accessibilityLabel: "Aspect ratio"
+  ) { [weak self] in self?.onAction?(.cycleAspect) }
+  /// AirPlay — the one capability no other platform in this repo has, and until
+  /// now reachable only through Control Centre.
+  ///
+  /// **Deliberately present here and nowhere else.** This controller *is* the
+  /// AVPlayer engine: mpv-routed content never reaches it (libmpv is only
+  /// reachable from Dart — docs/ios.md "engineFailed is a cross-language
+  /// handoff"), and mpv has no AirPlay at all, so the shared Flutter overlay the
+  /// mpv path renders correctly has no counterpart control. That asymmetry is
+  /// the routing rule showing through, not an oversight — do not "fix" it by
+  /// adding a picker to `EmbeddedPlayerControls`.
+  private lazy var airPlayButton = PlayerRoutePickerView(delegate: self)
+  private lazy var pipButton = PlayerIconButton(
+    systemName: "pip.enter",
+    accessibilityLabel: "Picture in picture",
+    fallbackTitle: "PiP"
+  ) { [weak self] in self?.onAction?(.enterPictureInPicture) }
+  // MARK: Panels + notices
+
+  private let listMenu = ListMenuView()
+  private let infoPanel = InfoPanelView()
+  private let episodeShelf = PlayerEpisodeShelfView()
+  private let reconnectChip = UIView()
+  private let loadingLabel = UILabel()
+  private let loadingSpinner = UIActivityIndicatorView(style: .medium)
+  private let errorView = PlayerErrorView()
+  private let zapBanner = PlayerZapBannerView()
+  private let quickList = PlayerQuickListView()
+
+  /// Nil until the first layout pass, so whichever arrangement the real width
+  /// calls for is applied once rather than assumed.
+  private var isCompact: Bool?
+  private var isBadgeCompact: Bool?
+  private var episodeControlsVisible = false
+
+  // MARK: - Construction
+
+  init() {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    buildHierarchy()
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("PlayerControlsView is created in code, never from a nib")
+  }
+
+  private func buildHierarchy() {
+    addSubview(topScrim)
+    addSubview(bottomScrim)
+    addSubview(safeContainer)
+
+    topScrim.translatesAutoresizingMaskIntoConstraints = false
+    bottomScrim.translatesAutoresizingMaskIntoConstraints = false
+    safeContainer.translatesAutoresizingMaskIntoConstraints = false
+
+    buildTopBar()
+    buildBottomBar()
+    buildPanels()
+    buildReconnectChip()
+    buildErrorView()
+
+    NSLayoutConstraint.activate([
+      // Full-bleed scrim: to the physical edges, deliberately not the safe area.
+      // The scrim's *inner* edge tracks the bar it backs (bottomAnchor for the
+      // top scrim, topAnchor for the bottom scrim, padded by `scrimFade`)
+      // instead of a fixed height, so it self-sizes to whichever bar is taller
+      // (the live bottom bar's EPG strip vs. the VOD scrubber) and can never
+      // meet the opposite scrim on a short landscape phone — a fixed
+      // 180pt + 220pt pair used to overlap outright there.
+      topScrim.topAnchor.constraint(equalTo: topAnchor),
+      topScrim.leadingAnchor.constraint(equalTo: leadingAnchor),
+      topScrim.trailingAnchor.constraint(equalTo: trailingAnchor),
+      topScrim.bottomAnchor.constraint(
+        equalTo: topBar.bottomAnchor,
+        constant: PlayerDimens.scrimFade
+      ),
+
+      bottomScrim.bottomAnchor.constraint(equalTo: bottomAnchor),
+      bottomScrim.leadingAnchor.constraint(equalTo: leadingAnchor),
+      bottomScrim.trailingAnchor.constraint(equalTo: trailingAnchor),
+      bottomScrim.topAnchor.constraint(
+        equalTo: bottomBar.topAnchor,
+        constant: -PlayerDimens.scrimFade
+      ),
+
+      // Controls: never under the notch, never under the home indicator.
+      safeContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
+      safeContainer.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
+      safeContainer.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
+      safeContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor),
+    ])
+  }
+
+  private func buildTopBar() {
+    titleLabel.font = PlayerFonts.title
+    titleLabel.textColor = PlayerColors.textHi
+    titleLabel.numberOfLines = 1
+    titleLabel.lineBreakMode = .byTruncatingTail
+    // The title is what gives way when the bar is narrow — the badges carry
+    // information that can't be inferred from anywhere else on screen.
+    titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+    badgesStack.axis = .horizontal
+    badgesStack.alignment = .center
+    badgesStack.spacing = PlayerDimens.controlSpacing
+    // Same order as Kotlin `TopBadges` and Dart `_badges()`: source, LIVE,
+    // resolution, HDR, fps, clock — clock always last.
+    for badge in [sourceBadge, liveBadge, resolutionBadge, hdrBadge, fpsBadge, clockBadge] {
+      badgesStack.addArrangedSubview(badge)
+    }
+
+    titleRow.axis = .horizontal
+    titleRow.alignment = .center
+    titleRow.spacing = 14
+    titleRow.addArrangedSubview(closeButton)
+    titleRow.addArrangedSubview(titleLabel)
+    titleRow.addArrangedSubview(episodesButton)
+    // `badgesStack` joins here in the wide arrangement and moves to
+    // `compactBadgeRow` below the breakpoint — see `applyCompactLayout`.
+    titleRow.addArrangedSubview(badgesStack)
+
+    compactBadgeRow.axis = .horizontal
+    compactBadgeRow.alignment = .center
+    compactBadgeRow.spacing = PlayerDimens.controlSpacing
+    compactBadgeRow.addArrangedSubview(PlayerControlsView.flexibleSpacer())
+    compactBadgeRow.isHidden = true
+
+    topBar.axis = .vertical
+    topBar.alignment = .fill
+    topBar.spacing = 6
+    topBar.translatesAutoresizingMaskIntoConstraints = false
+    topBar.addArrangedSubview(titleRow)
+    topBar.addArrangedSubview(compactBadgeRow)
+    safeContainer.addSubview(topBar)
+
+    NSLayoutConstraint.activate([
+      topBar.topAnchor.constraint(equalTo: safeContainer.topAnchor, constant: 12),
+      topBar.leadingAnchor.constraint(
+        equalTo: safeContainer.leadingAnchor,
+        constant: PlayerDimens.edgePadding
+      ),
+      topBar.trailingAnchor.constraint(
+        equalTo: safeContainer.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+    ])
+  }
+
+  private func buildBottomBar() {
+    // --- VOD scrubber ---------------------------------------------------
+    for label in [positionLabel, durationLabel] {
+      label.font = PlayerFonts.time
+      label.numberOfLines = 1
+    }
+    positionLabel.textColor = PlayerColors.textHi
+    durationLabel.textColor = PlayerColors.textLo
+    positionLabel.text = "0:00"
+    durationLabel.text = "0:00"
+
+    scrubber.onScrub = { [weak self] fraction in
+      self?.onAction?(.seekToFraction(fraction))
+    }
+
+    scrubberRow.axis = .horizontal
+    scrubberRow.alignment = .center
+    scrubberRow.spacing = 8
+    scrubberRow.addArrangedSubview(positionLabel)
+    scrubberRow.addArrangedSubview(scrubber)
+    scrubberRow.addArrangedSubview(durationLabel)
+    NSLayoutConstraint.activate([
+      positionLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 50),
+      scrubber.heightAnchor.constraint(equalToConstant: PlayerDimens.scrubberHeight),
+    ])
+
+    // --- Live EPG strip (sits where the scrubber would be) ---------------
+    epgTitleLabel.font = PlayerFonts.epgTitle
+    epgTitleLabel.textColor = PlayerColors.textHi
+    epgTitleLabel.numberOfLines = 1
+    epgTitleLabel.lineBreakMode = .byTruncatingTail
+    epgTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    epgRangeLabel.font = PlayerFonts.epgMeta
+    epgRangeLabel.textColor = PlayerColors.textLo
+    epgRangeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+    epgNextLabel.font = PlayerFonts.epgMeta
+    epgNextLabel.textColor = PlayerColors.textLo
+    epgNextLabel.numberOfLines = 1
+    epgNextLabel.lineBreakMode = .byTruncatingTail
+
+    epgTitleRow.axis = .horizontal
+    epgTitleRow.alignment = .center
+    epgTitleRow.spacing = 8
+    epgTitleRow.addArrangedSubview(epgTitleLabel)
+    epgTitleRow.addArrangedSubview(epgRangeLabel)
+
+    epgStrip.axis = .vertical
+    epgStrip.alignment = .fill
+    epgStrip.spacing = 6
+    epgStrip.addArrangedSubview(epgTitleRow)
+    epgStrip.addArrangedSubview(epgProgress)
+    epgStrip.addArrangedSubview(epgNextLabel)
+    epgProgress.heightAnchor.constraint(equalToConstant: PlayerDimens.trackHeight).isActive = true
+
+    // --- Transport + right cluster ---------------------------------------
+    transportStack.axis = .horizontal
+    transportStack.alignment = .center
+    transportStack.spacing = PlayerDimens.controlSpacing
+    transportStack.translatesAutoresizingMaskIntoConstraints = false
+    for button in [previousEpisodeButton, previousChannelButton, back10Button, playPauseButton,
+      forward10Button, nextChannelButton, nextEpisodeButton] {
+      transportStack.addArrangedSubview(button)
+    }
+
+    clusterStack.axis = .horizontal
+    clusterStack.alignment = .center
+    clusterStack.spacing = PlayerDimens.controlSpacing
+    clusterStack.translatesAutoresizingMaskIntoConstraints = false
+    clusterStack.addArrangedSubview(goLiveButton)
+    clusterStack.addArrangedSubview(quickListButton)
+    clusterStack.addArrangedSubview(favoriteButton)
+    clusterStack.addArrangedSubview(audioButton)
+    clusterStack.addArrangedSubview(subtitlesButton)
+    clusterStack.addArrangedSubview(aspectButton)
+    clusterStack.addArrangedSubview(airPlayButton)
+    clusterStack.addArrangedSubview(pipButton)
+
+    // Extras can scroll on a narrow phone while every transport hit stays on
+    // screen. The mute control remains fixed at the left edge.
+    clusterScroll.translatesAutoresizingMaskIntoConstraints = false
+    clusterScroll.addSubview(clusterStack)
+    let clusterWidth = clusterScroll.widthAnchor.constraint(equalToConstant: 0)
+    clusterWidthConstraint = clusterWidth
+    NSLayoutConstraint.activate([
+      clusterScroll.heightAnchor.constraint(equalToConstant: PlayerDimens.buttonSize),
+      clusterWidth,
+      clusterStack.topAnchor.constraint(equalTo: clusterScroll.contentLayoutGuide.topAnchor),
+      clusterStack.bottomAnchor.constraint(equalTo: clusterScroll.contentLayoutGuide.bottomAnchor),
+      clusterStack.leadingAnchor.constraint(equalTo: clusterScroll.contentLayoutGuide.leadingAnchor),
+      clusterStack.trailingAnchor.constraint(equalTo: clusterScroll.contentLayoutGuide.trailingAnchor),
+      clusterStack.heightAnchor.constraint(equalTo: clusterScroll.frameLayoutGuide.heightAnchor),
+    ])
+
+    accessoryRow.axis = .horizontal
+    accessoryRow.alignment = .center
+    accessoryRow.spacing = PlayerDimens.controlSpacing
+    accessoryRow.translatesAutoresizingMaskIntoConstraints = false
+    accessoryRow.addArrangedSubview(muteButton)
+    accessoryRow.addArrangedSubview(PlayerControlsView.flexibleSpacer())
+    accessoryRow.addArrangedSubview(clusterScroll)
+    accessoryRow.addArrangedSubview(settingsButton)
+    primaryRow.addSubview(accessoryRow)
+    primaryRow.addSubview(transportStack)
+    accessoryConstraints = [
+      accessoryRow.topAnchor.constraint(equalTo: primaryRow.topAnchor),
+      accessoryRow.bottomAnchor.constraint(equalTo: primaryRow.bottomAnchor),
+      accessoryRow.leadingAnchor.constraint(equalTo: primaryRow.leadingAnchor),
+      accessoryRow.trailingAnchor.constraint(equalTo: primaryRow.trailingAnchor),
+    ]
+    NSLayoutConstraint.activate(accessoryConstraints)
+    NSLayoutConstraint.activate([
+      transportStack.centerXAnchor.constraint(equalTo: primaryRow.centerXAnchor),
+      transportStack.topAnchor.constraint(equalTo: primaryRow.topAnchor),
+      transportStack.bottomAnchor.constraint(equalTo: primaryRow.bottomAnchor),
+    ])
+
+    secondaryRow.axis = .horizontal
+    secondaryRow.alignment = .center
+    secondaryRow.spacing = PlayerDimens.controlSpacing
+    secondaryRow.isHidden = true
+
+    bottomBar.axis = .vertical
+    bottomBar.alignment = .fill
+    bottomBar.spacing = 12
+    bottomBar.translatesAutoresizingMaskIntoConstraints = false
+    bottomBar.addArrangedSubview(scrubberRow)
+    bottomBar.addArrangedSubview(epgStrip)
+    bottomBar.addArrangedSubview(primaryRow)
+    bottomBar.addArrangedSubview(secondaryRow)
+    bottomBar.addArrangedSubview(dvrControls)
+    dvrControls.onCommand = { [weak self] command, position in
+      self?.onAction?(.dvrCommand(command, position))
+    }
+    safeContainer.addSubview(bottomBar)
+
+    NSLayoutConstraint.activate([
+      bottomBar.leadingAnchor.constraint(
+        equalTo: safeContainer.leadingAnchor,
+        constant: PlayerDimens.edgePadding
+      ),
+      bottomBar.trailingAnchor.constraint(
+        equalTo: safeContainer.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+      bottomBar.bottomAnchor.constraint(equalTo: safeContainer.bottomAnchor, constant: -18),
+    ])
+  }
+
+  private func buildPanels() {
+    addSubview(zapBanner)
+    addSubview(quickList)
+    safeContainer.addSubview(listMenu)
+    safeContainer.addSubview(infoPanel)
+    safeContainer.addSubview(episodeShelf)
+    episodeShelf.onSelect = { [weak self] id in self?.onAction?(.selectEpisode(id)) }
+    episodeShelf.onClose = { [weak self] in self?.onAction?(.closeEpisodes) }
+    quickList.onCommand = { [weak self] in self?.onAction?(.zapCommand($0)) }
+    listMenu.isHidden = true
+    infoPanel.isHidden = true
+    listMenu.onSelect = { [weak self] id in
+      self?.onAction?(.selectMenuOption(id))
+    }
+
+    // Both "stay off the other bar" constraints are 999, not required: on a
+    // short landscape phone a tall info panel or a long track list genuinely
+    // cannot fit between the bars, and a *required* constraint there would make
+    // the layout unsatisfiable — UIKit then drops one of its choosing and logs a
+    // wall of constraint output. At 999 the panel is allowed to overlap the bar
+    // slightly instead, which is a visible cosmetic compromise rather than an
+    // arbitrary broken layout.
+    let menuTop = listMenu.topAnchor.constraint(
+      greaterThanOrEqualTo: safeContainer.topAnchor,
+      constant: 8
+    )
+    menuTop.priority = UILayoutPriority(999)
+    let infoBottom = infoPanel.bottomAnchor.constraint(
+      lessThanOrEqualTo: bottomBar.topAnchor,
+      constant: -12
+    )
+    infoBottom.priority = UILayoutPriority(999)
+
+    NSLayoutConstraint.activate([
+      zapBanner.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 76),
+      zapBanner.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -PlayerDimens.edgePadding),
+      zapBanner.leadingAnchor.constraint(greaterThanOrEqualTo: safeAreaLayoutGuide.leadingAnchor, constant: PlayerDimens.edgePadding),
+
+      quickList.topAnchor.constraint(equalTo: topAnchor),
+      quickList.leadingAnchor.constraint(equalTo: leadingAnchor),
+      quickList.trailingAnchor.constraint(equalTo: trailingAnchor),
+      quickList.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+      // Anchored above the bottom bar's right cluster, the way Kotlin aligns it
+      // BottomEnd with a 96dp bottom padding — expressed here against the bar
+      // itself so a taller live bar (EPG strip) pushes the menu up with it.
+      listMenu.trailingAnchor.constraint(
+        equalTo: safeContainer.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+      listMenu.bottomAnchor.constraint(equalTo: bottomBar.topAnchor, constant: -12),
+      menuTop,
+
+      infoPanel.trailingAnchor.constraint(
+        equalTo: safeContainer.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+      infoPanel.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 12),
+      infoBottom,
+
+      episodeShelf.leadingAnchor.constraint(
+        equalTo: safeContainer.leadingAnchor,
+        constant: PlayerDimens.edgePadding
+      ),
+      episodeShelf.trailingAnchor.constraint(
+        equalTo: safeContainer.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+      episodeShelf.bottomAnchor.constraint(equalTo: safeContainer.bottomAnchor, constant: -12),
+    ])
+  }
+
+  private func buildReconnectChip() {
+    reconnectChip.translatesAutoresizingMaskIntoConstraints = false
+    reconnectChip.backgroundColor = PlayerColors.panel
+    reconnectChip.layer.cornerRadius = PlayerDimens.menuCorner
+    reconnectChip.layer.masksToBounds = true
+    reconnectChip.isHidden = true
+    // Not a control: it must never eat a tap that would otherwise reveal the
+    // chrome.
+    reconnectChip.isUserInteractionEnabled = false
+
+    loadingSpinner.color = PlayerColors.accent
+
+    loadingLabel.font = PlayerFonts.notice
+    loadingLabel.textColor = PlayerColors.textHi
+    loadingLabel.numberOfLines = 0
+
+    let row = UIStackView(arrangedSubviews: [loadingSpinner, loadingLabel])
+    row.axis = .horizontal
+    row.alignment = .center
+    row.spacing = 12
+    row.translatesAutoresizingMaskIntoConstraints = false
+    reconnectChip.addSubview(row)
+    // Added last so it sits above the bars, and outside `safeContainer` so it
+    // survives the chrome being hidden.
+    addSubview(reconnectChip)
+
+    NSLayoutConstraint.activate([
+      row.topAnchor.constraint(equalTo: reconnectChip.topAnchor, constant: 14),
+      row.bottomAnchor.constraint(equalTo: reconnectChip.bottomAnchor, constant: -14),
+      row.leadingAnchor.constraint(equalTo: reconnectChip.leadingAnchor, constant: 20),
+      row.trailingAnchor.constraint(equalTo: reconnectChip.trailingAnchor, constant: -20),
+      reconnectChip.centerXAnchor.constraint(equalTo: safeAreaLayoutGuide.centerXAnchor),
+      reconnectChip.centerYAnchor.constraint(equalTo: safeAreaLayoutGuide.centerYAnchor),
+      reconnectChip.leadingAnchor.constraint(
+        greaterThanOrEqualTo: safeAreaLayoutGuide.leadingAnchor,
+        constant: PlayerDimens.edgePadding
+      ),
+      reconnectChip.trailingAnchor.constraint(
+        lessThanOrEqualTo: safeAreaLayoutGuide.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+    ])
+  }
+
+  /// The terminal error surface. Added **last** so it sits above every bar and
+  /// panel, and **outside `safeContainer`** so it survives the chrome being
+  /// hidden — same reasoning as the reconnect chip: a failure the viewer only
+  /// learns about if they happen to tap first is indistinguishable from the hang
+  /// it exists to replace.
+  private func buildErrorView() {
+    errorView.isHidden = true
+    errorView.onBack = { [weak self] in self?.onAction?(.close) }
+    errorView.onRetry = { [weak self] in self?.onAction?(.retry) }
+    addSubview(errorView)
+    NSLayoutConstraint.activate([
+      errorView.topAnchor.constraint(equalTo: topAnchor),
+      errorView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      errorView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      errorView.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+  }
+
+  private static func flexibleSpacer() -> UIView {
+    let spacer = UIView()
+    spacer.isUserInteractionEnabled = false
+    spacer.setContentHuggingPriority(UILayoutPriority(1), for: .horizontal)
+    spacer.setContentCompressionResistancePriority(UILayoutPriority(1), for: .horizontal)
+    return spacer
+  }
+
+  // MARK: - Responsive arrangement
+
+  /// Wrap the accessories when they would overlap the centered transport.
+  /// The breakpoint also keeps the badges on their own row on portrait phones.
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let available = max(0, safeContainer.bounds.width - PlayerDimens.edgePadding * 2)
+    let count = CGFloat(transportStack.arrangedSubviews.filter { !$0.isHidden }.count)
+    let gaps = max(1, count - 1)
+    transportStack.spacing = min(
+      PlayerDimens.controlSpacing,
+      max(0, (available - PlayerDimens.buttonSize * count) / gaps)
+    )
+    let transportWidth = PlayerDimens.buttonSize * count + transportStack.spacing * max(0, count - 1)
+    let clusterWidth = clusterStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
+    clusterWidthConstraint?.constant = min(
+      clusterWidth,
+      max(0, available - PlayerDimens.buttonSize * 2 - PlayerDimens.controlSpacing * 3)
+    )
+    let rightWidth = clusterWidth + PlayerDimens.controlSpacing + PlayerDimens.buttonSize
+    let compactBadges = bounds.width < PlayerDimens.compactWidth
+    let compact = compactBadges
+      || transportWidth + 2 * (rightWidth + PlayerDimens.controlSpacing) > available
+    guard compact != isCompact || compactBadges != isBadgeCompact else { return }
+    isCompact = compact
+    isBadgeCompact = compactBadges
+    applyCompactLayout(compact, compactBadges: compactBadges)
+  }
+
+  private func applyCompactLayout(_ compact: Bool, compactBadges: Bool) {
+    if compactBadges {
+      if badgesStack.superview !== compactBadgeRow {
+        compactBadgeRow.insertArrangedSubview(badgesStack, at: 0)
+      }
+      compactBadgeRow.isHidden = false
+    } else {
+      if badgesStack.superview !== titleRow {
+        titleRow.addArrangedSubview(badgesStack)
+      }
+      compactBadgeRow.isHidden = true
+    }
+    if compact {
+      if accessoryRow.superview !== secondaryRow {
+        NSLayoutConstraint.deactivate(accessoryConstraints)
+        accessoryRow.removeFromSuperview()
+        secondaryRow.addArrangedSubview(accessoryRow)
+      }
+      secondaryRow.isHidden = false
+    } else {
+      if accessoryRow.superview !== primaryRow {
+        secondaryRow.removeArrangedSubview(accessoryRow)
+        accessoryRow.removeFromSuperview()
+        primaryRow.insertSubview(accessoryRow, belowSubview: transportStack)
+        NSLayoutConstraint.activate(accessoryConstraints)
+      }
+      secondaryRow.isHidden = true
+    }
+  }
+
+  // MARK: - Render
+
+  /// Applies `state` to every control. Idempotent and cheap enough to run on
+  /// each 500 ms progress tick — the state box already filters out no-op
+  /// changes, and the sub-views that would otherwise churn (menu rows, info
+  /// rows, SF symbols) each guard on their own last-rendered value.
+  ///
+  /// - Parameter nowMs: wall-clock epoch for the live EPG progress bar **and the
+  ///   clock badge**. Passed in rather than read here so the clock stays a
+  ///   controller concern and the view has no hidden time dependency.
+  func render(_ state: PlayerChromeState, nowMs: Int64) {
+    // Status and errors remain visible independently of the control bars.
+    if let message = state.loadingMessage {
+      loadingLabel.text = PlayerStrings.text(message)
+      reconnectChip.isHidden = false
+      loadingSpinner.startAnimating()
+    } else {
+      reconnectChip.isHidden = true
+      loadingSpinner.stopAnimating()
+    }
+    errorView.render(message: state.errorMessage)
+    zapBanner.render(state.zapBanner, visible: state.zapBannerVisible)
+    quickList.render(state.quickList)
+    dvrControls.render(state.dvr, liveSynced: state.liveSynced)
+
+    let visible = state.controlsVisible
+    topScrim.isHidden = !visible
+    bottomScrim.isHidden = !visible
+    safeContainer.isHidden = !visible
+    guard visible else { return }
+
+    renderTopBar(state, nowMs: nowMs)
+    renderProgress(state, nowMs: nowMs)
+    renderTransport(state)
+    renderCluster(state)
+
+    listMenu.render(state.menuContent())
+    infoPanel.render(state)
+    episodeShelf.render(state)
+  }
+
+  /// Root video gestures are allowed only in the uncovered picture. UIKit's
+  /// stack/spacer views are not controls, so ancestor checks alone miss them.
+  func containsControlBar(_ point: CGPoint) -> Bool {
+    guard !safeContainer.isHidden else { return false }
+    return [topBar, bottomBar].contains { bar in
+      bar.convert(bar.bounds, to: self).contains(point)
+    }
+  }
+
+  private func renderTopBar(_ state: PlayerChromeState, nowMs: Int64) {
+    titleLabel.text = state.title
+    episodesButton.isHidden = !state.showEpisodeControls
+    sourceBadge.apply(state.sourceBadge)
+    resolutionBadge.apply(state.resolutionBadge)
+    hdrBadge.apply(state.hdrBadge)
+    hdrBadge.backgroundColor = PlayerColors.accent
+    fpsBadge.apply(state.fpsBadge)
+    // `HH:mm`, device time zone, selected locale — the same `playerClockHm` the EPG
+    // strip's time ranges use, and the same 24-hour zero-padded shape Kotlin's
+    // `formatClock`/`clockHm`, the Windows `FormatClock` and Dart's `_hm` all
+    // produce. Never nil, so unlike its neighbours the badge never collapses.
+    clockBadge.apply(playerClockHm(ms: nowMs, locale: PlayerStrings.locale))
+
+    liveBadge.isHidden = !state.showLiveBadge
+    if state.showLiveBadge {
+      liveBadge.text = PlayerStrings.text("LIVE")
+      // Red at the live edge, grey once behind — the pairing with the go-to-live
+      // button that every other overlay uses.
+      liveBadge.backgroundColor = state.liveSynced ? PlayerColors.live : PlayerColors.trackInactive
+      liveBadge.textColor = state.liveSynced ? .white : PlayerColors.textLo
+    }
+  }
+
+  private func renderProgress(_ state: PlayerChromeState, nowMs: Int64) {
+    scrubberRow.isHidden = !state.showScrubber
+    if state.showScrubber {
+      positionLabel.text = state.positionLabel
+      durationLabel.text = state.durationLabel
+      // Never fight the finger: while a drag is in flight the thumb follows the
+      // touch, not the (pre-seek) player position.
+      if !scrubber.isTracking {
+        scrubber.progress = state.progressFraction
+      }
+    }
+
+    epgStrip.isHidden = !state.showLiveEpgStrip
+    guard state.showLiveEpgStrip, let now = state.epgNow else { return }
+    epgTitleLabel.text = now.title
+    epgRangeLabel.text = playerEpgRangeLabel(now, locale: PlayerStrings.locale)
+    epgProgress.progress = state.liveProgrammeProgress(nowMs: nowMs)
+    if let next = state.epgNext {
+      epgNextLabel.text = PlayerStrings.text("Next · {range} · {title}", [
+        "range": playerEpgRangeLabel(next, locale: PlayerStrings.locale),
+        "title": next.title,
+      ])
+      epgNextLabel.isHidden = false
+    } else {
+      epgNextLabel.isHidden = true
+    }
+  }
+
+  private func renderTransport(_ state: PlayerChromeState) {
+    if episodeControlsVisible != state.showEpisodeControls {
+      episodeControlsVisible = state.showEpisodeControls
+      setNeedsLayout()
+    }
+    playPauseButton.setSymbol(
+      state.isPlaying ? "pause.fill" : "play.fill",
+      fallbackTitle: state.isPlaying ? "Pause" : "Play"
+    )
+    playPauseButton.accessibilityLabel = PlayerStrings.text(state.isPlaying ? "Pause" : "Play")
+
+    back10Button.isHidden = !state.showSkipButtons
+    forward10Button.isHidden = !state.showSkipButtons
+    previousEpisodeButton.isHidden = !state.showEpisodeControls
+    nextEpisodeButton.isHidden = !state.showEpisodeControls
+    previousChannelButton.isHidden = !state.isLive || !state.canZap
+    nextChannelButton.isHidden = !state.isLive || !state.canZap
+    previousEpisodeButton.isEnabled = state.previousEpisodeId != nil
+    nextEpisodeButton.isEnabled = state.nextEpisodeId != nil
+    previousEpisodeButton.alpha = previousEpisodeButton.isEnabled ? 1 : 0.35
+    nextEpisodeButton.alpha = nextEpisodeButton.isEnabled ? 1 : 0.35
+
+    muteButton.setSymbol(
+      state.muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+      fallbackTitle: state.muted ? "Unmute" : "Mute"
+    )
+    muteButton.accessibilityLabel = PlayerStrings.text(state.muted ? "Unmute" : "Mute")
+  }
+
+  private func renderCluster(_ state: PlayerChromeState) {
+    goLiveButton.isHidden = !state.showGoLiveButton
+    quickListButton.isHidden = !state.showQuickListButton
+
+    favoriteButton.isHidden = !state.showFavoriteButton
+    if state.showFavoriteButton {
+      favoriteButton.setSymbol(
+        state.isFavorite ? "star.fill" : "star",
+        fallbackTitle: state.isFavorite ? "Unfav" : "Fav"
+      )
+      favoriteButton.accessibilityLabel = PlayerStrings.text(
+        state.isFavorite ? "Remove from favorites" : "Add to favorites"
+      )
+    }
+
+    // Empty until step 9 reads the item's media-selection groups; the state's
+    // own rules keep both buttons hidden until there is a real choice.
+    audioButton.isHidden = !state.showAudioButton
+    subtitlesButton.isHidden = !state.showSubtitleButton
+
+    aspectButton.setLabel(state.aspectLabel)
+    // Step 7 flips `supportsPip` once an `AVPictureInPictureController` exists.
+    pipButton.isHidden = !state.showPictureInPictureButton
+    // `airPlayButton` has no render branch on purpose: AVKit owns its glyph and
+    // its active/inactive appearance, and there is no state under which this
+    // controller should hide it — the AVPlayer engine can always route audio,
+    // even for content with no picture.
+    setNeedsLayout()
+  }
+}
+
+/// A bottom sheet with a horizontal, finger-scrollable episode strip. It owns
+/// hit testing so its taps and scrolls never reach the video seek recognizers.
+private final class PlayerEpisodeShelfView: UIView, PlayerTapAbsorbing {
+  var onSelect: ((String) -> Void)?
+  var onClose: (() -> Void)?
+
+  private let scroll = UIScrollView()
+  private let episodeRow = UIStackView()
+  private var renderedEpisodes: [PlayerEpisode] = []
+  private var renderedCurrentId: String?
+  private var showing = false
+  private var currentButton: UIButton?
+
+  init() {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    backgroundColor = PlayerColors.panel
+    layer.cornerRadius = PlayerDimens.menuCorner
+    layer.masksToBounds = true
+    isHidden = true
+
+    let title = UILabel()
+    title.text = PlayerStrings.text("Episodes")
+    title.font = PlayerFonts.title
+    title.textColor = PlayerColors.textHi
+    let close = PlayerIconButton(
+      systemName: "xmark",
+      accessibilityLabel: "Close episodes",
+      fallbackTitle: "Close"
+    ) { [weak self] in self?.onClose?() }
+    let header = UIStackView(arrangedSubviews: [title, close])
+    header.axis = .horizontal
+    header.alignment = .center
+    header.spacing = 12
+    header.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(header)
+
+    scroll.translatesAutoresizingMaskIntoConstraints = false
+    scroll.showsHorizontalScrollIndicator = false
+    scroll.alwaysBounceHorizontal = true
+    scroll.directionalLockEnabled = true
+    addSubview(scroll)
+    episodeRow.axis = .horizontal
+    episodeRow.alignment = .fill
+    episodeRow.spacing = 10
+    episodeRow.translatesAutoresizingMaskIntoConstraints = false
+    scroll.addSubview(episodeRow)
+
+    NSLayoutConstraint.activate([
+      header.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+      header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+      header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+      scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+      scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+      scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+      scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+      scroll.heightAnchor.constraint(equalToConstant: 76),
+      episodeRow.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+      episodeRow.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+      episodeRow.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+      episodeRow.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+      episodeRow.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
+    ])
+
+    let dismissSwipe = UISwipeGestureRecognizer(target: self, action: #selector(swipedDown))
+    dismissSwipe.direction = .down
+    addGestureRecognizer(dismissSwipe)
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("PlayerEpisodeShelfView is created in code, never from a nib")
+  }
+
+  @objc private func swipedDown() { onClose?() }
+
+  func render(_ state: PlayerChromeState) {
+    let open = state.episodesOpen && state.showEpisodeControls
+    guard open || showing else { return }
+    if renderedEpisodes != state.episodes || renderedCurrentId != state.currentEpisodeId {
+      renderedEpisodes = state.episodes
+      renderedCurrentId = state.currentEpisodeId
+      for child in episodeRow.arrangedSubviews {
+        episodeRow.removeArrangedSubview(child)
+        child.removeFromSuperview()
+      }
+      for episode in state.episodes {
+        let selected = episode.id == state.currentEpisodeId
+        let button = UIButton(type: .system)
+        var configuration = UIButton.Configuration.filled()
+        configuration.title = episode.title
+        configuration.titleAlignment = .leading
+        configuration.baseBackgroundColor = selected ? PlayerColors.accent : PlayerColors.panelHi
+        configuration.baseForegroundColor = PlayerColors.textHi
+        configuration.cornerStyle = .medium
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12)
+        button.configuration = configuration
+        button.titleLabel?.numberOfLines = 3
+        button.titleLabel?.font = PlayerFonts.menuRow
+        button.widthAnchor.constraint(equalToConstant: 168).isActive = true
+        button.accessibilityLabel = episode.title
+        button.accessibilityTraits = selected ? [.button, .selected] : [.button]
+        button.addAction(UIAction { [weak self] _ in self?.onSelect?(episode.id) }, for: .touchUpInside)
+        episodeRow.addArrangedSubview(button)
+        if selected { currentButton = button }
+      }
+    }
+
+    guard open != showing else { return }
+    showing = open
+    if open {
+      isHidden = false
+      superview?.layoutIfNeeded()
+      if let currentButton {
+        scroll.scrollRectToVisible(currentButton.frame, animated: false)
+      }
+      transform = CGAffineTransform(translationX: 0, y: bounds.height)
+      alpha = 0
+    }
+    UIView.animate(
+      withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.22,
+      delay: 0,
+      options: [.beginFromCurrentState, .curveEaseOut]
+    ) {
+      self.transform = open ? .identity : CGAffineTransform(translationX: 0, y: self.bounds.height)
+      self.alpha = open ? 1 : 0
+    } completion: { [weak self] _ in
+      guard let self, !self.showing else { return }
+      self.isHidden = true
+    }
+  }
+}
+
+// MARK: - AVRoutePickerViewDelegate
+
+/// Pins the chrome for the lifetime of the AirPlay route sheet.
+///
+/// AVKit presents that sheet itself, so none of the interaction inside it
+/// reaches `pokeControls` and the auto-hide timer would otherwise run to
+/// completion behind it — the viewer would dismiss the sheet onto a bare
+/// picture. This is the same "a pinned overlay never auto-hides" rule the open
+/// menu/info cases already have (docs/player.md); the decision lives in
+/// `PlayerChromeState.pinned`, and these two callbacks only report the edges.
+extension PlayerControlsView: AVRoutePickerViewDelegate {
+  func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+    onAction?(.routePickerWillPresent)
+  }
+
+  func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+    onAction?(.routePickerDidDismiss)
+  }
+}
+
+/// The AirPlay route picker, dressed as one of this overlay's chip buttons.
+///
+/// `AVRoutePickerView` rather than a hand-rolled button because the route list,
+/// the "connecting" state and the active-route glyph are all AVKit's; there is
+/// no public API to present the system route sheet yourself. What is ours is the
+/// chrome around it: the translucent chip, the corner radius, and the
+/// ``PlayerDimens/buttonSize`` square its neighbours honour.
+///
+/// ``PlayerTapAbsorbing`` for the same reason the menus are: a press here is a
+/// press on a control, and the root tap recogniser's ladder must not also fire.
+/// The other controls get that for free by being `UIControl`s — this one is a
+/// plain `UIView` wrapping AVKit's own button, so the ancestor walk in
+/// `IptvsPlayerViewController`'s gesture delegate needs something to stop on.
+///
+/// **Two things to confirm on a device**, neither observable in the Simulator
+/// (which has no AirPlay routes at all):
+///
+/// 1. that AVKit's internal button really fills these 44x44 bounds rather than
+///    centring a smaller glyph-sized button inside them — if it centres, the
+///    *tap* target shrinks below the 44pt floor even though the chip does not;
+/// 2. how the route sheet behaves over an `.overFullScreen` presentation. It is
+///    a popover on a regular-width layout (iPad) and a sheet on a compact one,
+///    and an `.overFullScreen` presenter is exactly the configuration where a
+///    popover's anchoring is worth eyeballing rather than assuming.
+final class PlayerRoutePickerView: UIView, PlayerTapAbsorbing {
+  private let picker = AVRoutePickerView()
+
+  init(delegate: AVRoutePickerViewDelegate) {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    backgroundColor = PlayerColors.buttonBackground
+    layer.cornerRadius = PlayerDimens.buttonCorner
+    layer.masksToBounds = true
+
+    picker.translatesAutoresizingMaskIntoConstraints = false
+    // `AVRoutePickerView.delegate` is a weak reference, so the owning
+    // `PlayerControlsView` passing itself here is not a cycle.
+    picker.delegate = delegate
+    // No `routePickerButtonStyle` here: it is **macOS-only** (`@available(macOS
+    // 10.15, *)`, unavailable in iOS), and setting it is a hard compile error
+    // rather than a no-op. On iOS the picker draws a bare glyph with no
+    // background of its own, which is exactly what this chip wants — the style
+    // knob only exists on macOS because AppKit's variant can draw its own
+    // bezel. Appearance here is `tintColor`/`activeTintColor` and nothing else.
+    picker.tintColor = PlayerColors.textHi
+    // Accent while a route is actually in use — the same colour a pressed
+    // `PlayerIconButton` takes, spent here on "AirPlay is on" instead.
+    picker.activeTintColor = PlayerColors.accent
+    // This is a video player; an Apple TV should outrank a HomePod in the list.
+    picker.prioritizesVideoDevices = true
+    // AVKit's own button carries a system "AirPlay" label, so this is belt and
+    // braces rather than the only label — but a control this overlay places is a
+    // control this overlay names.
+    picker.accessibilityLabel = "AirPlay"
+    accessibilityLabel = "AirPlay"
+    addSubview(picker)
+
+    NSLayoutConstraint.activate([
+      widthAnchor.constraint(equalToConstant: PlayerDimens.buttonSize),
+      heightAnchor.constraint(equalToConstant: PlayerDimens.buttonSize),
+      picker.topAnchor.constraint(equalTo: topAnchor),
+      picker.leadingAnchor.constraint(equalTo: leadingAnchor),
+      picker.trailingAnchor.constraint(equalTo: trailingAnchor),
+      picker.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("PlayerRoutePickerView is created in code, never from a nib")
+  }
+}
+
+/// The terminal error/Retry surface — the native mirror of Dart's
+/// `PlayerErrorOverlay` (`lib/player/player_overlay.dart`), down to the same
+/// three elements in the same order: icon, message, Back + Retry.
+///
+/// Kept to that and no further on purpose. This is the *last* recovery on a
+/// platform whose primary recovery is the mpv handoff, so its job is to be
+/// unmistakable and impossible to get stuck behind, not to explain itself:
+/// anything more detailed would mean putting an `AVError` description on screen,
+/// and those interpolate the credential-bearing stream URL (CLAUDE.md).
+///
+/// ``PlayerTapAbsorbing`` because it is a modal surface: the root tap recogniser
+/// drives the Back ladder, and a tap on the card must not also toggle the chrome
+/// underneath it. Hidden it is not hit-testable at all, so the ladder is
+/// untouched the rest of the time.
+final class PlayerErrorView: UIView, PlayerTapAbsorbing {
+  var onBack: (() -> Void)?
+  var onRetry: (() -> Void)?
+
+  private let messageLabel = UILabel()
+  private lazy var backButton = PlayerTextButton(
+    title: "Back",
+    accessibilityLabel: "Back"
+  ) { [weak self] in self?.onBack?() }
+  private lazy var retryButton = PlayerTextButton(
+    title: "Retry",
+    accessibilityLabel: "Retry"
+  ) { [weak self] in self?.onRetry?() }
+
+  /// Preferred column width. A message centred across a landscape iPad would
+  /// otherwise stretch into a single unreadable line.
+  private static let maxContentWidth: CGFloat = 420
+
+  init() {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    // Matches the Dart overlay's `Colors.black.withValues(alpha: 0.88)`.
+    backgroundColor = UIColor.black.withAlphaComponent(0.88)
+
+    let icon = UIImageView()
+    icon.tintColor = PlayerColors.textLo
+    // `.center`, not `.scaleAspectFit`: the stack fills the column width (see
+    // below), and a symbol scaled to that width would be enormous.
+    icon.contentMode = .center
+    icon.image = UIImage(
+      systemName: "exclamationmark.circle",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 44, weight: .regular)
+    )
+    // Same failing-visibly rule as `PlayerIconButton`: a nil SF Symbol is an
+    // invisible view, so collapse it rather than leave a mystery gap.
+    icon.isHidden = icon.image == nil
+
+    messageLabel.font = PlayerFonts.notice
+    messageLabel.textColor = PlayerColors.textLo
+    messageLabel.textAlignment = .center
+    messageLabel.numberOfLines = 0
+
+    let buttons = UIStackView(arrangedSubviews: [backButton, retryButton])
+    buttons.axis = .horizontal
+    buttons.alignment = .center
+    buttons.spacing = 12
+    buttons.translatesAutoresizingMaskIntoConstraints = false
+
+    // The buttons ride in a filled container and are centred inside it, rather
+    // than being centred by the stack's own alignment: the column is `.fill` so
+    // the label can wrap to the full width, and `.fill` would otherwise stretch
+    // the two buttons across it.
+    let buttonsContainer = UIView()
+    buttonsContainer.addSubview(buttons)
+
+    let column = UIStackView(arrangedSubviews: [icon, messageLabel, buttonsContainer])
+    column.axis = .vertical
+    column.alignment = .fill
+    column.spacing = 16
+    column.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(column)
+
+    let preferredWidth = column.widthAnchor.constraint(
+      equalToConstant: PlayerErrorView.maxContentWidth
+    )
+    // High, not required, so the required inset constraints below win on a
+    // narrow phone instead of the layout becoming unsatisfiable.
+    preferredWidth.priority = .defaultHigh
+
+    NSLayoutConstraint.activate([
+      buttons.topAnchor.constraint(equalTo: buttonsContainer.topAnchor),
+      buttons.bottomAnchor.constraint(equalTo: buttonsContainer.bottomAnchor),
+      buttons.centerXAnchor.constraint(equalTo: buttonsContainer.centerXAnchor),
+
+      column.centerXAnchor.constraint(equalTo: centerXAnchor),
+      column.centerYAnchor.constraint(equalTo: centerYAnchor),
+      preferredWidth,
+      // Inset to the safe area: the card is content, not scrim, so it keeps the
+      // same full-bleed-scrim / inset-content split as the rest of the overlay.
+      // Only the dimming behind it runs under the notch.
+      column.leadingAnchor.constraint(
+        greaterThanOrEqualTo: safeAreaLayoutGuide.leadingAnchor,
+        constant: PlayerDimens.edgePadding
+      ),
+      column.trailingAnchor.constraint(
+        lessThanOrEqualTo: safeAreaLayoutGuide.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+    ])
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("PlayerErrorView is created in code, never from a nib")
+  }
+
+  /// Shows `message`, or hides the whole surface when it is nil.
+  func render(message: String?) {
+    guard let message else {
+      isHidden = true
+      return
+    }
+    let localizedMessage = PlayerStrings.text(message)
+    if messageLabel.text != localizedMessage { messageLabel.text = localizedMessage }
+    isHidden = false
+  }
+}
+
+/// The VOD seek bar.
+///
+/// A `UIControl` subclass, which matters twice over: it gets touch tracking
+/// without a gesture recogniser that would compete with the player's root tap
+/// recogniser, and the root recogniser's delegate excludes `UIControl` touches,
+/// so dragging the scrubber can never be mistaken for a tap on the video.
+///
+/// No D-pad "OK to edit" mode, unlike the Compose `SlimSlider` — there is no
+/// remote on iOS, so the whole focus/edit apparatus that exists to stop a TV
+/// slider trapping the D-pad has nothing to protect against here.
+final class PlayerScrubberView: UIControl {
+  var onScrub: ((Double) -> Void)?
+
+  var progress: Double {
+    get { bar.progress }
+    set {
+      bar.progress = newValue
+      setNeedsLayout()
+    }
+  }
+
+  private let bar = PlayerProgressBarView()
+  private let thumb = UIView()
+
+  init() {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    // Both are decoration; the control itself is the hit target, so
+    // `touch.view` stays a `UIControl` for the root recogniser's delegate.
+    bar.isUserInteractionEnabled = false
+    thumb.isUserInteractionEnabled = false
+    thumb.backgroundColor = PlayerColors.accent
+    thumb.layer.cornerRadius = PlayerDimens.thumbSize / 2
+    addSubview(bar)
+    addSubview(thumb)
+    isAccessibilityElement = true
+    accessibilityTraits = .adjustable
+    accessibilityLabel = PlayerStrings.text("Seek")
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("PlayerScrubberView is created in code, never from a nib")
+  }
+
+  override var intrinsicContentSize: CGSize {
+    CGSize(width: UIView.noIntrinsicMetric, height: PlayerDimens.scrubberHeight)
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let trackY = (bounds.height - PlayerDimens.trackHeight) / 2
+    bar.frame = CGRect(
+      x: 0,
+      y: trackY,
+      width: bounds.width,
+      height: PlayerDimens.trackHeight
+    )
+    let travel = max(bounds.width - PlayerDimens.thumbSize, 0)
+    thumb.frame = CGRect(
+      x: travel * CGFloat(progress),
+      y: (bounds.height - PlayerDimens.thumbSize) / 2,
+      width: PlayerDimens.thumbSize,
+      height: PlayerDimens.thumbSize
+    )
+  }
+
+  override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+    apply(touch)
+    return true
+  }
+
+  override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+    apply(touch)
+    return true
+  }
+
+  private func apply(_ touch: UITouch) {
+    guard bounds.width > 0 else { return }
+    let fraction = min(max(Double(touch.location(in: self).x / bounds.width), 0), 1)
+    progress = fraction
+    onScrub?(fraction)
+  }
+
+  // MARK: Accessibility
+
+  override func accessibilityIncrement() {
+    nudge(by: 0.05)
+  }
+
+  override func accessibilityDecrement() {
+    nudge(by: -0.05)
+  }
+
+  private func nudge(by delta: Double) {
+    let target = min(max(progress + delta, 0), 1)
+    progress = target
+    onScrub?(target)
+  }
+}

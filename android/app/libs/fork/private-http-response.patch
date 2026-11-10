@@ -1,0 +1,180 @@
+--- a/libmpv/src/main/cpp/main.cpp
++++ b/libmpv/src/main/cpp/main.cpp
+@@ -55,7 +55,8 @@
+         return 0;
+     }
+ 
+-    mpv_request_log_messages(instance->mpv, "v");
++    mpv_request_log_messages(instance->mpv, "terminal-default");
++    mpv_set_option_string(instance->mpv, "terminal", "no");
+     return reinterpret_cast<jlong>(instance);
+ }
+ 
+@@ -70,6 +71,12 @@
+         die(env, "mpv init failed");
+         return;
+     }
++
++    jstring prefix = env->NewStringUTF(tvbro_http::kPrefix);
++    jstring ready = env->NewStringUTF("ready=2");
++    env->CallVoidMethod(mpv_instance->javaObject, mpv_MPVLib_logMessage_SiS, prefix, (jint)20, ready);
++    env->DeleteLocalRef(prefix);
++    env->DeleteLocalRef(ready);
+ 
+     mpv_instance->event_thread_request_exit = false;
+     if (pthread_create(&mpv_instance->event_thread_id, nullptr, event_thread, mpv_instance) != 0) {
+@@ -86,6 +93,7 @@
+         return;
+     }
+ 
++    { std::lock_guard<std::mutex> lock(mpv_instance->httpMutex); mpv_instance->http.stop(); }
+     mpv_instance->event_thread_request_exit = true;
+     mpv_wakeup(mpv_instance->mpv);
+ 
+@@ -126,6 +134,11 @@
+         arguments[i] = env->GetStringUTFChars(stringRefs[i], nullptr);
+     }
+ 
++    if (len > 0) {
++        std::lock_guard<std::mutex> lock(mpv_instance->httpMutex);
++        if (!std::strcmp(arguments[0], "loadfile") && len > 1) mpv_instance->http.start(arguments[1]);
++        else if (!std::strcmp(arguments[0], "stop") || !std::strcmp(arguments[0], "quit") || !std::strcmp(arguments[0], "playlist-clear")) mpv_instance->http.stop();
++    }
+     mpv_command(mpv_instance->mpv, arguments);
+ 
+     for (int i = 0; i < len; ++i) {
+--- a/libmpv/src/main/cpp/globals.h
++++ b/libmpv/src/main/cpp/globals.h
+@@ -4,10 +4,14 @@
+ #include <pthread.h>
+ #include <jni.h>
+ #include <mpv/client.h>
++#include <mutex>
++#include "private_http_response.h"
+ 
+ // struct to hold the mpv_handle and other related data
+ struct MPVInstance {
+     mpv_handle *mpv;
++    std::mutex httpMutex;
++    tvbro_http::Parser http;
+     JavaVM *vm;
+     pthread_t event_thread_id;
+     std::atomic<bool> event_thread_request_exit;
+--- a/libmpv/src/main/cpp/event.cpp
++++ b/libmpv/src/main/cpp/event.cpp
+@@ -41,26 +41,14 @@
+     env->CallVoidMethod(instance->javaObject, mpv_MPVLib_event, event);
+ }
+ 
+-static void sendLogMessageToJava(JNIEnv *env, MPVInstance* instance, mpv_event_log_message *msg) {
+-    // filter the most obvious cases of invalid utf-8, since Java would choke on it
+-    const auto invalid_utf8 = [] (unsigned char c) {
+-        return c == 0xc0 || c == 0xc1 || c >= 0xf5;
+-    };
+-    for (int i = 0; msg->text[i]; i++) {
+-        if (invalid_utf8(static_cast<unsigned char>(msg->text[i])))
+-            return;
+-    }
+-
+-    jstring jprefix = env->NewStringUTF(msg->prefix);
+-    jstring jtext = env->NewStringUTF(msg->text);
+-
+-    env->CallVoidMethod(instance->javaObject, mpv_MPVLib_logMessage_SiS,
+-        jprefix, (jint) msg->log_level, jtext);
+-
+-    if (jprefix)
+-        env->DeleteLocalRef(jprefix);
+-    if (jtext)
+-        env->DeleteLocalRef(jtext);
++static void sendHttpResponseToJava(JNIEnv *env, MPVInstance* instance, const tvbro_http::Response &response) {
++    // Only constructed, validated fields cross this boundary; never raw logs.
++    const std::string payload = response.payload();
++    jstring prefix = env->NewStringUTF(tvbro_http::kPrefix);
++    jstring text = env->NewStringUTF(payload.c_str());
++    env->CallVoidMethod(instance->javaObject, mpv_MPVLib_logMessage_SiS, prefix, (jint)20, text);
++    env->DeleteLocalRef(prefix);
++    env->DeleteLocalRef(text);
+ }
+ 
+ void *event_thread(void *arg) {
+@@ -88,15 +76,31 @@
+         switch (mp_event->event_id) {
+         case MPV_EVENT_LOG_MESSAGE:
+             msg = (mpv_event_log_message*)mp_event->data;
+-            ALOGV("[%s:%s] %s", msg->prefix, msg->level, msg->text);
+-            sendLogMessageToJava(env, instance, msg);
++            {
++                tvbro_http::Response response;
++                bool ready;
++                { std::lock_guard<std::mutex> lock(instance->httpMutex); ready = instance->http.feed(msg->prefix, msg->text, response); }
++                if (ready) sendHttpResponseToJava(env, instance, response);
++            }
++            break;
++        case MPV_EVENT_START_FILE:
++            { std::lock_guard<std::mutex> lock(instance->httpMutex); instance->http.started(); }
++            sendEventToJava(env, instance, mp_event->event_id);
++            break;
++        case MPV_EVENT_END_FILE:
++            {
++                tvbro_http::Response response;
++                bool ready;
++                { std::lock_guard<std::mutex> lock(instance->httpMutex); ready = instance->http.end(response); }
++                if (ready) sendHttpResponseToJava(env, instance, response);
++            }
++            sendEventToJava(env, instance, mp_event->event_id);
+             break;
+         case MPV_EVENT_PROPERTY_CHANGE:
+             mp_property = (mpv_event_property*)mp_event->data;
+             sendPropertyUpdateToJava(env, instance, mp_property);
+             break;
+         default:
+-            ALOGV("event: %s\n", mpv_event_name(mp_event->event_id));
+             sendEventToJava(env, instance, mp_event->event_id);
+             break;
+         }
+--- a/libmpv/src/main/cpp/property.cpp
++++ b/libmpv/src/main/cpp/property.cpp
+@@ -6,6 +6,7 @@
+ #include "jni_utils.h"
+ #include "log.h"
+ #include "globals.h"
++#include "private_http_headers.h"
+ 
+ extern "C" {
+     jni_func(jint, nativeSetOptionString, jlong instance, jstring joption, jstring jvalue);
+@@ -124,6 +125,35 @@
+ 
+ jni_func(void, nativeSetPropertyString, jlong instance, jstring jproperty, jstring jvalue) {
+     auto mpv_instance = reinterpret_cast<MPVInstance*>(instance);
++    const char *property = env->GetStringUTFChars(jproperty, nullptr);
++    if (!property) return;
++    const bool privateHeaders = !std::strcmp(property, tvbro_http::kHeadersProperty);
++    env->ReleaseStringUTFChars(jproperty, property);
++    if (privateHeaders) {
++        const char *wire = env->GetStringUTFChars(jvalue, nullptr);
++        if (!wire) return;
++        std::vector<std::string> fields;
++        const bool valid = tvbro_http::parseHeaders(wire, fields);
++        env->ReleaseStringUTFChars(jvalue, wire);
++        if (!valid) { die(env, "Invalid private HTTP headers"); return; }
++        if (!mpv_instance->mpv) { die(env, "mpv is not initialized"); return; }
++        // Build all strings first; their backing storage lives through the
++        // synchronous property call. Invalid input never changes an old array.
++        std::vector<mpv_node> nodes(fields.size());
++        for (size_t i = 0; i < fields.size(); ++i) {
++            nodes[i].format = MPV_FORMAT_STRING;
++            nodes[i].u.string = const_cast<char*>(fields[i].c_str());
++        }
++        mpv_node_list list{};
++        list.num = static_cast<int>(nodes.size());
++        list.values = nodes.empty() ? nullptr : nodes.data();
++        mpv_node array{};
++        array.format = MPV_FORMAT_NODE_ARRAY;
++        array.u.list = &list;
++        if (mpv_set_property(mpv_instance->mpv, "http-header-fields", MPV_FORMAT_NODE, &array) < 0)
++            die(env, "Could not apply private HTTP headers");
++        return;
++    }
+     const char *value = env->GetStringUTFChars(jvalue, nullptr);
+     common_set_property(env, mpv_instance->mpv, jproperty, MPV_FORMAT_STRING, &value);
+     env->ReleaseStringUTFChars(jvalue, value);

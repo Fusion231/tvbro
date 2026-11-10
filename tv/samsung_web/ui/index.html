@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>TVBro</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <object id="native-player" type="application/avplayer" tabindex="-1"></object>
+  <div id="preview-mask" class="preview-mask" aria-hidden="true"><div id="preview-mask-top"></div><div id="preview-mask-left"></div><div id="preview-mask-right"></div><div id="preview-mask-bottom"></div></div>
+  <div id="ui-viewport" class="ui-viewport">
+  <div id="app-shell" class="app-shell">
+    <header class="app-header">
+      <img id="brand-logo" class="brand-logo" src="assets/logo.png" alt="TVBro">
+      <div class="header-actions">
+        <button id="show-home" class="button" type="button" data-nav hidden><svg class="header-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3 2 12h3v9h6v-6h2v6h6v-9h3L12 3zm5 16h-2v-6H9v6H7v-8l5-4.5 5 4.5V19z"/></svg><span class="header-label">Home</span></button>
+        <button id="show-sources" class="button" type="button" data-nav hidden><svg class="header-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h14v2H3zm0 6h14v2H3zm0 6h10v2H3zm16-2v-4h2v4h3v2h-3v4h-2v-4h-4v-2z"/></svg><span class="header-label">Sources</span></button>
+        <button id="show-profiles" class="button" type="button" data-nav hidden><svg class="header-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 0 1 6.3 12.9C17.1 15.1 14.1 14 12 14s-5.1 1.1-6.3 2.9A8 8 0 0 1 12 4zm0 12c2 0 4.2 1 4.9 2.3a8 8 0 0 1-9.8 0C7.8 17 10 16 12 16zm0-10a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg><span class="header-label">Profiles</span></button>
+        <button id="show-settings" class="button" type="button" data-nav hidden><svg class="header-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m19.4 13 .1-1-.1-1 2.1-1.6-2-3.5-2.5 1a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.5-1-2 3.5L6.5 11l-.1 1 .1 1-2.1 1.6 2 3.5 2.5-1a8 8 0 0 0 1.7 1L11 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.5 1 2-3.5L19.4 13zM13 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg><span class="header-label">Settings</span></button>
+      </div>
+    </header>
+
+    <main>
+      <section id="language-view" class="language-view" data-screen="language" hidden>
+        <h1>Choose your language</h1><p class="muted">Select the language used throughout the app.</p>
+        <div id="language-list" class="language-list"></div>
+        <p id="language-error" class="dialog-error" role="alert"></p>
+        <button id="language-continue" class="button button-primary" data-nav type="button">Continue</button>
+        <button id="language-back" class="button" data-nav type="button" hidden>Back</button>
+      </section>
+      <section id="profiles-view" class="profiles-view" data-screen="profiles" hidden>
+        <h1>Who is watching?</h1>
+        <p id="profiles-message" class="muted">Choose a profile to continue</p>
+        <div id="profile-list" class="profile-list"></div>
+        <div class="profile-actions"><button id="add-profile" class="button" data-nav type="button">Add profile</button><button id="manage-profiles" class="button" data-nav type="button">Manage profiles</button><button id="skip-profile" class="button" data-nav type="button" hidden>Continue without a profile</button></div>
+        <button id="download-cloud" class="button button-primary profile-cloud" data-nav type="button" hidden><span class="setup-choice-title">Download from cloud</span><span class="setup-choice-description">Sign in and restore your saved profile, playlists, and settings.</span></button>
+      </section>
+      <section id="setup-view" class="setup-view" data-screen="setup" hidden>
+        <p class="eyebrow">Get started</p><h1 id="setup-title">Choose how to get started</h1>
+        <p class="muted">Connect your IPTV source, or explore {app} with sample channels and library content.</p>
+        <div class="setup-choices">
+          <button id="setup-source" class="button button-primary setup-choice" data-nav type="button"><span class="setup-choice-title">Add IPTV source</span><span class="setup-choice-description">M3U playlist, Xtream Codes or an available Stalker portal.</span></button>
+          <button id="setup-cloud" class="button setup-choice" data-nav type="button" hidden><span class="setup-choice-title">Download from cloud</span><span class="setup-choice-description">Sign in and restore your saved profile, playlists, and settings.</span></button>
+          <button id="setup-demo" class="button setup-choice" data-nav type="button"><span class="setup-choice-title">Try Demo streams</span><span class="setup-choice-description">Sample channels, movies and series.</span></button>
+        </div>
+        <button id="setup-back" class="button" data-nav type="button">Back to profiles</button>
+      </section>
+      <section id="sources-view" class="sources-view" data-screen="sources" hidden>
+        <div class="source-intro">
+          <p class="eyebrow">Your TV</p>
+          <h1>Add your source</h1>
+          <p class="muted">Choose a saved source or enter your provider details.</p>
+          <div id="saved-sources" class="saved-sources" aria-label="Your sources"></div>
+        </div>
+        <form id="source-form" class="source-card" autocomplete="off" novalidate>
+          <h2 id="source-form-title">Add source</h2>
+          <div class="source-tabs" role="group" aria-label="Source type">
+            <button id="kind-m3u" type="button" class="source-tab is-active" data-nav aria-pressed="true">M3U playlist</button>
+            <button id="kind-xtream" type="button" class="source-tab" data-nav aria-pressed="false">Xtream Codes</button>
+            <button id="kind-stalker" type="button" class="source-tab" data-nav aria-pressed="false" hidden>Stalker / MAG</button>
+          </div>
+          <label for="source-label">Source name  <span class="muted">· optional</span></label>
+          <input id="source-label" type="text" data-nav data-editable readonly autocomplete="off" placeholder="My TV">
+          <div id="source-fields"></div>
+          <p class="field-hint">OK — edit field · Back — finish editing</p>
+          <button id="connect-source" class="button button-primary" type="submit" data-nav>Connect and load channels</button>
+          <button id="cancel-source-edit" class="button" type="button" data-nav hidden>Cancel editing</button>
+        </form>
+      </section>
+
+      <section id="home-view" class="home-view" data-screen="home" hidden>
+        <div class="home-content">
+        <p id="home-source" class="eyebrow"></p><h1>What would you like to watch?</h1>
+        <div class="home-tiles">
+          <button id="home-live" class="home-tile tile-live" data-nav type="button"><span class="tile-symbol" aria-hidden="true"><svg class="tile-icon" viewBox="0 0 24 24" focusable="false"><path d="m9 2 3 3 3-3 1.4 1.4L13.8 6H20a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6.2L7.6 3.4 9 2zM4 8v12h16V8H4zm6 2 6 4-6 4v-8z"/></svg></span><span class="tile-title">TV</span><span class="tile-arrow" aria-hidden="true">→</span></button>
+          <button id="home-movie" class="home-tile tile-movie" data-nav type="button"><span class="tile-symbol" aria-hidden="true"><svg class="tile-icon" viewBox="0 0 24 24" focusable="false"><path d="M4 4h2l2 4h3L9 4h3l2 4h3l-2-4h3l2 4V4h2v16H2V4h2zm0 6v8h16v-8H4z"/></svg></span><span class="tile-title">Movies</span><span class="tile-arrow" aria-hidden="true">→</span></button>
+          <button id="home-series" class="home-tile tile-series" data-nav type="button"><span class="tile-symbol" aria-hidden="true"><svg class="tile-icon" viewBox="0 0 24 24" focusable="false"><path d="M4 6H2v14a2 2 0 0 0 2 2h14v-2H4V6zm16-4H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H8V4h12v12zm-9-2 7-4-7-4v8z"/></svg></span><span class="tile-title">Series</span><span class="tile-arrow" aria-hidden="true">→</span></button>
+          <button id="home-favorites" class="home-tile tile-favorites" data-nav type="button"><span class="tile-symbol" aria-hidden="true"><svg class="tile-icon" viewBox="0 0 24 24" focusable="false"><path d="M16.5 3a5.5 5.5 0 0 0-4.5 2.1A5.5 5.5 0 0 0 2 8.5c0 4.1 4.5 8.1 10 13C17.5 16.6 22 12.6 22 8.5A5.5 5.5 0 0 0 16.5 3zM12 18.8C7.4 14.6 4 11.4 4 8.5a3.5 3.5 0 0 1 6.2-2.2L12 8.4l1.8-2.1A3.5 3.5 0 0 1 20 8.5c0 2.9-3.4 6.1-8 10.3z"/></svg></span><span class="tile-title">Favorites</span><span class="tile-arrow" aria-hidden="true">→</span></button>
+        </div>
+        <section id="home-history" class="continue-section" hidden><h2>Continue watching</h2><div id="home-history-list" class="poster-rail"></div></section>
+        </div>
+      </section>
+
+      <section id="catalog-view" class="catalog-view" data-screen="catalog" aria-label="Live TV" hidden>
+        <div class="catalog-columns">
+          <aside class="category-panel"><h2>Categories</h2><div id="category-list" class="category-list"></div></aside>
+          <div class="live-content">
+        <div class="catalog-toolbar">
+          <div class="catalog-title"><p class="eyebrow">LIVE</p><h1 id="source-title">Channels</h1></div>
+          <div class="search-field"><label for="channel-search">Search channels</label><div class="search-row"><input id="channel-search" type="search" data-nav data-editable readonly autocomplete="off" placeholder="Channel name or number"><button id="clear-channel-search" class="button" type="button" data-nav aria-label="Clear search" hidden>×</button></div></div>
+          <button id="show-guide" class="button toolbar-button" type="button" data-nav hidden>TV guide</button>
+          <button id="live-lock-category" class="button toolbar-button" type="button" data-nav hidden>Lock / unlock category</button>
+        </div>
+          <aside id="preview-panel" class="preview-panel" hidden><div id="preview-slot" class="preview-slot"><span id="preview-placeholder">Select a channel to preview.</span></div><div class="preview-caption"><span class="live-badge">LIVE</span><h2 id="preview-title">Preview</h2><p id="preview-status" class="muted"></p><div id="preview-now-next"></div><p id="preview-hint" class="field-hint">OK · Preview</p><button id="live-lock-channel" class="button" type="button" data-nav hidden>Lock / unlock channel</button></div></aside>
+          <section id="guide-panel" class="guide-panel" hidden>
+            <div class="guide-toolbar"><h2>TV guide</h2><span id="guide-date" class="muted"></span><button id="guide-earlier" class="button" type="button" data-nav aria-label="← Earlier" title="← Earlier">←</button><button id="guide-now" class="button" type="button" data-nav>Now</button><button id="guide-later" class="button" type="button" data-nav aria-label="Later →" title="Later →">→</button><button id="guide-search" class="button" type="button" data-nav>Search programmes</button></div>
+            <div id="guide-times"></div><div id="guide-grid" class="guide-grid"></div><p id="guide-empty" class="empty-state" hidden>No programmes in this time range.</p>
+          </section>
+          <section id="channel-panel" class="channel-panel" aria-label="Channels">
+            <div class="list-heading"><h2 id="category-title">All channels</h2><span id="channel-count" class="muted"></span></div>
+            <div id="channel-list" class="channel-list"></div>
+            <div id="channel-empty" class="empty-state" hidden>No channels match</div>
+            <div class="pagination"><button id="previous-page" class="button" data-nav type="button">Previous</button><span id="page-label" class="muted"></span><button id="next-page" class="button" data-nav type="button">Next</button></div>
+          </section>
+          </div>
+        </div>
+      </section>
+
+      <section id="media-view" class="media-view" data-screen="media" hidden>
+        <div class="catalog-columns"><aside class="category-panel"><h2>Categories</h2><div id="media-categories" class="category-list"></div></aside><div class="media-content">
+        <div class="catalog-toolbar"><div class="catalog-title"><p class="eyebrow" id="media-kind-label">Movies</p><h1 id="media-title">Movies</h1></div><div class="search-field"><label for="media-search">Search catalogue</label><div class="search-row"><input id="media-search" type="search" data-nav data-editable readonly autocomplete="off" placeholder="Title"><button id="clear-media-search" class="button" data-nav type="button" aria-label="Clear search" hidden>×</button></div></div><button id="media-lock-category" class="button toolbar-button" type="button" data-nav hidden>Lock / unlock category</button></div>
+        <section class="media-panel"><section id="media-history" class="continue-section" hidden><h2>Continue watching</h2><div id="media-history-list" class="poster-rail"></div></section><div id="media-items" class="media-grid"></div><p id="media-empty" class="empty-state" hidden>No items match</p><p id="media-loading" class="muted media-loading" role="status" aria-live="polite" hidden>Loading…</p><button id="media-retry" class="button" type="button" data-nav hidden>Retry</button><div id="media-pagination" class="pagination"><button id="media-previous" class="button" type="button" data-nav>Previous</button><span id="media-page" class="muted"></span><button id="media-next" class="button" type="button" data-nav>Next</button></div></section></div></div>
+      </section>
+
+      <section id="settings-view" class="settings-view" data-screen="settings" hidden><h1>Settings</h1><p id="settings-profile" class="muted"></p><div id="settings-list" class="settings-list"></div><button id="settings-pairing" class="button" type="button" data-nav hidden>Link to cloud account</button></section>
+      <section id="pairing-view" class="pairing-view" data-screen="pairing" hidden><h1 id="pairing-title">TVBro account</h1><p id="pairing-intro" class="muted">Open the panel on your phone or computer, sign in, and enter this code under Devices:</p><p id="pairing-status" class="muted"></p><div id="pairing-code" class="pairing-code"></div><p id="pairing-url"></p><img id="pairing-qr" class="pairing-qr" alt="QR code that opens the panel with this pairing code filled in" hidden><p id="pairing-profile" class="muted"></p><div class="dialog-actions"><button id="pairing-start" class="button button-primary" data-nav type="button">Generate pairing code</button><button id="pairing-check" class="button" data-nav type="button">Check connection</button><button id="pairing-choose-profile" class="button" data-nav type="button" hidden>Choose a profile</button><button id="pairing-pull" class="button" data-nav type="button" hidden>Download from panel</button><button id="pairing-continue" class="button button-primary" data-nav type="button" hidden>Continue</button><button id="pairing-push" class="button" data-nav type="button" hidden>Push to panel</button><button id="pairing-unpair" class="button" data-nav type="button" hidden>Unpair this device</button><button id="pairing-back" class="button" data-nav type="button">Back</button></div></section>
+    </main>
+    <p id="app-status" class="app-status" role="status" aria-live="polite"></p>
+    <footer class="app-footer"><span>Arrows — choose</span><span>OK — open</span><span>Back — return</span></footer>
+  </div>
+
+  <section id="player-view" class="player-view" aria-label="Player" hidden>
+    <div id="player-chrome" class="player-chrome">
+      <div class="player-heading">
+        <button id="return-catalog" class="button player-back" data-nav type="button" aria-label="Back to channels"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4-8 8 8 8 1.4-1.4L7.8 13H21v-2H7.8l5.6-5.6z"/></svg></button>
+        <h1 id="player-title"></h1><span id="player-live-badge" class="live-badge">LIVE</span><span id="player-clock" class="player-clock"></span>
+      </div>
+      <div class="player-bottom">
+        <div id="player-now-next"></div><p id="player-status" role="status" aria-live="polite"></p>
+        <div id="player-progress" class="player-progress" hidden><div id="player-progress-track" class="player-progress-track" role="slider" tabindex="0" data-nav aria-label="Playback position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="" aria-disabled="true"><div id="player-progress-fill"></div></div><span id="player-time"></span></div>
+        <div class="player-controls">
+          <div class="player-actions player-actions-left"><button id="player-channels" class="button" data-nav type="button" hidden>Channels</button><button id="player-previous" class="button" data-nav type="button" hidden>Previous channel</button></div>
+          <div class="player-transport"><button id="previous-episode" class="button" data-nav type="button" hidden>Previous episode</button><button id="seek-back" class="button" data-nav type="button">−10 s</button><button id="play-pause" class="button button-primary" data-nav type="button">Pause</button><button id="seek-forward" class="button" data-nav type="button">+10 s</button><button id="next-episode" class="button" data-nav type="button" hidden>Next episode</button><button id="stop-player" class="button" data-nav type="button">Stop</button></div>
+          <div class="player-actions player-actions-right"><button id="player-favorite" class="button" data-nav type="button" hidden>♡ Favorites</button><button id="player-audio" class="button" data-nav type="button" hidden>Audio track</button><button id="player-subtitles" class="button" data-nav type="button" hidden>Subtitles</button><button id="player-settings" class="button" data-nav type="button" hidden>Playback settings</button><button id="player-episodes" class="button" data-nav type="button" hidden>Episodes</button><button id="hide-player-controls" class="button" data-nav type="button">Hide controls</button></div>
+        </div>
+        <p id="player-hint" class="player-hint">OK — controls · Back — hide controls · Hold seek — keep seeking</p>
+      </div>
+    </div>
+    <div id="player-zap-status" class="player-zap-status" role="status" hidden></div>
+  </section>
+  <div id="modal-layer" class="modal-layer" hidden></div>
+  </div>
+  <script src="viewport.js"></script>
+  <script src="$WEBAPIS/webapis/webapis.js"></script>
+  <script src="polyfills.js"></script>
+  <script src="canonical-core.js"></script>
+  <script src="panel-validation.js"></script>
+  <script src="publisher-config.js"></script>
+  <script src="cloud-crypto.js"></script>
+  <script src="platform/avplay.js"></script>
+  <script src="platform/secure_store.js"></script>
+  <script src="platform/user_state.js"></script>
+  <script src="platform/epg_files.js"></script>
+  <script src="platform/transport.js"></script>
+  <script src="platform/cloud.js"></script>
+  <script src="platform/organization.js"></script>
+  <script src="platform/backup.js"></script>
+  <script src="platform/backup_files.js"></script>
+  <script src="platform/library.js"></script>
+  <script src="platform/memory_policy.js"></script>
+  <script src="platform/source_worker.js"></script>
+  <script src="platform/catalog_store.js"></script>
+  <script src="platform.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

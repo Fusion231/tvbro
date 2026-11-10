@@ -1,0 +1,11 @@
+<Project DefaultTargets="PackageExisting" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Installed Tizen.NET.Sdk 1.1.7 Sign task, without rebuilding the payload. -->
+  <UsingTask AssemblyFile="$(TVBRO_TASKS_ASSEMBLY)" TaskName="Tizen.NET.Build.Tasks.Sign" />
+  <Target Name="PackageExisting">
+    <Sign RootDir="$(TVBRO_PACKAGE_ROOT)"
+          AuthorFile="$(TVBRO_AUTHOR_PATH)" AuthorPassword="$(TVBRO_AUTHOR_PASS)"
+          DistFile="$(TVBRO_DIST_PATH)" DistPassword="$(TVBRO_DIST_PASS)"
+          DistFile2="$(TVBRO_DIST2_PATH)" DistPassword2="$(TVBRO_DIST2_PASS)"
+          OutputSignedTpk="$(TVBRO_SIGNED_TPK)" />
+  </Target>
+</Project>

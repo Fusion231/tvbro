@@ -1,0 +1,814 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/screens/channel_list_screen.dart';
+import 'package:iptvs/screens/live_preview_controller.dart';
+
+/// Pure-logic coverage for `decideFullscreenHandoff`, the classification
+/// behind `_ChannelListScreenState._openLivePlayer`'s preview→fullscreen
+/// handoff (see docs/player.md "Preview→fullscreen handoff" and "Live
+/// preview + seamless handoff (Android)").
+///
+/// Linux policy (mirrors Android's "default engine, escalate only when
+/// needed"): the embedded media_kit path is the seamless default and the
+/// native mpv window is used *only* for a Wayland HDR source, where its
+/// non-adoptable separate-process handoff (a fresh Stalker `create_link` and
+/// stream reopen) is the honest cost of real HDR passthrough. So
+/// [FullscreenHandoff.stopResolveFresh] fires only when both `linuxNativeLikely`
+/// (Wayland-gated in [LinuxNativeSession.nativeLikelyAvailable]) and
+/// `streamLikelyHdr` hold; SDR and X11 stay [FullscreenHandoff.adoptEmbedded].
+/// A source that starts SDR and turns out HDR still escalates later, inside
+/// `PlayerScreen._maybeEscalateLinuxNative`.
+void main() {
+  group('Linux native discovery gate', () {
+    test('probes only for an adoptable same-channel HDR preview', () {
+      expect(
+        shouldProbeLinuxNativeForHandoff(
+          isLinux: true,
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          streamLikelyHdr: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('ordinary and SDR opens never pay the native discovery cost', () {
+      for (final values in [
+        (reuse: false, same: true, stream: true, hdr: true),
+        (reuse: true, same: false, stream: true, hdr: true),
+        (reuse: true, same: true, stream: false, hdr: true),
+        (reuse: true, same: true, stream: true, hdr: false),
+      ]) {
+        expect(
+          shouldProbeLinuxNativeForHandoff(
+            isLinux: true,
+            reusePreview: values.reuse,
+            sameChannelPreview: values.same,
+            previewHasStream: values.stream,
+            streamLikelyHdr: values.hdr,
+          ),
+          isFalse,
+        );
+      }
+    });
+  });
+
+  group('decideFullscreenHandoff', () {
+    test('Android native preview adopts seamlessly', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: true,
+          nativePreviewActive: true,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+        ),
+        FullscreenHandoff.adoptNative,
+      );
+    });
+
+    test(
+      'Android media_kit-fallback preview (same channel) pauses, not adopts',
+      () {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: true,
+            sameChannelPreview: true,
+            previewHasStream: true,
+            isAndroid: true,
+            nativePreviewActive: false,
+            linuxNativeLikely: false,
+            previewPlaying: true,
+          ),
+          FullscreenHandoff.pausePreview,
+        );
+      },
+    );
+
+    test('non-Android embedded media_kit preview adopts seamlessly when the '
+        'native path is not in play', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+        ),
+        FullscreenHandoff.adoptEmbedded,
+      );
+    });
+
+    test('Wayland HDR: native mpv about to be used, same-channel handoff stops '
+        'and re-resolves instead of adopting (real HDR passthrough cost)', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: true,
+          previewPlaying: true,
+          streamLikelyHdr: true,
+        ),
+        FullscreenHandoff.stopResolveFresh,
+      );
+    });
+
+    test('Wayland SDR: native path available but the source is SDR — the '
+        'native window buys nothing, so adopt embedded seamlessly', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: true,
+          previewPlaying: true,
+          streamLikelyHdr: false,
+        ),
+        FullscreenHandoff.adoptEmbedded,
+      );
+    });
+
+    test(
+      'X11 never stopResolveFresh: linuxNativeLikely is already false on X11 '
+      '(Wayland-gated), so even an HDR source stays embedded/seamless',
+      () {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: true,
+            sameChannelPreview: true,
+            previewHasStream: true,
+            isAndroid: false,
+            nativePreviewActive: false,
+            linuxNativeLikely: false,
+            previewPlaying: true,
+            streamLikelyHdr: true,
+          ),
+          FullscreenHandoff.adoptEmbedded,
+        );
+      },
+    );
+
+    test('different-channel preview (last-channel zap / EPG-grid play) is '
+        'stopped outright, on any platform', () {
+      for (final isAndroid in [true, false]) {
+        for (final linuxNativeLikely in [true, false]) {
+          expect(
+            decideFullscreenHandoff(
+              reusePreview: false,
+              sameChannelPreview: false,
+              previewHasStream: false,
+              isAndroid: isAndroid,
+              nativePreviewActive: false,
+              linuxNativeLikely: linuxNativeLikely,
+              previewPlaying: true,
+            ),
+            FullscreenHandoff.stopPreview,
+            reason: 'isAndroid=$isAndroid linuxNativeLikely=$linuxNativeLikely',
+          );
+        }
+      }
+    });
+
+    test('no preview running at all resolves to none', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: false,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: false,
+        ),
+        FullscreenHandoff.none,
+      );
+    });
+
+    test('reusePreview=false but coincidentally the same channel still pauses '
+        '(not adopted, since reusePreview forbids adoption)', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: false,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('a still-loading same-channel preview (no stream yet) is paused, not '
+        'adopted or stop-resolved', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: true,
+          previewPlaying: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('linuxNativeLikely only matters when the preview is actually being '
+        'adopted for the same channel', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: false,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: true,
+          previewPlaying: true,
+        ),
+        FullscreenHandoff.stopPreview,
+      );
+    });
+
+    test('Android adoption takes priority over an (impossible in practice) '
+        'linuxNativeLikely=true', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: true,
+          nativePreviewActive: true,
+          linuxNativeLikely: true,
+          previewPlaying: true,
+        ),
+        FullscreenHandoff.adoptNative,
+      );
+    });
+
+    test('Android non-native fallback never selects stopResolveFresh even if '
+        'linuxNativeLikely is (impossibly) true', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: true,
+          nativePreviewActive: false,
+          linuxNativeLikely: true,
+          previewPlaying: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+  });
+
+  /// iOS's cross-engine case, folded into the same `stopResolveFresh` outcome
+  /// as Wayland HDR (docs/ios.md "What routes to which engine", docs/player.md
+  /// "iOS"). The preview always runs on embedded media_kit/libmpv; an
+  /// AVPlayer-routed channel goes fullscreen on a presented `AVPlayerLayer`
+  /// controller, which cannot adopt an mpv session. A merely *paused* media_kit
+  /// engine still holds its provider connection, and provider accounts are
+  /// single-connection — so the preview is stopped outright and the channel
+  /// re-resolved (its stream carries a spent single-use Stalker `play_token`).
+  ///
+  /// `crossEngineFullscreen` defaults false, which is what keeps every case
+  /// above passing unmodified.
+  group('decideFullscreenHandoff — crossEngineFullscreen (iOS AVPlayer)', () {
+    test('a cross-engine same-channel preview stops and re-resolves', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.stopResolveFresh,
+      );
+    });
+
+    test(
+      'same-engine (mpv-routed) iOS channel adopts the preview embedded',
+      () {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: true,
+            sameChannelPreview: true,
+            previewHasStream: true,
+            isAndroid: false,
+            nativePreviewActive: false,
+            linuxNativeLikely: false,
+            previewPlaying: true,
+            crossEngineFullscreen: false,
+          ),
+          FullscreenHandoff.adoptEmbedded,
+        );
+      },
+    );
+
+    test('it needs no HDR signal — the engine split alone decides, unlike the '
+        'Linux native path which also requires streamLikelyHdr', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          streamLikelyHdr: false,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.stopResolveFresh,
+      );
+    });
+
+    test(
+      'ignored when reusePreview is false — a zap / EPG-grid play still just '
+      'stops the (different-channel) preview',
+      () {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: false,
+            sameChannelPreview: false,
+            previewHasStream: false,
+            isAndroid: false,
+            nativePreviewActive: false,
+            linuxNativeLikely: false,
+            previewPlaying: true,
+            crossEngineFullscreen: true,
+          ),
+          FullscreenHandoff.stopPreview,
+        );
+      },
+    );
+
+    test('ignored when reusePreview is false even for the same channel', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: false,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('a still-loading same-channel preview (no stream yet) is not '
+        'adoptable, so it pauses rather than stop-resolving', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('no preview running at all still resolves to none', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: false,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: false,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.none,
+      );
+    });
+
+    test('Android is unaffected: its shared-engine adoption still wins, and a '
+        'fallback preview still pauses', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: true,
+          nativePreviewActive: true,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.adoptNative,
+      );
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: true,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('it composes with the Wayland HDR condition rather than replacing it: '
+        'either alone yields stopResolveFresh', () {
+      for (final values in [
+        (cross: true, native: false, hdr: false),
+        (cross: false, native: true, hdr: true),
+        (cross: true, native: true, hdr: true),
+      ]) {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: true,
+            sameChannelPreview: true,
+            previewHasStream: true,
+            isAndroid: false,
+            nativePreviewActive: false,
+            linuxNativeLikely: values.native,
+            previewPlaying: true,
+            streamLikelyHdr: values.hdr,
+            crossEngineFullscreen: values.cross,
+          ),
+          FullscreenHandoff.stopResolveFresh,
+          reason:
+              'cross=${values.cross} native=${values.native} hdr=${values.hdr}',
+        );
+      }
+    });
+  });
+
+  group('FullscreenHandoffDerived', () {
+    // _openLivePlayer derives every downstream boolean from the decision via
+    // these getters (a duplicate raw-input formula at the call site once
+    // desynced from the decision across an await) — pin the full matrix so a
+    // new enum value or getter edit can't silently shift a handoff behavior.
+    const expected = {
+      FullscreenHandoff.adoptNative: (
+        seamless: true,
+        adoptsEmbeddedPreview: false,
+        adoptsNativePreview: true,
+        stopsAndResolvesFresh: false,
+        pausesPreview: false,
+        stopsPreview: false,
+      ),
+      FullscreenHandoff.adoptEmbedded: (
+        seamless: true,
+        adoptsEmbeddedPreview: true,
+        adoptsNativePreview: false,
+        stopsAndResolvesFresh: false,
+        pausesPreview: false,
+        stopsPreview: false,
+      ),
+      FullscreenHandoff.stopResolveFresh: (
+        seamless: false,
+        adoptsEmbeddedPreview: false,
+        adoptsNativePreview: false,
+        stopsAndResolvesFresh: true,
+        pausesPreview: false,
+        stopsPreview: false,
+      ),
+      FullscreenHandoff.pausePreview: (
+        seamless: false,
+        adoptsEmbeddedPreview: false,
+        adoptsNativePreview: false,
+        stopsAndResolvesFresh: false,
+        pausesPreview: true,
+        stopsPreview: false,
+      ),
+      FullscreenHandoff.stopPreview: (
+        seamless: false,
+        adoptsEmbeddedPreview: false,
+        adoptsNativePreview: false,
+        stopsAndResolvesFresh: false,
+        pausesPreview: false,
+        stopsPreview: true,
+      ),
+      FullscreenHandoff.none: (
+        seamless: false,
+        adoptsEmbeddedPreview: false,
+        adoptsNativePreview: false,
+        stopsAndResolvesFresh: false,
+        pausesPreview: false,
+        stopsPreview: false,
+      ),
+    };
+
+    test('covers every FullscreenHandoff value', () {
+      expect(expected.keys, containsAll(FullscreenHandoff.values));
+    });
+
+    for (final entry in expected.entries) {
+      test('${entry.key.name} derives the expected booleans', () {
+        final decision = entry.key;
+        expect(decision.seamless, entry.value.seamless, reason: 'seamless');
+        expect(
+          decision.adoptsEmbeddedPreview,
+          entry.value.adoptsEmbeddedPreview,
+          reason: 'adoptsEmbeddedPreview',
+        );
+        expect(
+          decision.adoptsNativePreview,
+          entry.value.adoptsNativePreview,
+          reason: 'adoptsNativePreview',
+        );
+        expect(
+          decision.stopsAndResolvesFresh,
+          entry.value.stopsAndResolvesFresh,
+          reason: 'stopsAndResolvesFresh',
+        );
+        expect(
+          decision.pausesPreview,
+          entry.value.pausesPreview,
+          reason: 'pausesPreview',
+        );
+        expect(
+          decision.stopsPreview,
+          entry.value.stopsPreview,
+          reason: 'stopsPreview',
+        );
+      });
+    }
+  });
+
+  /// What an OK press does *before* any of the above runs. The regression this
+  /// pins is Android-TV-shaped: previews there are deliberate (OK starts one),
+  /// a slow portal makes `create_link` take seconds, and a second OK during
+  /// that window used to fall through to "start a preview" — superseding the
+  /// in-flight resolve with a second one and reloading the running shared
+  /// engine, which is exactly the "it reconnects when I go fullscreen" report.
+  group('decideChannelPlayAction', () {
+    test('a resolved same-channel preview goes straight to fullscreen', () {
+      expect(
+        decideChannelPlayAction(
+          sameChannelPreview: true,
+          previewHasStream: true,
+          previewLoading: false,
+        ),
+        ChannelPlayAction.openFullscreen,
+      );
+    });
+
+    test('a still-resolving same-channel preview is waited on, never '
+        'restarted', () {
+      expect(
+        decideChannelPlayAction(
+          sameChannelPreview: true,
+          previewHasStream: false,
+          previewLoading: true,
+        ),
+        ChannelPlayAction.awaitPreviewThenOpen,
+      );
+    });
+
+    test('a failed same-channel preview retries', () {
+      expect(
+        decideChannelPlayAction(
+          sameChannelPreview: true,
+          previewHasStream: false,
+          previewLoading: false,
+        ),
+        ChannelPlayAction.startPreview,
+      );
+    });
+
+    test('another channel always starts a preview, whatever this one is '
+        'doing', () {
+      for (final values in [
+        (stream: true, loading: false),
+        (stream: false, loading: true),
+        (stream: false, loading: false),
+      ]) {
+        expect(
+          decideChannelPlayAction(
+            sameChannelPreview: false,
+            previewHasStream: values.stream,
+            previewLoading: values.loading,
+          ),
+          ChannelPlayAction.startPreview,
+          reason: '$values',
+        );
+      }
+    });
+  });
+
+  // The other half of the embedded seamless handoff: while it is up, the
+  // fullscreen route and the preview controller are pointed at the *same*
+  // media_kit player, and both carry a live-EOF watchdog.
+  //
+  // One clean server-side EOF therefore fired two recoveries on one engine —
+  // and the preview's ends in `setVolume(muted ? 0 : 100)` against its own
+  // remembered mute, which is true for any desktop hover-started preview. The
+  // stream came back silent with the mute button lit, and a single-connection
+  // provider saw two overlapping `create_link` calls for one reconnect.
+  group('previewOwnsEofRecovery', () {
+    bool owns({
+      bool completed = true,
+      bool disposed = false,
+      bool nativeActive = false,
+      bool pausedByApp = false,
+      bool adoptedByFullscreen = false,
+      bool loading = false,
+      String? previewChannelId = 'ch1',
+      String? activeChannelId = 'ch1',
+    }) => previewOwnsEofRecovery(
+      completed: completed,
+      disposed: disposed,
+      nativeActive: nativeActive,
+      pausedByApp: pausedByApp,
+      adoptedByFullscreen: adoptedByFullscreen,
+      loading: loading,
+      previewChannelId: previewChannelId,
+      activeChannelId: activeChannelId,
+    );
+
+    test('a plain preview recovers its own clean EOF', () {
+      expect(owns(), isTrue);
+    });
+
+    test('an adopted preview leaves recovery to the fullscreen watchdog', () {
+      // The regression: without this the fullscreen player was reopened twice
+      // and re-muted to the preview's volume.
+      expect(owns(adoptedByFullscreen: true), isFalse);
+    });
+
+    test('only the rising edge of completed is an EOF', () {
+      // media_kit reports `completed: false` on a stop and on a fresh open.
+      expect(owns(completed: false), isFalse);
+    });
+
+    test('states that are not this controller\'s to answer stay out', () {
+      expect(owns(disposed: true), isFalse);
+      // Android's shared native engine reconnects in Kotlin.
+      expect(owns(nativeActive: true), isFalse);
+      // Paused around a handoff: this EOF is a consequence of that.
+      expect(owns(pausedByApp: true), isFalse);
+    });
+
+    test('a superseded or in-flight selection is not recovered', () {
+      expect(owns(previewChannelId: 'ch2'), isFalse);
+      expect(owns(activeChannelId: null), isFalse);
+      expect(owns(previewChannelId: null), isFalse);
+      // Mid-`start()`, where a restart would race the resolve already running.
+      expect(owns(loading: true), isFalse);
+    });
+  });
+
+  group('decidePreviewReturn', () {
+    PreviewReturnAction act({
+      bool hotSwapped = false,
+      bool resumePreviewOnReturn = true,
+      bool zapped = false,
+      FullscreenHandoff decision = FullscreenHandoff.adoptEmbedded,
+      bool previewHasStream = true,
+    }) => decidePreviewReturn(
+      hotSwapped: hotSwapped,
+      resumePreviewOnReturn: resumePreviewOnReturn,
+      zapped: zapped,
+      decision: decision,
+      previewHasStream: previewHasStream,
+    );
+
+    test('the pre-zap behaviour is unchanged', () {
+      expect(
+        act(hotSwapped: true),
+        PreviewReturnAction.discardPlayer,
+        reason: 'the Windows hot-swap tore the player down',
+      );
+      expect(
+        act(resumePreviewOnReturn: false),
+        PreviewReturnAction.stop,
+        reason: 'the phone sheet has no panel to return to',
+      );
+      expect(
+        act(decision: FullscreenHandoff.stopResolveFresh),
+        PreviewReturnAction.restartSameChannel,
+      );
+      expect(
+        act(decision: FullscreenHandoff.adoptNative),
+        PreviewReturnAction.resumeAdopted,
+      );
+      expect(
+        act(decision: FullscreenHandoff.adoptEmbedded),
+        PreviewReturnAction.resumeAdopted,
+      );
+      expect(
+        act(decision: FullscreenHandoff.pausePreview),
+        PreviewReturnAction.resumePaused,
+      );
+      expect(
+        act(decision: FullscreenHandoff.stopPreview),
+        PreviewReturnAction.none,
+        reason: 'a different-channel preview was stopped and is not restarted',
+      );
+      expect(act(decision: FullscreenHandoff.none), PreviewReturnAction.none);
+      expect(
+        act(decision: FullscreenHandoff.adoptEmbedded, previewHasStream: false),
+        PreviewReturnAction.none,
+      );
+    });
+
+    test('a zap turns every resume into a restart on the ended channel', () {
+      // Once the session has left the launch channel, resuming would put a
+      // channel the user navigated away from back in the panel — and, on an
+      // adopted engine, leave it holding a single-connection account's only
+      // slot on the wrong stream. Wherever a preview would have come back, it
+      // comes back on the channel the session ended on instead; where none
+      // would have, none does.
+      for (final decision in FullscreenHandoff.values) {
+        final resumed =
+            act(decision: decision) != PreviewReturnAction.none ||
+            decision.seamless;
+        expect(
+          act(zapped: true, decision: decision),
+          resumed
+              ? PreviewReturnAction.restartOnEndedChannel
+              : PreviewReturnAction.stop,
+          reason: decision.name,
+        );
+      }
+      expect(
+        act(zapped: true, decision: FullscreenHandoff.adoptEmbedded),
+        PreviewReturnAction.restartOnEndedChannel,
+      );
+    });
+
+    test('an iOS AVPlayer handoff restarts the final zapped channel', () {
+      expect(
+        act(
+          zapped: true,
+          decision: FullscreenHandoff.stopResolveFresh,
+          previewHasStream: false,
+        ),
+        PreviewReturnAction.restartOnEndedChannel,
+        reason: 'the embedded preview was stopped for AVPlayer, then the player zapped away',
+      );
+    });
+
+    test('a zapped adopted engine restarts even after the preview lost it', () {
+      // A zap that rebuilt the engine (cross-source headers, another buffer
+      // preset) un-adopts it on Android, and the `lost` event clears the
+      // preview's stream. The panel must still come back on the ended channel.
+      for (final decision in [
+        FullscreenHandoff.adoptNative,
+        FullscreenHandoff.adoptEmbedded,
+      ]) {
+        expect(
+          act(zapped: true, decision: decision, previewHasStream: false),
+          PreviewReturnAction.restartOnEndedChannel,
+          reason: decision.name,
+        );
+      }
+      expect(
+        act(
+          zapped: true,
+          decision: FullscreenHandoff.stopPreview,
+          previewHasStream: false,
+        ),
+        PreviewReturnAction.stop,
+        reason: 'a stopped different-channel preview still stays stopped',
+      );
+    });
+
+    test('a zap does not resurrect a player that cannot be reused', () {
+      // The two cases above it describe a player, not a channel: a hot-swapped
+      // engine is gone whatever the cursor did, and the phone sheet still has
+      // nowhere to show a preview.
+      expect(
+        act(zapped: true, hotSwapped: true),
+        PreviewReturnAction.discardPlayer,
+      );
+      expect(
+        act(zapped: true, resumePreviewOnReturn: false),
+        PreviewReturnAction.stop,
+      );
+    });
+  });
+}

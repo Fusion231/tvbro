@@ -1,0 +1,13 @@
+# Keep tracked Flutter-generated files on LF so Windows doesn't churn them.
+linux/flutter/generated_plugin_registrant.cc text eol=lf
+linux/flutter/generated_plugin_registrant.h text eol=lf
+linux/flutter/generated_plugins.cmake text eol=lf
+macos/Flutter/GeneratedPluginRegistrant.swift text eol=lf
+windows/flutter/generated_plugin_registrant.cc text eol=lf
+windows/flutter/generated_plugin_registrant.h text eol=lf
+windows/flutter/generated_plugins.cmake text eol=lf
+android/app/libs/*.aar filter=lfs diff=lfs merge=lfs -text
+
+# Published downloads and reviewer videos are not application build inputs.
+/panel/public/downloads/** export-ignore
+/panel/public/review/** export-ignore

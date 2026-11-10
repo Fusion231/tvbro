@@ -1,0 +1,527 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../l10n/app_localizations.dart';
+import '../player/channel_owner.dart';
+import '../theme.dart';
+import 'routed_focus_node.dart';
+
+/// A text field that behaves under a TV remote's D-pad as well as touch/mouse.
+///
+/// The problem it solves: a normal [TextField] traps D-pad focus — once it's
+/// focused, the embedded editor consumes the arrow keys for caret movement, so
+/// you can't navigate away, and Back tends to do nothing useful. That makes the
+/// search box / credential fields a dead end on Android TV.
+///
+/// This wraps the field in an **edit-mode cell** (the same "OK to edit" model the
+/// player sliders use): in traversal it's a single focusable cell that arrows
+/// pass over freely. Pressing OK/Select (or tapping) enters edit mode — the inner
+/// field takes focus and the keyboard opens; pressing the IME action (Done/Search)
+/// or Back exits edit mode and returns focus to the cell so navigation resumes.
+/// The inner field is removed from traversal ([ExcludeFocus]) unless editing, so
+/// it can never become a trap.
+///
+/// Matches the channel list's search box height by default (`height: 40` there
+/// is redundant with this but kept explicit at that call site).
+const double kTvTextFieldHeight = 40.0;
+
+class TvTextField extends StatefulWidget {
+  final TextEditingController controller;
+  final String hintText;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<String>? onSubmitted;
+  final Widget? prefixIcon;
+  final Widget? suffixIcon;
+  final bool obscureText;
+  final bool autofocus;
+  final TextInputAction? textInputAction;
+  final double? height;
+  final FocusNode? cellFocusNode;
+
+  /// Optional persistent label rendered above the field. Preferred over a
+  /// floating label for credential forms (it stays visible once text is entered).
+  final String? label;
+
+  /// Optional inline validation message rendered below the field in
+  /// [AppColors.danger] — and, while set, tints the cell's own border/border
+  /// width the same colour (unless the cell is focused/editing, which still
+  /// wins so the accent ring is never fought). Callers own when to set/clear
+  /// this; it does not affect submission.
+  final String? errorText;
+
+  /// Built-in clear (×) button. Unlike a [suffixIcon] — which sits *inside*
+  /// the edit barrier and can never be a D-pad target — this renders as its
+  /// own always-focusable sibling stop (the same pattern as the password
+  /// show/hide toggle). Shown only while [showClear] is true (callers pass
+  /// `text.isNotEmpty`); activation runs [onClear] and parks focus back on
+  /// the cell, since the button disappears once the text empties.
+  final VoidCallback? onClear;
+  final bool showClear;
+
+  const TvTextField({
+    super.key,
+    required this.controller,
+    required this.hintText,
+    this.onChanged,
+    this.onSubmitted,
+    this.prefixIcon,
+    this.suffixIcon,
+    this.obscureText = false,
+    this.autofocus = false,
+    this.textInputAction,
+    this.height,
+    this.label,
+    this.cellFocusNode,
+    this.onClear,
+    this.showClear = false,
+    this.errorText,
+  });
+
+  @override
+  State<TvTextField> createState() => _TvTextFieldState();
+}
+
+class _TvTextFieldState extends State<TvTextField> with WidgetsBindingObserver {
+  static const _keyboardChannel = MethodChannel('iptvs/keyboard');
+  static final _keyboardOwner = ChannelHandlerOwner(_keyboardChannel);
+  static int? _activeKeyboardToken;
+  final FocusNode _cellFocus = RoutedFocusNode('TvTextField.cell');
+  final FocusNode _fieldFocus = RoutedFocusNode('TvTextField.field');
+  final FocusNode _toggleFocus = RoutedFocusNode('TvTextField.toggle');
+  final FocusNode _clearFocus = RoutedFocusNode('TvTextField.clear');
+  bool _editing = false;
+  bool _cellFocused = false;
+  bool _toggleFocused = false;
+  bool _clearFocused = false;
+  double _bottomViewInset = 0;
+  int? _keyboardToken;
+  late bool _obscured = widget.obscureText;
+
+  FocusNode get _effectiveCellFocus => widget.cellFocusNode ?? _cellFocus;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _fieldFocus.onKeyEvent = _onFieldKey;
+    _fieldFocus.addListener(_onFieldFocusChange);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _bottomViewInset = View.of(context).viewInsets.bottom;
+  }
+
+  @override
+  void didChangeMetrics() {
+    final bottomViewInset = View.of(context).viewInsets.bottom;
+    final keyboardHidden = _bottomViewInset > 0 && bottomViewInset == 0;
+    _bottomViewInset = bottomViewInset;
+    // Android's IME can consume Back and hide without a route pop or focus
+    // change. Return to the cell so the editor no longer traps D-pad arrows.
+    // Require a visible-to-hidden transition so hardware keyboards still work.
+    if (keyboardHidden && _editing && _fieldFocus.hasFocus) _exitEdit();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _releaseKeyboardHandler();
+    _fieldFocus.removeListener(_onFieldFocusChange);
+    if (widget.cellFocusNode == null) {
+      _cellFocus.dispose();
+    }
+    _fieldFocus.dispose();
+    _toggleFocus.dispose();
+    _clearFocus.dispose();
+    super.dispose();
+  }
+
+  void _onFieldFocusChange() {
+    if (_fieldFocus.hasFocus && _editing) {
+      // TV keyboards can float over the app with zero viewInsets. Only the
+      // active editor owns the native visibility notification.
+      _keyboardToken ??= _keyboardOwner.claim((call) async {
+        if (call.method == 'hidden' &&
+            mounted &&
+            _editing &&
+            _fieldFocus.hasFocus) {
+          _exitEdit();
+        }
+        return null;
+      });
+      _activeKeyboardToken = _keyboardToken;
+      return;
+    }
+    _releaseKeyboardHandler();
+    // The editor lost focus (e.g. tapped elsewhere) — leave edit mode so the
+    // cell is back to a plain navigable stop.
+    if (!_fieldFocus.hasFocus && _editing && mounted) {
+      setState(() => _editing = false);
+    }
+  }
+
+  void _releaseKeyboardHandler() {
+    final token = _keyboardToken;
+    _keyboardToken = null;
+    if (token == null) return;
+    _keyboardOwner.release(token);
+    if (_activeKeyboardToken == token) {
+      _activeKeyboardToken = null;
+      // The IME can finish hiding after its editor released ownership. Keep a
+      // receiver so Flutter cannot buffer that old event for the next editor.
+      _keyboardChannel.setMethodCallHandler((_) async => null);
+    }
+  }
+
+  KeyEventResult _onFieldKey(FocusNode node, KeyEvent event) {
+    if (!_editing ||
+        (event.logicalKey != LogicalKeyboardKey.goBack &&
+            event.logicalKey != LogicalKeyboardKey.escape)) {
+      return KeyEventResult.ignored;
+    }
+    // Consume both edges before moving focus; an unhandled key-up can also
+    // trigger Android's route Back after the editor has already closed.
+    if (event is KeyUpEvent) _exitEdit();
+    return KeyEventResult.handled;
+  }
+
+  void _enterEdit({PasteTextIntent? pasteIntent}) {
+    if (_editing) {
+      // A floating TV keyboard can be hidden while the editor keeps focus.
+      // OK must explicitly show it again instead of ignoring the activation.
+      _fieldFocus.context!
+          .findAncestorStateOfType<EditableTextState>()!
+          .requestKeyboard();
+      return;
+    }
+    setState(() => _editing = true);
+    // Request the inner field after the ExcludeFocus barrier lifts this frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _editing) {
+        if (pasteIntent == null) {
+          _fieldFocus.requestFocus();
+        } else {
+          // Internal editor focus preserves an existing caret/selection.
+          _fieldFocus.context!
+              .findAncestorStateOfType<EditableTextState>()!
+              .requestKeyboard();
+          // Commit focus first so even an untouched field has a valid selection.
+          FocusManager.instance.applyFocusChangesIfNeeded();
+          Actions.invoke(_fieldFocus.context!, pasteIntent);
+        }
+      }
+    });
+  }
+
+  void _exitEdit({bool refocusCell = true}) {
+    if (!_editing) return;
+    setState(() => _editing = false);
+    _fieldFocus.unfocus();
+    if (refocusCell) _effectiveCellFocus.requestFocus();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final highlighted = _editing || _cellFocused;
+    final cell = _buildCell(highlighted);
+    if (widget.label == null && widget.errorText == null) return cell;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (widget.label != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 6),
+            child: Text(
+              widget.label!,
+              style: const TextStyle(
+                color: AppColors.textLo,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        cell,
+        if (widget.errorText != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, top: 6),
+            child: Text(
+              widget.errorText!,
+              style: const TextStyle(color: AppColors.danger, fontSize: 12),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCell(bool highlighted) {
+    // While editing, swallow Back to leave edit mode instead of popping the route.
+    // PopScope (not BackButtonListener) is the Navigator-compatible mechanism —
+    // this app uses Navigator, not a Router, so BackButtonListener would throw.
+    return PopScope(
+      canPop: !_editing,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _editing) _exitEdit();
+      },
+      child: Container(
+        height: widget.height ?? kTvTextFieldHeight,
+        // Vertically centers the Row within a fixed-height cell.
+        alignment: Alignment.centerLeft,
+        decoration: BoxDecoration(
+          color: highlighted ? AppColors.panelHi : AppColors.panel,
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+          border: Border.all(
+            color: highlighted
+                ? AppColors.accent
+                : (widget.errorText != null
+                      ? AppColors.danger
+                      : AppColors.line),
+            width: highlighted ? 2 : (widget.errorText != null ? 1.5 : 1),
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: _buildEntryCell()),
+            // The show/hide toggle lives *outside* the entry cell's
+            // edit-mode barrier below, as its own always-focusable stop —
+            // not nested inside it. Nested there it would be unreachable by
+            // D-pad: entering edit mode hands focus straight to the
+            // TextField, and arrow keys are then consumed by the editor for
+            // caret movement (that's the whole reason this widget exists),
+            // so a sibling icon inside the same barrier could never be
+            // navigated to on a TV remote.
+            if (widget.obscureText) _buildVisibilityToggle(),
+            if (widget.onClear != null && widget.showClear)
+              _buildClearButton()
+            else if (widget.suffixIcon != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: IgnorePointer(
+                  ignoring: !_editing,
+                  child: ExcludeFocus(
+                    excluding: !_editing,
+                    child: IconTheme.merge(
+                      data: const IconThemeData(color: AppColors.textLo),
+                      child: widget.suffixIcon!,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The "OK to edit" prefix-icon + text field portion — a single focusable
+  /// stop until [_enterEdit] hands focus to the inner [TextField].
+  Widget _buildEntryCell() {
+    return FocusableActionDetector(
+      focusNode: _effectiveCellFocus,
+      autofocus: widget.autofocus,
+      mouseCursor: SystemMouseCursors.text,
+      onShowFocusHighlight: (v) {
+        if (mounted) setState(() => _cellFocused = v);
+      },
+      actions: {
+        // A traversed/autofocused cell has no active editor to handle Ctrl+V.
+        // Remove this bridge while editing: EditableText's overridable paste
+        // action must then handle the intent itself, including selection/undo.
+        if (!_editing)
+          PasteTextIntent: CallbackAction<PasteTextIntent>(
+            onInvoke: (intent) {
+              _enterEdit(pasteIntent: intent);
+              return null;
+            },
+          ),
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            _enterEdit();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _enterEdit,
+        // Until editing, the inner field neither takes focus (ExcludeFocus) nor
+        // pointer events (IgnorePointer) — so a tap falls through to the cell's
+        // onTap → _enterEdit instead of being swallowed by the (unfocusable)
+        // field. Once editing, both barriers lift so caret/selection work.
+        child: IgnorePointer(
+          ignoring: !_editing,
+          child: ExcludeFocus(
+            excluding: !_editing,
+            // Icons live OUTSIDE the InputDecoration, in a manually centered
+            // Row. Inside the decorator their 48dp minimum makes it taller
+            // than the text line, and the InputDecorator's dense-layout
+            // vertical centering differs between Android and Windows — the
+            // recurring "hint sits high on Android" bug. With no icons the
+            // decorator collapses to the text line and the Row centers
+            // everything identically on every platform.
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                if (widget.prefixIcon != null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 12),
+                    child: IconTheme.merge(
+                      data: const IconThemeData(color: AppColors.textLo),
+                      child: widget.prefixIcon!,
+                    ),
+                  ),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: TextField(
+                      controller: widget.controller,
+                      focusNode: _fieldFocus,
+                      obscureText: _obscured,
+                      onChanged: widget.onChanged,
+                      textInputAction: widget.textInputAction,
+                      onSubmitted: (value) {
+                        _exitEdit();
+                        widget.onSubmitted?.call(value);
+                      },
+                      // A *collapsed* decoration removes the InputDecorator's
+                      // layout entirely (no fill, borders, or padding — the
+                      // cell supplies all of that), so the field is exactly
+                      // the text line and the Row's centering is
+                      // platform-independent. Any non-collapsed decoration
+                      // re-engages the decorator's own vertical placement,
+                      // which differs between Android and Windows — the
+                      // recurring hint-misalignment bug.
+                      //
+                      // Every border slot must be InputBorder.none
+                      // explicitly: applyDefaults fills any null slot from
+                      // the app theme's OutlineInputBorders, and the
+                      // decorator prefers enabled/focusedBorder over
+                      // `border` — which painted a second rounded box
+                      // inside the cell.
+                      decoration: InputDecoration(
+                        isCollapsed: true,
+                        contentPadding: EdgeInsets.zero,
+                        filled: false,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        errorBorder: InputBorder.none,
+                        focusedErrorBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        hintText: widget.hintText,
+                        hintStyle: const TextStyle(color: AppColors.textLo),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleClear() {
+    widget.onClear!();
+    // The button unmounts when the text empties (showClear goes false) —
+    // park focus on the cell so the D-pad never dangles on a gone node.
+    _effectiveCellFocus.requestFocus();
+  }
+
+  /// The clear (×) button, mirroring [_buildVisibilityToggle]'s structure: a
+  /// sibling stop *outside* the entry cell's edit barrier, always focusable
+  /// (not gated on edit mode), with the app's standard accent focus ring.
+  Widget _buildClearButton() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: FocusableActionDetector(
+        focusNode: _clearFocus,
+        mouseCursor: SystemMouseCursors.click,
+        onShowFocusHighlight: (v) {
+          if (mounted) setState(() => _clearFocused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              _handleClear();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: _handleClear,
+          child: Tooltip(
+            message: tr('Clear'),
+            child: AnimatedContainer(
+              duration: appMotion(context, const Duration(milliseconds: 120)),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _clearFocused ? AppColors.panelHi : null,
+                border: _clearFocused
+                    ? Border.all(color: AppColors.accent, width: 2)
+                    : null,
+              ),
+              child: Icon(
+                Icons.clear,
+                size: 18,
+                color: _clearFocused ? AppColors.accent : AppColors.textLo,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Password/credential fields get a built-in show/hide toggle — without it
+  /// there's no way to spot a typo on a device with no physical keyboard to
+  /// arrow back over masked characters. Always focusable/tappable (not
+  /// gated by edit mode) with its own accent focus ring, matching how every
+  /// other D-pad-navigable control in the app signals focus.
+  Widget _buildVisibilityToggle() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: FocusableActionDetector(
+        focusNode: _toggleFocus,
+        mouseCursor: SystemMouseCursors.click,
+        onShowFocusHighlight: (v) {
+          if (mounted) setState(() => _toggleFocused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              setState(() => _obscured = !_obscured);
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: () => setState(() => _obscured = !_obscured),
+          child: Tooltip(
+            message: _obscured ? tr('Show') : tr('Hide'),
+            child: AnimatedContainer(
+              duration: appMotion(context, const Duration(milliseconds: 120)),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _toggleFocused ? AppColors.panelHi : null,
+                border: _toggleFocused
+                    ? Border.all(color: AppColors.accent, width: 2)
+                    : null,
+              ),
+              child: Icon(
+                _obscured ? Icons.visibility_off : Icons.visibility,
+                size: 20,
+                color: _toggleFocused ? AppColors.accent : AppColors.textLo,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
