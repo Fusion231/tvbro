@@ -9,11 +9,13 @@ import 'app_database.dart';
 import 'diagnostics_log.dart';
 import 'epg_models.dart';
 import 'load_token.dart';
+import 'media_info.dart';
 import 'metadata_provider.dart';
 import 'net.dart'
     show ProviderRequestBlocked, formatBytes, redactText, sourceLoadErrorMessage;
 import 'programme_spool.dart';
 import 'source_identity_migration.dart';
+import 'wikimedia_client.dart';
 
 class LibrarySnapshot {
   final List<Category> categories;
@@ -1402,7 +1404,7 @@ class LibraryRepository {
           if (!cacheProviderDetails || !identical(details, merged)) {
             await persist(merged);
           }
-          return merged;
+          return _fillMovieDetailsFromWikimedia(merged);
         },
       ),
     );
@@ -1427,6 +1429,7 @@ class LibraryRepository {
     final expectedCacheIdentity = await _cacheIdentityForCurrentCall();
     var out = [...items];
     for (final provider in metadataProviders) {
+      if (provider.provider == WikimediaClient.providerName) continue;
       final metadata = await db.readExternalMetadataForItems(
         source.id,
         out,
@@ -1464,6 +1467,7 @@ class LibraryRepository {
     final enrichedParent = (await _mergeCachedMetadata([parent])).first;
     final cachedByProvider = <String, Map<String, ExternalMetadata>>{};
     for (final provider in metadataProviders) {
+      if (provider.provider == WikimediaClient.providerName) continue;
       cachedByProvider[provider.provider] = await db
           .readExternalMetadataForItems(source.id, items, provider.provider);
     }
@@ -1512,6 +1516,7 @@ class LibraryRepository {
     var changed = false;
     var visualMatched = false;
     for (final provider in metadataProviders) {
+      if (provider.provider == WikimediaClient.providerName) continue;
       if (provider.ratingsOnly && !visualMatched) continue;
       if (provider.provider == 'tvmaze' && visualMatched) continue;
       final cached = cachedByProvider[provider.provider]?[out.id];
@@ -1595,6 +1600,7 @@ class LibraryRepository {
     var out = item;
     var visualMatched = false;
     for (final provider in metadataProviders) {
+      if (provider.provider == WikimediaClient.providerName) continue;
       if (provider.ratingsOnly && !visualMatched) continue;
       if (provider.provider == 'tvmaze' && visualMatched) continue;
       final cached = await cachedExternalMetadata(out, provider.provider);
@@ -1638,12 +1644,70 @@ class LibraryRepository {
     return out;
   }
 
+  Future<MediaItem> _fillMovieDetailsFromWikimedia(MediaItem item) async {
+    if (!WikimediaClient.needsMetadata(item)) return item;
+    final provider = metadataProviders
+        .where((provider) => provider.provider == WikimediaClient.providerName)
+        .firstOrNull;
+    if (provider == null) return item;
+    var fallback = item;
+    try {
+      final cached = await cachedExternalMetadata(item, provider.provider);
+      if (cached != null &&
+          (provider is! WikimediaClient || provider.matchesCache(item, cached))) {
+        fallback = _mergeMetadata(item, cached);
+        final ttl = WikimediaClient.needsMetadata(fallback)
+            ? const Duration(days: 1)
+            : const Duration(days: 7);
+        if (DateTime.now().difference(cached.refreshedAt) < ttl) {
+          return fallback;
+        }
+      }
+      final metadata = await provider.search(item);
+      if (metadata == null) return fallback;
+      // Store the fallback separately so provider details can replace it.
+      await cacheExternalMetadata(item, metadata);
+      return _mergeMetadata(item, metadata);
+    } catch (error) {
+      _logMetadata('Wikimedia lookup failed ${item.kind.name}:${item.id}: $error');
+      return fallback;
+    }
+  }
+
   MediaItem _mergeMetadata(
     MediaItem item,
     ExternalMetadata metadata, {
     bool ratingsOnly = false,
   }) {
     final existingMetadata = item.extra['metadata'];
+    if (metadata.provider == WikimediaClient.providerName) {
+      if (item.kind != ContentKind.movie) return item;
+      final needsDescription = WikimediaClient.isMissing(item.description);
+      final needsPoster = WikimediaClient.isMissing(item.poster);
+      final info = MediaInfo.fromItem(item);
+      final payload = {...metadata.payload};
+      if (!needsDescription) payload.remove('wikipedia_url');
+      if (!needsPoster) {
+        payload.removeWhere((key, _) => key.startsWith('commons_'));
+      }
+      if (info.durationSeconds != null) payload.remove('runtime');
+      if (info.releaseDate != null) payload.remove('release_date');
+      if (info.cast.isNotEmpty) payload.remove('cast');
+      if (info.directors.isNotEmpty) payload.remove('director');
+      if (info.genres.isNotEmpty) payload.remove('genres');
+      return item.copyWith(
+        poster: needsPoster ? metadata.poster : null,
+        description: needsDescription ? metadata.overview : null,
+        year: WikimediaClient.isMissing(item.year) ? metadata.year : null,
+        extra: {
+          ...item.extra,
+          'metadata': {
+            if (existingMetadata is Map) ...existingMetadata,
+            metadata.provider: payload,
+          },
+        },
+      );
+    }
     if (metadata.provider == 'tvmaze' &&
         existingMetadata is Map &&
         metadataProviders.any(
@@ -1724,6 +1788,7 @@ class LibraryRepository {
     Object? firstError;
     StackTrace? firstStackTrace;
     for (final provider in metadataProviders) {
+      if (provider.provider == WikimediaClient.providerName) continue;
       if (provider.ratingsOnly && refreshed == null) continue;
       if (!provider.ratingsOnly && refreshed != null) continue;
       try {

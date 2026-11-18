@@ -96,6 +96,7 @@ void main() {
     final fixture = await _XtreamFixture.start();
     final network = await JourneyHttp.start(
       RegExp(r'^Fixture Series \d{5,}$').hasMatch,
+      acceptsMovie: RegExp(r'^Fixture Movie \d{5,}$').hasMatch,
     );
     final rendered = _RenderedState(binding);
     final input = _NativeTextInput(binding.defaultBinaryMessenger);
@@ -402,6 +403,7 @@ void main() {
       );
       expect(network.deniedHosts, isEmpty);
       expect(network.tvmazeSearches, isPositive);
+      expect(network.wikimediaSearches, isPositive);
       expect(fixture.unexpectedRequests, isEmpty);
       expect(tester.takeException(), isNull);
       metrics['status'] = 'succeeded';
@@ -868,6 +870,7 @@ class _XtreamFixture {
         'plot': 'Synthetic movie details $itemId',
         'movie_image': artwork,
         'duration_secs': 20,
+        'year': '2025',
       },
       'movie_data': {
         'stream_id': int.parse(itemId!),

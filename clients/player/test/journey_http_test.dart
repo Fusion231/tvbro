@@ -9,6 +9,7 @@ void main() {
   test('only the expected TVmaze search receives a local response', () async {
     final network = await JourneyHttp.start(
       (title) => title == 'Fixture Series',
+      acceptsMovie: (title) => title == 'Fixture Movie',
     );
     addTearDown(network.close);
     final client = network.createHttpClient(null);
@@ -20,6 +21,21 @@ void main() {
     expect(await response.transform(utf8.decoder).join(), '[]');
     expect(network.tvmazeSearches, 1);
     expect(network.deniedHosts, isEmpty);
+
+    final movie = Uri.https('www.wikidata.org', '/w/api.php', {
+      'action': 'wbsearchentities',
+      'search': 'Fixture Movie',
+      'language': 'en',
+      'uselang': 'en',
+      'type': 'item',
+      'limit': '8',
+      'format': 'json',
+      'formatversion': '2',
+    });
+    final matchingMovie = await (await client.getUrl(movie)).close();
+    expect(matchingMovie.statusCode, HttpStatus.ok);
+    expect(await matchingMovie.transform(utf8.decoder).join(), '{"search":[]}');
+    expect(network.wikimediaSearches, 1);
 
     for (final (method, uri) in [
       ('GET', search.resolve('/other')),

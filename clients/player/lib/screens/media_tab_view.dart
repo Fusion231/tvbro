@@ -14,6 +14,7 @@ import '../data/media_info.dart';
 import '../data/media_trailer.dart';
 import '../data/series_watch_progress.dart';
 import '../data/source_hint_parser.dart';
+import '../data/wikimedia_client.dart';
 import '../player/episode_navigation.dart' show orderPlaybackEpisodes;
 import '../sources/source.dart';
 import '../l10n/app_localizations.dart';
@@ -2179,7 +2180,8 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
         _item = item;
         _metadataFuture = _loadMetadata();
       });
-      widget.onChanged?.call(item);
+      // Wikimedia artwork stays on the sheet alongside its attribution.
+      if (!_hasWikimediaMetadata) widget.onChanged?.call(item);
     } catch (_) {
       // Optional enrichment must leave the provider's details usable.
     } finally {
@@ -2417,14 +2419,38 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
       });
 
   bool get _hasMetadataProvider => widget.repo.metadataProviders.any(
-    (provider) => !provider.ratingsOnly &&
-        (provider.provider != 'tvmaze' || _item.kind == ContentKind.series),
+    (provider) =>
+        !provider.ratingsOnly && _supportsVisualMetadata(provider.provider),
   );
+
+  bool get _hasManualMetadataProvider => widget.repo.metadataProviders.any(
+    (provider) =>
+        !provider.ratingsOnly &&
+        provider.provider != WikimediaClient.providerName &&
+        _supportsVisualMetadata(provider.provider),
+  );
+
+  bool get _hasWikimediaMetadata {
+    final metadata = _item.extra['metadata'];
+    return metadata is Map && metadata[WikimediaClient.providerName] is Map;
+  }
+
+  bool _supportsVisualMetadata(String provider) => switch (provider) {
+    'tvmaze' => _item.kind == ContentKind.series,
+    WikimediaClient.providerName => _item.kind == ContentKind.movie,
+    _ => true,
+  };
 
   Future<ExternalMetadata?> _loadMetadata() async {
     ExternalMetadata? latest;
     for (final provider in widget.repo.metadataProviders) {
-      if (provider.ratingsOnly) continue;
+      if (provider.ratingsOnly || !_supportsVisualMetadata(provider.provider)) {
+        continue;
+      }
+      if (provider.provider == WikimediaClient.providerName &&
+          !_hasWikimediaMetadata) {
+        continue;
+      }
       final metadata = await widget.repo.cachedExternalMetadata(
         _item,
         provider.provider,
@@ -2438,14 +2464,15 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
   }
 
   Future<void> _refreshMetadata() async {
-    if (_refreshingMetadata || !_hasMetadataProvider) return;
+    if (_refreshingMetadata || !_hasManualMetadataProvider) return;
     setState(() => _refreshingMetadata = true);
     try {
-      final metadata = await widget.repo.refreshExternalMetadata(_item);
+      final base = _hasWikimediaMetadata ? widget.item : _item;
+      final metadata = await widget.repo.refreshExternalMetadata(base);
       if (!mounted) return;
       setState(() {
         if (metadata != null) {
-          _item = widget.repo.mergeExternalMetadata(_item, metadata);
+          _item = widget.repo.mergeExternalMetadata(base, metadata);
           widget.onChanged?.call(_item);
         }
         _metadataFuture = metadata == null
@@ -2592,7 +2619,9 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                           metadata: _metadataFuture,
                           configured: _hasMetadataProvider,
                           refreshing: _refreshingMetadata,
-                          onRefresh: _refreshMetadata,
+                          onRefresh: _hasManualMetadataProvider
+                              ? _refreshMetadata
+                              : null,
                         ),
                         _MetadataAttribution(item: _item),
                       ],
@@ -3188,12 +3217,66 @@ class _MetadataAttribution extends StatelessWidget {
 
   final MediaItem item;
 
+  Uri? _link(Object? value, Set<String> hosts) {
+    final url = value is String ? Uri.tryParse(value) : null;
+    return url?.scheme == 'https' && hosts.contains(url?.host) ? url : null;
+  }
+
+  Widget _sourceLink(Uri url, String label) => TextButton(
+    onPressed: () => launchUrl(url, mode: LaunchMode.externalApplication),
+    child: Text(label),
+  );
+
+  Iterable<Widget> _portraitCredits(Map wiki) sync* {
+    final photos = wiki['cast_photos'];
+    if (photos is! Map) return;
+    final licenses = <Uri, String>{};
+    for (final actor in MediaInfo.fromItem(item).cast) {
+      final credit = photos[actor.name.toLowerCase()];
+      if (actor.photoUrl == null ||
+          credit is! Map ||
+          actor.photoUrl != credit['photo_url']) {
+        continue;
+      }
+      final source = _link(credit['commons_url'], const {'commons.wikimedia.org'});
+      if (source == null) continue;
+      final artist = credit['commons_artist'];
+      final license = credit['commons_license'];
+      final licenseUrl = _link(
+        credit['commons_license_url'],
+        const {'creativecommons.org'},
+      );
+      yield _sourceLink(
+        source,
+        [
+          actor.name,
+          if (artist is String) artist,
+          if (licenseUrl == null && license is String) license,
+        ].join(' · '),
+      );
+      if (licenseUrl != null && license is String) licenses[licenseUrl] = license;
+    }
+    for (final entry in licenses.entries) {
+      yield _sourceLink(entry.key, entry.value);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final metadata = item.extra['metadata'];
     if (metadata is! Map) return const SizedBox.shrink();
     final tvmaze = metadata['tvmaze'];
     final tvmazeId = tvmaze is Map ? int.tryParse('${tvmaze['id']}') : null;
+    final wiki = metadata[WikimediaClient.providerName];
+    final wikipedia = wiki is Map
+        ? _link(wiki['wikipedia_url'], const {'pl.wikipedia.org', 'en.wikipedia.org'})
+        : null;
+    final commons = wiki is Map
+        ? _link(wiki['commons_url'], const {'commons.wikimedia.org'})
+        : null;
+    final commonsLicense = wiki is Map
+        ? _link(wiki['commons_license_url'], const {'creativecommons.org'})
+        : null;
     return Wrap(
       spacing: 8,
       children: [
@@ -3215,6 +3298,29 @@ class _MetadataAttribution extends StatelessWidget {
             child: const Text('CC BY-SA 4.0'),
           ),
         ],
+        if (wiki is Map && RegExp(r'^Q[1-9]\d*$').hasMatch('${wiki['id']}'))
+          _sourceLink(Uri.https('www.wikidata.org', '/wiki/${wiki['id']}'), tr('Wikidata')),
+        if (wikipedia != null) ...[
+          _sourceLink(wikipedia, tr('Wikipedia (excerpt)')),
+          _sourceLink(
+            Uri.https('creativecommons.org', '/licenses/by-sa/4.0/'),
+            'CC BY-SA 4.0',
+          ),
+        ],
+        if (commons != null && wiki is Map) ...[
+          _sourceLink(
+            commons,
+            wiki['commons_artist'] is String
+                ? 'Wikimedia Commons · ${wiki['commons_artist']}'
+                : 'Wikimedia Commons',
+          ),
+          if (wiki['commons_license'] case final String license)
+            if (commonsLicense != null)
+              _sourceLink(commonsLicense, license)
+            else
+              Text(license),
+        ],
+        if (wiki is Map) ..._portraitCredits(wiki),
         if (metadata['tvdb'] is Map)
           TextButton(
             onPressed: () => launchUrl(
@@ -3232,7 +3338,7 @@ class _MetadataStatus extends StatelessWidget {
   final Future<ExternalMetadata?> metadata;
   final bool configured;
   final bool refreshing;
-  final VoidCallback onRefresh;
+  final VoidCallback? onRefresh;
 
   const _MetadataStatus({
     required this.metadata,
@@ -3296,7 +3402,7 @@ class _MetadataStatus extends StatelessWidget {
                   style: const TextStyle(color: AppColors.textLo, fontSize: 12),
                 ),
               ),
-              if (configured)
+              if (onRefresh != null)
                 IconButton(
                   tooltip: tr('Refresh metadata'),
                   visualDensity: VisualDensity.compact,

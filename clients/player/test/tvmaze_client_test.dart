@@ -39,16 +39,19 @@ const show = {
 };
 
 void main() {
-  test('every user gets TVmaze without credentials', () {
-    final providers = buildMetadataProviders(const MetadataConfig());
-    addTearDown(() {
-      for (final provider in providers) {
-        provider.close();
-      }
-    });
-    expect(providers.map((p) => p.provider), ['tvmaze']);
-    expect(providers.single.authMode, 'public');
-  });
+  test(
+    'every user gets public series and movie metadata without credentials',
+    () {
+      final providers = buildMetadataProviders(const MetadataConfig());
+      addTearDown(() {
+        for (final provider in providers) {
+          provider.close();
+        }
+      });
+      expect(providers.map((p) => p.provider), ['tvmaze', 'wikimedia']);
+      expect(providers.map((p) => p.authMode), ['public', 'public']);
+    },
+  );
 
   test(
     'configured sources precede the free fallback and ratings remain last',
@@ -70,6 +73,7 @@ void main() {
         'tvdb',
         'tmdb',
         'tvmaze',
+        'wikimedia',
         'mdblist',
       ]);
     },

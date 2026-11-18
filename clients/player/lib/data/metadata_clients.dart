@@ -4,8 +4,9 @@ import 'metadata_provider.dart';
 import 'tmdb_client.dart';
 import 'tvdb_client.dart';
 import 'tvmaze_client.dart';
+import 'wikimedia_client.dart';
 
-/// Shared by every account tier; TVmaze needs no stored credentials.
+/// TVmaze and Wikimedia are available on every account tier without credentials.
 List<MetadataProvider> buildMetadataProviders(
   MetadataConfig config, {
   String language = 'eng',
@@ -22,6 +23,7 @@ List<MetadataProvider> buildMetadataProviders(
   return [
     ...config.preferredVisualProvider == 'tvdb' ? visual.reversed : visual,
     TvmazeClient(),
+    WikimediaClient(language: language == 'pol' ? 'pl' : language),
     if (config.hasMdblist) MdblistClient(apiKey: config.mdblistApiKey),
   ];
 }

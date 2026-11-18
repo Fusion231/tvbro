@@ -1504,7 +1504,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                     children: [
                       Text(
                         tr(
-                          'TVmaze supplies series descriptions for everyone, free and without an API key. TMDB and TheTVDB are optional; TheTVDB also supports movies and requires a project API key.',
+                          'Wikidata and Wikipedia can fill gaps when you open a movie. TVmaze supplies series descriptions. These sources work without an API key.',
                         ),
                         style: TextStyle(color: AppColors.textLo),
                       ),

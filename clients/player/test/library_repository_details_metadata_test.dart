@@ -123,6 +123,44 @@ void main() {
     expect(details.extra['metadata']['tmdb']['credits'], {'cast': []});
   });
 
+  test(
+    'public movie data fills gaps after provider details and stays cached',
+    () async {
+      final free = _TmdbProvider(name: 'wikimedia', refreshedAt: DateTime.now());
+      final repository = LibraryRepository(
+        source: repo.source,
+        db: db,
+        metadataProvider: free,
+      );
+      const movie = MediaItem(
+        id: 'movie-1',
+        title: 'IPTV title',
+        kind: ContentKind.movie,
+        poster: 'https://iptv.test/poster.jpg',
+        providerId: 'iptv-id',
+      );
+      expect(
+        (await repository.enrichMediaMetadata([movie])).single,
+        same(movie),
+      );
+      expect(free.searched, isEmpty);
+
+      final prepared = await repository.prepareMediaDetails(movie);
+      expect(prepared.item.description, isNull);
+      expect(free.searched, isEmpty);
+      final details = await prepared.enrich();
+      expect(details.title, movie.title);
+      expect(details.poster, movie.poster);
+      expect(details.providerId, movie.providerId);
+      expect(details.description, 'Detailed synopsis');
+      expect(
+        (await repository.mediaDetails(movie)).description,
+        'Detailed synopsis',
+      );
+      expect(free.searched, ['movie-1']);
+    },
+  );
+
   for (final throwsError in [true, false]) {
     test(
       'a ${throwsError ? 'failed' : 'missing'} details match preserves cached metadata',
@@ -360,11 +398,12 @@ void main() {
 
 class _TmdbProvider implements MetadataProvider {
   final String name;
+  final DateTime? refreshedAt;
   final searched = <String>[];
   var fail = false;
   var noMatch = false;
 
-  _TmdbProvider({this.name = 'tmdb'});
+  _TmdbProvider({this.name = 'tmdb', this.refreshedAt});
 
   @override
   String get provider => name;
@@ -394,7 +433,7 @@ class _TmdbProvider implements MetadataProvider {
           ],
         },
       },
-      refreshedAt: DateTime(2026, 10, 23),
+      refreshedAt: refreshedAt ?? DateTime(2026, 10, 23),
     );
   }
 
