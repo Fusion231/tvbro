@@ -1346,10 +1346,21 @@ class LibraryRepository {
 
   Future<MediaItem> mediaDetails(MediaItem item) => _shareRead(
     ('details', item.kind, item.id),
-    () => _mediaDetails(item),
+    () async {
+      final details = await prepareMediaDetails(item);
+      return details.enrich();
+    },
   );
 
-  Future<MediaItem> _mediaDetails(MediaItem item) async {
+  /// Returns the provider result before the optional metadata lookup and write.
+  Future<({MediaItem item, Future<MediaItem> Function() enrich})>
+  prepareMediaDetails(MediaItem item) => _shareRead(
+    ('providerDetails', item.kind, item.id),
+    () => _prepareMediaDetails(item),
+  );
+
+  Future<({MediaItem item, Future<MediaItem> Function() enrich})>
+  _prepareMediaDetails(MediaItem item) async {
     final expectedCacheIdentity = await _cacheIdentityForCurrentCall();
     final seriesCatalogVersion = item.kind == ContentKind.series
         ? (syncedAt: await db.lastCatalogSynced(source.id, ContentKind.series))
@@ -1360,24 +1371,41 @@ class LibraryRepository {
       item.id,
     ]);
     var details = cached.isEmpty ? item : cached.single;
-    if (details.extra['details'] is! Map) {
+    final needsProviderDetails = details.extra['details'] is! Map;
+    if (needsProviderDetails) {
       await source.connect();
       // Reveal locators only when crossing into the source. Cache hits can
       // retain their sealed locators through metadata merging and persistence.
       details = await source.mediaDetails(await db.revealMediaItem(details));
     }
-    final merged = await _applyExternalMetadata(
-      details,
-      action: 'details',
-      includeDetails: true,
-    );
-    await db.updateMediaDisplayFields(
+    Future<void> persist(MediaItem value) => db.updateMediaDisplayFields(
       source.id,
-      [merged],
+      [value],
       seriesCatalogVersion: seriesCatalogVersion,
       expectedCacheIdentity: expectedCacheIdentity,
     );
-    return merged;
+
+    return (
+      item: details,
+      enrich: () => _shareRead(
+        ('detailsEnrichment', item.kind, item.id),
+        () async {
+          // A second open can reuse provider details during a slow lookup.
+          final cacheProviderDetails =
+              needsProviderDetails && details.extra['details'] is Map;
+          if (cacheProviderDetails) await persist(details);
+          final merged = await _applyExternalMetadata(
+            details,
+            action: 'details',
+            includeDetails: true,
+          );
+          if (!cacheProviderDetails || !identical(details, merged)) {
+            await persist(merged);
+          }
+          return merged;
+        },
+      ),
+    );
   }
 
   Future<List<MediaItem>> _readMergedMediaItems(

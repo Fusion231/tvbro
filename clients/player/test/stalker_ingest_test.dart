@@ -15,6 +15,35 @@ import 'support/workload_fixtures.dart';
 /// other Stalker action, and per-row skip semantics so one bad row never
 /// takes down the whole catalog.
 void main() {
+  test('catalog and details prefer posters over screenshots', () async {
+    final source = StalkerSource(
+      sourceId: 'artwork-test',
+      portal: 'http://example.invalid/c/',
+      mac: '00:1A:79:12:34:56',
+      diagnostics: false,
+      debugApi: (_) async => {
+        'js': {
+          'poster': 'https://images.test/poster.jpg',
+          'screenshot_uri': 'https://images.test/character.jpg',
+        },
+      },
+    );
+    addTearDown(source.dispose);
+    for (final kind in [ContentKind.movie, ContentKind.series]) {
+      final item = source.debugMapMediaItem({
+        'id': '1',
+        'name': 'Show',
+        'poster': 'https://images.test/poster.jpg',
+        'screenshot_uri': 'https://images.test/character.jpg',
+      }, kind);
+      expect(item.poster, 'https://images.test/poster.jpg');
+      expect(
+        (await source.mediaDetails(item)).poster,
+        'https://images.test/poster.jpg',
+      );
+    }
+  });
+
   group('one-pass worker matches the existing static mapper', () {
     test(
       'maps a large fixture identically to _mapChannel row-by-row',

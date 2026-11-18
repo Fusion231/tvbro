@@ -2104,6 +2104,7 @@ class MediaDetailsSheet extends StatefulWidget {
   final VoidCallback onToggleFavorite;
   final VoidCallback? onPlay;
   final ValueChanged<MediaItem>? onChanged;
+  final Future<MediaItem> Function()? enrich;
 
   /// Plays one episode picked from the series browser. Routed back through the
   /// screen's own play path (rather than pushing a player here) so the
@@ -2118,6 +2119,7 @@ class MediaDetailsSheet extends StatefulWidget {
     required this.onToggleFavorite,
     required this.onPlay,
     this.onChanged,
+    this.enrich,
     this.onPlayEpisode,
     this.resume,
     this.onPlayFromStart,
@@ -2159,8 +2161,29 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
   @override
   void initState() {
     super.initState();
+    final enrich = widget.enrich;
+    if (enrich != null) {
+      _refreshingMetadata = true;
+      unawaited(_enrichDetails(enrich));
+    }
     if (_item.kind == ContentKind.series) {
       unawaited(_loadSeriesProgress(prepareNext: true));
+    }
+  }
+
+  Future<void> _enrichDetails(Future<MediaItem> Function() enrich) async {
+    try {
+      final item = await enrich();
+      if (!mounted || identical(item, _item)) return;
+      setState(() {
+        _item = item;
+        _metadataFuture = _loadMetadata();
+      });
+      widget.onChanged?.call(item);
+    } catch (_) {
+      // Optional enrichment must leave the provider's details usable.
+    } finally {
+      if (mounted) setState(() => _refreshingMetadata = false);
     }
   }
 
@@ -2383,7 +2406,14 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
   Future<MediaLibrarySnapshot> _episodes(MediaItem season) =>
       _episodeFutures.putIfAbsent(season.id, () {
         _clearInheritedLoadToken();
-        return widget.repo.loadMedia(ContentKind.episode, parent: season);
+        final future = widget.repo.loadMedia(ContentKind.episode, parent: season);
+        unawaited(future.then<void>(
+          (_) {},
+          onError: (Object _, StackTrace _) {
+            _episodeFutures.remove(season.id);
+          },
+        ));
+        return future;
       });
 
   bool get _hasMetadataProvider => widget.repo.metadataProviders.any(

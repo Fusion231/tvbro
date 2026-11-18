@@ -775,6 +775,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // (a bare requestFocus on an unbuilt node silently no-ops).
   final ScrollController _categoryScrollController = ScrollController();
   final ValueNotifier<EpgGridSelection?> _guideSelection = ValueNotifier(null);
+  Route<void>? _guideRoute;
   // Live D-pad focus machinery (nodes, pane routing, down-hold lock, resume
   // bookkeeping) lives in the coordinator; see live_focus_coordinator.dart.
   late final LiveFocusCoordinator _focus;
@@ -1231,6 +1232,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   void didUpdateWidget(covariant ChannelListScreen old) {
     super.didUpdateWidget(old);
     if (!identical(old.repo, widget.repo)) {
+      _closeEpgGrid();
       _abandonLiveOpen();
       _tvIdleTimer?.cancel();
       _tvIdleTimer = null;
@@ -1332,6 +1334,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   @override
   void dispose() {
+    _closeEpgGrid();
     _abandonLiveOpen();
     _scrollController.removeListener(_queueLiveEpgWindowRefresh);
     _focus.channelSelection.removeListener(_queueLiveEpgWindowRefresh);
@@ -2924,6 +2927,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   /// Open the TV-guide grid for the currently visible channels.
   void _openEpgGrid() {
+    if (_guideRoute != null) return;
     unawaited(_preview.stop());
     // The grid is single-source by construction: it takes one repository and
     // resolves every play through it, and its guide rows come from that
@@ -2931,26 +2935,51 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // empty guide and then resolve a foreign channel against the wrong
     // provider, so that view opens the grid over the active source's channels
     // instead of its own rows.
-    final channels = _categoryId == kAllSourcesFavoritesCategoryId
-        ? _organizedChannels
-        : _visible;
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => EpgGridScreen(
-          repo: widget.repo,
-          channels: channels,
-          onPlayChannel: (channel) => unawaited(
-            // The grid's Up/Down already walks this list; the player's should
-            // walk the same one.
-            _playChannelFullscreen(channel, zapChannels: channels),
-          ),
-          onPlayArchive: (channel, programme) =>
-              unawaited(_playCatchup(channel, programme)),
-          onScheduleRecording: (channel, programme) =>
-              unawaited(_scheduleRecording(channel, programme: programme)),
-        ),
+    final repo = widget.repo;
+    final data = _dataListenable;
+    final route = MaterialPageRoute<void>(
+      builder: (_) => ListenableBuilder(
+        listenable: data,
+        builder: (context, _) {
+          if (!mounted || !identical(repo, widget.repo)) {
+            return const SizedBox.shrink();
+          }
+          final channels = _categoryId == kAllSourcesFavoritesCategoryId
+              ? _organizedChannels
+              : _visible;
+          return EpgGridScreen(
+            repo: repo,
+            channels: channels,
+            channelsLoading: _live.loading,
+            onPlayChannel: (channel) => unawaited(
+              // The grid's Up/Down already walks this list; the player's
+              // should walk the same one.
+              _playChannelFullscreen(channel, zapChannels: channels),
+            ),
+            onPlayArchive: (channel, programme) =>
+                unawaited(_playCatchup(channel, programme)),
+            onScheduleRecording: (channel, programme) =>
+                unawaited(_scheduleRecording(channel, programme: programme)),
+          );
+        },
       ),
     );
+    _guideRoute = route;
+    unawaited(
+      Navigator.of(context).push(route).whenComplete(() {
+        if (identical(_guideRoute, route)) _guideRoute = null;
+      }),
+    );
+  }
+
+  void _closeEpgGrid() {
+    final route = _guideRoute;
+    if (route == null) return;
+    _guideRoute = null;
+    // Source replacement can happen during build or while the navigator is locked.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (route.isActive) route.navigator!.removeRoute(route);
+    });
   }
 
   /// Phone-only: open a compact, audible preview of [channel] in a bottom
@@ -3197,17 +3226,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         message: tr('Loading details…'),
         load: () async {
           if (config.id == widget.config.id) await _loadFavorites(item.kind);
-          return repo.mediaDetails(item);
+          return repo.prepareMediaDetails(item);
         },
       );
       if (!mounted || detailed == null) return;
-      if (!_mediaAllowed(detailed, config) &&
+      if (!_mediaAllowed(detailed.item, config) &&
           !await unlockParentalContent(context)) {
         return;
       }
       if (!mounted) return;
-      if (config.id == widget.config.id) _replaceMediaItem(detailed);
-      await _showMediaDetails(detailed, owner: config);
+      if (config.id == widget.config.id) _replaceMediaItem(detailed.item);
+      await _showMediaDetails(
+        detailed.item,
+        owner: config,
+        enrich: detailed.enrich,
+      );
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
@@ -3393,7 +3426,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
   }
 
-  Future<void> _showMediaDetails(MediaItem item, {SourceConfig? owner}) async {
+  Future<void> _showMediaDetails(
+    MediaItem item, {
+    SourceConfig? owner,
+    required Future<MediaItem> Function() enrich,
+  }) async {
     final config = owner ?? widget.config;
     final repo = _repoFor(config);
     final foreign = config.id != widget.config.id;
@@ -3421,6 +3458,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       builder: (context) => MediaDetailsSheet(
         repo: repo,
         item: item,
+        enrich: enrich,
         favorite: favorite,
         onToggleFavorite: () async {
           if (!foreign) {
@@ -3695,13 +3733,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   void _focusMediaCategories(ContentKind kind) {
     if (_isWide()) {
+      final nodes = _browseFocusNodes[kind]!.descendants;
       final previous = _lastMediaCategoryFocus[kind];
-      if (previous?.context != null && previous!.canRequestFocus) {
+      if (previous != null &&
+          previous.canRequestFocus &&
+          nodes.contains(previous)) {
         previous.requestFocus();
         return;
       }
       final route = 'media.category.${_media(kind).categoryId ?? 'all'}';
-      for (final node in _browseFocusNodes[kind]!.descendants) {
+      for (final node in nodes) {
         if (focusRouteKey(node) == route && node.canRequestFocus) {
           node.requestFocus();
           return;

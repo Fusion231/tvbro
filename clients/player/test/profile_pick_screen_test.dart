@@ -928,6 +928,22 @@ void main() {
       await pumpFor(tester);
     }
 
+    testWidgets('blank profile name keeps the dialog open for correction', (
+      tester,
+    ) async {
+      await localStore.createProfile('Existing', 0, snapshot: snap('source'));
+      await pumpPicker(tester, store: SourceStore());
+      await createProfileFromPicker(tester, '   ');
+      expect(find.text('New profile'), findsOneWidget);
+      expect(find.text('Profile name is required'), findsOneWidget);
+      expect(await localStore.loadAll(), hasLength(1));
+      await tester.enterText(find.byType(TextField).last, '  News  ');
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await pumpFor(tester);
+      expect(find.text('Set up News'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('new profile can choose Demo without inheriting old sources', (
       tester,
     ) async {

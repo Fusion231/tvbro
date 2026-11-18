@@ -884,7 +884,7 @@ class StalkerSource
     final details = js is Map ? Map<String, dynamic>.from(js) : const {};
     return item.copyWith(
       poster:
-          _firstString(details, ['screenshot_uri', 'poster', 'cover']) ??
+          _firstString(details, ['poster', 'cover', 'screenshot_uri']) ??
           item.poster,
       description:
           _firstString(details, ['description', 'descr', 'plot']) ??
@@ -1406,7 +1406,7 @@ class StalkerSource
       kind: kind,
       parentId: parent?.id ?? _firstString(item, ['parent_id', 'series_id']),
       categoryId: categoryId ?? _firstString(item, ['category_id']),
-      poster: _firstString(item, ['screenshot_uri', 'poster', 'cover', 'pic']),
+      poster: _firstString(item, ['poster', 'cover', 'screenshot_uri', 'pic']),
       backdrop: _firstString(item, ['backdrop', 'background', 'cover_big']),
       description: _firstString(item, ['description', 'descr', 'plot']),
       year: _firstString(item, ['year', 'released']),

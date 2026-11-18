@@ -148,16 +148,25 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed &&
-        _cloudLoadFailed &&
         (ModalRoute.of(context)?.isCurrent ?? false)) {
-      _reload();
+      _reload(preserveListing: true);
     }
   }
 
-  Future<void> _reload() async {
-    if (!mounted || _checking || _busy || _leaving) return;
+  Future<void> _reload({bool preserveListing = false}) async {
+    if (!mounted ||
+        _checking ||
+        _busy ||
+        _leaving ||
+        (preserveListing && _refreshingCloud)) {
+      return;
+    }
     final generation = _refreshGeneration;
-    await _check(cachedOnly: true, generation: generation);
+    // Resuming keeps a successful listing visible while checking the cloud.
+    // Local edits and failed-read recovery still reload cached profiles first.
+    if (!preserveListing || _cloudLoadFailed) {
+      await _check(cachedOnly: true, generation: generation);
+    }
     if (_canRefresh(generation)) await _refreshCloud();
   }
 
@@ -1626,6 +1635,16 @@ class _CreateProfileDialog extends StatefulWidget {
 
 class _CreateProfileDialogState extends State<_CreateProfileDialog> {
   final _controller = TextEditingController();
+  bool _missingName = false;
+
+  void _submit(String value) {
+    final name = value.trim();
+    if (name.isEmpty) {
+      setState(() => _missingName = true);
+      return;
+    }
+    Navigator.of(context).pop(name);
+  }
 
   @override
   void dispose() {
@@ -1646,9 +1665,17 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
         controller: _controller,
         label: tr('Profile name'),
         hintText: tr('e.g. Living room'),
+        errorText: _missingName
+            ? tr('{field} is required', {'field': tr('Profile name')})
+            : null,
+        onChanged: (value) {
+          if (_missingName && value.trim().isNotEmpty) {
+            setState(() => _missingName = false);
+          }
+        },
         autofocus: true,
         textInputAction: TextInputAction.done,
-        onSubmitted: (v) => Navigator.of(context).pop(v.trim()),
+        onSubmitted: _submit,
       ),
       actions: [
         TextButton(
@@ -1656,7 +1683,7 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
           child: Text(tr('Cancel')),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
+          onPressed: () => _submit(_controller.text),
           child: Text(tr('Create')),
         ),
       ],

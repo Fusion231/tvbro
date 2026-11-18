@@ -1352,7 +1352,7 @@ MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
     title: _firstString(m, ['name', 'title']) ?? 'Untitled',
     kind: kind,
     categoryId: m['category_id']?.toString(),
-    poster: _firstImageUrl(m, ['stream_icon', 'cover', 'cover_big']),
+    poster: _firstImageUrl(m, ['cover', 'stream_icon', 'cover_big']),
     backdrop: _firstImageUrl(m, ['backdrop_path', 'backdrop', 'cover_big']),
     description: _firstString(m, ['plot', 'description']),
     year: _firstString(m, ['year', 'releaseDate', 'release_date']),
