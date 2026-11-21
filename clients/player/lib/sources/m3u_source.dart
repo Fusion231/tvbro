@@ -381,6 +381,11 @@ class M3uSource
     return _media!.categories[kind] ?? const [];
   }
 
+  Future<M3uMediaCatalog> mediaCatalog() async {
+    await _ensureParsed();
+    return _media ?? (throw const LoadCancelledException());
+  }
+
   @override
   Future<List<MediaItem>> mediaItems(
     ContentKind kind, {
@@ -589,6 +594,12 @@ class M3uSource
   String get _guideHeaderKey => 'm3u_guide_header_${sha256.convert(utf8.encode(
     jsonEncode([playlistUrl, userAgent]),
   ))}';
+
+  Future<bool> canRefreshGuideWithoutPlaylist() async {
+    if (epgUrl?.isNotEmpty == true) return true;
+    await _restoreGuideHeader();
+    return _headerKnown;
+  }
 
   Future<void> _restoreGuideHeader() async {
     if (_headerKnown) return;

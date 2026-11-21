@@ -2135,11 +2135,96 @@ class MediaDetailsSheet extends StatefulWidget {
   State<MediaDetailsSheet> createState() => _MediaDetailsSheetState();
 }
 
+class M3uSeriesBackfillBanner extends StatefulWidget {
+  const M3uSeriesBackfillBanner({
+    super.key,
+    required this.repo,
+    required this.onRetryCompleted,
+  });
+
+  final LibraryRepository repo;
+  final VoidCallback onRetryCompleted;
+
+  @override
+  State<M3uSeriesBackfillBanner> createState() => _M3uSeriesBackfillBannerState();
+}
+
+class _M3uSeriesBackfillBannerState extends State<M3uSeriesBackfillBanner> {
+  final _retryFocus = RoutedFocusNode('media.m3u.backfill.retry');
+  bool _retrying = false;
+
+  Future<void> _retry() async {
+    if (_retrying) return;
+    final repo = widget.repo;
+    setState(() => _retrying = true);
+    try {
+      final complete = await repo.backfillM3uSeriesCache(retry: true);
+      if (complete && mounted && identical(widget.repo, repo) && _retryFocus.hasFocus) {
+        widget.onRetryCompleted();
+      }
+    } catch (_) {
+      // The repository publishes failures using the same banner.
+    } finally {
+      if (mounted) setState(() => _retrying = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _retryFocus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<M3uSeriesBackfillStatus?>(
+      valueListenable: widget.repo.m3uSeriesBackfill,
+      builder: (context, status, _) {
+        final loading = status == M3uSeriesBackfillStatus.loading;
+        final failed = status == M3uSeriesBackfillStatus.failed;
+        if (!loading && !failed && !_retrying) return const SizedBox.shrink();
+        return Semantics(
+          liveRegion: true,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                if (loading) ...[
+                  const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 12),
+                ],
+                Expanded(
+                  child: Text(
+                    loading
+                        ? tr('Loading episodes from the playlist…')
+                        : tr('Could not fill in episodes. Saved content is still available.'),
+                    style: const TextStyle(color: AppColors.textLo),
+                  ),
+                ),
+                if (failed || _retrying)
+                  OutlinedButton(
+                    key: const ValueKey('media.m3u.backfill.retry'),
+                    focusNode: _retryFocus,
+                    onPressed: _retry,
+                    child: Text(tr('Retry episode download')),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
   late MediaItem _item = widget.item;
   late bool _favorite = widget.favorite;
   late Future<ExternalMetadata?> _metadataFuture = _loadMetadata();
-  late final Future<MediaLibrarySnapshot>? _seasonsFuture = _loadSeasonsIfNeeded();
+  late Future<MediaLibrarySnapshot>? _seasonsFuture = _loadSeasonsIfNeeded();
   final Map<String, Future<MediaLibrarySnapshot>> _episodeFutures = {};
   bool _refreshingMetadata = false;
   bool _openingTrailer = false;
@@ -2168,8 +2253,22 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
       unawaited(_enrichDetails(enrich));
     }
     if (_item.kind == ContentKind.series) {
+      widget.repo.m3uSeriesBackfill.addListener(_onM3uBackfillChanged);
+      widget.repo.backfillM3uSeriesCache().ignore();
       unawaited(_loadSeriesProgress(prepareNext: true));
     }
+  }
+
+  void _onM3uBackfillChanged() {
+    final complete = widget.repo.m3uSeriesBackfill.value ==
+        M3uSeriesBackfillStatus.complete;
+    setState(() {
+      if (complete) {
+        _episodeFutures.clear();
+        _seasonsFuture = _loadSeasonsIfNeeded();
+      }
+    });
+    if (complete) unawaited(_loadSeriesProgress(prepareNext: true));
   }
 
   Future<void> _enrichDetails(Future<MediaItem> Function() enrich) async {
@@ -2367,6 +2466,9 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
 
   @override
   void dispose() {
+    if (_item.kind == ContentKind.series) {
+      widget.repo.m3uSeriesBackfill.removeListener(_onM3uBackfillChanged);
+    }
     _seriesPlaybackChanged?.cancel();
     _seriesPlaybackReplaced?.cancel();
     _scrollController.dispose();
@@ -2412,7 +2514,9 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
         unawaited(future.then<void>(
           (_) {},
           onError: (Object _, StackTrace _) {
-            _episodeFutures.remove(season.id);
+            if (identical(_episodeFutures[season.id], future)) {
+              _episodeFutures.remove(season.id);
+            }
           },
         ));
         return future;
@@ -2557,6 +2661,10 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                                 ?.copyWith(fontWeight: FontWeight.w700),
                           ),
                           const SizedBox(height: 6),
+                          M3uSeriesBackfillBanner(
+                            repo: widget.repo,
+                            onRetryCompleted: _playFocusNode.requestFocus,
+                          ),
                           _SeriesBrowser(
                             repo: widget.repo,
                             seasons: seasonsFuture,
@@ -3504,6 +3612,18 @@ class _SeriesBrowserState extends State<_SeriesBrowser> {
   String _pageKey(MediaItem parent) => '${parent.kind.name}:${parent.id}';
 
   @override
+  void didUpdateWidget(covariant _SeriesBrowser oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(widget.seasons, oldWidget.seasons)) return;
+    for (final token in _pagingTokens.values) {
+      token.cancel();
+    }
+    _pagingTokens.clear();
+    _pages.clear();
+    _pagingErrors.clear();
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final position = Scrollable.maybeOf(context)?.position;
@@ -3742,7 +3862,11 @@ class _SeriesBrowserState extends State<_SeriesBrowser> {
     return FutureBuilder<MediaLibrarySnapshot>(
       future: widget.seasons,
       builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
+        final backfill = widget.repo.m3uSeriesBackfill.value;
+        if (snapshot.connectionState != ConnectionState.done && !snapshot.hasData) {
+          if (backfill == M3uSeriesBackfillStatus.loading) {
+            return const SizedBox.shrink();
+          }
           return const Center(
             child: Padding(
               padding: EdgeInsets.all(16),
@@ -3751,6 +3875,11 @@ class _SeriesBrowserState extends State<_SeriesBrowser> {
           );
         }
         if (snapshot.hasError) {
+          if (backfill == M3uSeriesBackfillStatus.failed ||
+              backfill == M3uSeriesBackfillStatus.loading ||
+              snapshot.error is LoadCancelledException) {
+            return const SizedBox.shrink();
+          }
           return Text(
             tr('Could not load seasons: {error}', {'error': snapshot.error!}),
             style: const TextStyle(color: AppColors.textLo),
@@ -3835,14 +3964,20 @@ class _SeriesBrowserState extends State<_SeriesBrowser> {
                     builder: (context) => FutureBuilder<MediaLibrarySnapshot>(
                       future: widget.episodesFor(seasons[i]),
                       builder: (context, episodeSnapshot) {
-                        if (episodeSnapshot.connectionState !=
-                            ConnectionState.done) {
+                         if (episodeSnapshot.connectionState !=
+                                 ConnectionState.done &&
+                             !episodeSnapshot.hasData) {
                           return const Padding(
                             padding: EdgeInsets.all(12),
                             child: LinearProgressIndicator(minHeight: 2),
                           );
                         }
                         if (episodeSnapshot.hasError) {
+                           if (backfill == M3uSeriesBackfillStatus.failed ||
+                               backfill == M3uSeriesBackfillStatus.loading ||
+                               episodeSnapshot.error is LoadCancelledException) {
+                             return const SizedBox.shrink();
+                           }
                           return Align(
                             alignment: Alignment.centerLeft,
                             child: Text(

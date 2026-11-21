@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
@@ -25,6 +28,54 @@ const episode = MediaItem(
 );
 
 void main() {
+  testWidgets(
+    'M3U upgrade keeps old seasons visible and refreshes the open sheet on retry',
+    (tester) async {
+      final repo = _BackfillRepository();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MediaDetailsSheet(
+              repo: repo,
+              item: series,
+              favorite: false,
+              onToggleFavorite: () {},
+              onPlay: null,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      final loading = find.text('Loading episodes from the playlist…');
+      expect(loading, findsOneWidget);
+      expect(find.text('QA Season'), findsOneWidget);
+
+      repo.status.value = M3uSeriesBackfillStatus.failed;
+      await tester.pumpAndSettle();
+      final retry = find.byKey(const ValueKey('media.m3u.backfill.retry'));
+      expect(retry, findsOneWidget);
+      expect(find.text('QA Season'), findsOneWidget);
+      await tester.ensureVisible(retry);
+      final retryFocus = tester.widget<OutlinedButton>(retry).focusNode!;
+      retryFocus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(repo.retryCalls, 1);
+      expect(retryFocus.hasFocus, isTrue);
+      expect(loading, findsOneWidget);
+      expect(find.text('QA Season'), findsOneWidget);
+
+      repo.release.complete();
+      await tester.pumpAndSettle();
+      expect(loading, findsNothing);
+      expect(retry, findsNothing);
+      expect(find.text('Updated season'), findsOneWidget);
+      final episodeHeader = find.byKey(const ValueKey('media.details.play'));
+      expect(tester.widget<FilledButton>(episodeHeader).focusNode!.hasFocus, isTrue);
+    },
+  );
+
   testWidgets(
     'reopening a failed season loads episodes after the provider recovers',
     (tester) async {
@@ -106,5 +157,44 @@ class _RecoveringRepository extends LibraryRepository {
       fromCache: false,
       syncedAt: null,
     );
+  }
+}
+
+class _BackfillRepository extends _RecoveringRepository {
+  final status = ValueNotifier(M3uSeriesBackfillStatus.loading);
+  final release = Completer<void>();
+  int retryCalls = 0;
+
+  @override
+  ValueNotifier<M3uSeriesBackfillStatus> get m3uSeriesBackfill => status;
+
+  @override
+  Future<bool> backfillM3uSeriesCache({bool retry = false}) async {
+    if (!retry) return false;
+    retryCalls++;
+    status.value = M3uSeriesBackfillStatus.loading;
+    await release.future;
+    status.value = M3uSeriesBackfillStatus.complete;
+    return true;
+  }
+
+  @override
+  Future<MediaLibrarySnapshot> loadMedia(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    bool forceRefresh = false,
+    bool enrichChildren = true,
+  }) async {
+    final snapshot = await super.loadMedia(
+      kind,
+      categoryId: categoryId,
+      parent: parent,
+      forceRefresh: forceRefresh,
+      enrichChildren: enrichChildren,
+    );
+    return kind == ContentKind.season && release.isCompleted
+        ? snapshot.copyWith(items: [season.copyWith(title: 'Updated season')])
+        : snapshot;
   }
 }

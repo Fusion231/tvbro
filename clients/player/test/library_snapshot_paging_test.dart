@@ -111,6 +111,7 @@ class _CountingDatabase implements AppDatabase {
     String? parentId,
     required int loadedPages,
     required int totalPages,
+    ({DateTime? syncedAt})? seriesCatalogVersion,
     String? expectedCacheIdentity,
   }) => delegate.appendMediaItems(
     sourceId,
@@ -120,6 +121,7 @@ class _CountingDatabase implements AppDatabase {
     parentId: parentId,
     loadedPages: loadedPages,
     totalPages: totalPages,
+    seriesCatalogVersion: seriesCatalogVersion,
     expectedCacheIdentity: expectedCacheIdentity,
   );
 

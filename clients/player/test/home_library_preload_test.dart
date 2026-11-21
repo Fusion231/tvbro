@@ -715,7 +715,7 @@ void main() {
     (tester) => exerciseRefresh(tester, gateEpg: true),
   );
 
-  testWidgets('cached M3U profile downloads its due guide before opening TV', (
+  testWidgets('legacy M3U fills its cache once before downloading its due guide', (
     tester,
   ) async {
     Future<T> read<T>(Future<T> Function() operation) async =>
@@ -726,6 +726,8 @@ void main() {
     if (server == null) throw StateError('Could not start M3U fixture');
     final guideStarted = Completer<void>();
     final guideGate = Completer<void>();
+    final upgradeStarted = Completer<void>();
+    final upgradeGate = Completer<void>();
     final requests = <String, int>{};
     final playlistUrl = 'http://127.0.0.1:${server.port}/playlist.m3u';
     final guideUrl = 'http://127.0.0.1:${server.port}/guide.xml';
@@ -738,6 +740,10 @@ void main() {
         requests.update(path, (count) => count + 1, ifAbsent: () => 1);
         try {
           if (path == '/playlist.m3u') {
+            if (requests[path] == 2) {
+              upgradeStarted.complete();
+              await upgradeGate.future;
+            }
             request.response.write(
               '#EXTM3U url-tvg="$guideUrl"\n'
               '#EXTINF:-1 tvg-id="fixture.tv",Fixture TV\n'
@@ -811,8 +817,13 @@ void main() {
           () => find.byKey(const ValueKey('home-live')).evaluate().isNotEmpty,
         );
         expect(find.byType(LibraryPreloadProgress), findsNothing);
+        await _pumpUntil(tester, () => upgradeStarted.isCompleted);
+        expect(find.text('Loading episodes from the playlist…'), findsOneWidget);
+        expect(requests, {'/playlist.m3u': 2});
+        upgradeGate.complete();
         await _pumpUntil(tester, () => guideStarted.isCompleted);
-        expect(requests, {'/playlist.m3u': 1, '/guide.xml': 1});
+        expect(await read(() => db.m3uSeriesCacheComplete(_sourceId)), isTrue);
+        expect(requests, {'/playlist.m3u': 2, '/guide.xml': 1});
 
         guideGate.complete();
         final repo = tester
@@ -830,8 +841,9 @@ void main() {
               ?.title,
           'Cached profile guide',
         );
-        expect(requests, {'/playlist.m3u': 1, '/guide.xml': 1});
+        expect(requests, {'/playlist.m3u': 2, '/guide.xml': 1});
       } finally {
+        if (!upgradeGate.isCompleted) upgradeGate.complete();
         if (!guideGate.isCompleted) guideGate.complete();
         await tester.pumpWidget(const SizedBox());
         await tester.runAsync(() => db.epgIngest.cancelAndWait());

@@ -25,6 +25,25 @@ void main() {
     directory.deleteSync(recursive: true);
   });
 
+  test('an empty complete M3U tree supersedes a legacy cache and survives reopening', () async {
+    expect(await db.m3uSeriesCacheComplete('source'), isNull);
+    await db.replaceMediaLibrary('source', ContentKind.series, [], const [
+      MediaItem(id: 'partial', title: 'Partial', kind: ContentKind.series),
+    ]);
+    expect(await db.m3uSeriesCacheComplete('source'), isFalse);
+
+    await db.replaceMediaLibrary(
+      'source', ContentKind.series, [], [],
+      completeCatalog: true,
+      refreshSeriesChildren: true,
+      seriesChildren: const {},
+    );
+    await db.close();
+    db = await AppDatabase.openAt(path);
+    expect(await db.m3uSeriesCacheComplete('source'), isTrue);
+    expect(await db.readMediaItems('source', ContentKind.series), isEmpty);
+  });
+
   for (final kind in [
     ContentKind.live,
     ContentKind.movie,

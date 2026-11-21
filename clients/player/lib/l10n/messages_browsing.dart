@@ -142,6 +142,10 @@ const Map<String, String> polishBrowsingMessages = {
   'No programmes found in the cached guide':
       'Nie znaleziono programów w zapisanym programie TV',
   'Retry': 'Spróbuj ponownie',
+  'Loading episodes from the playlist…': 'Uzupełniamy odcinki z playlisty…',
+  'Could not fill in episodes. Saved content is still available.':
+      'Nie udało się uzupełnić odcinków. Zapisane dane są nadal dostępne.',
+  'Retry episode download': 'Ponów',
   'No movies found': 'Nie znaleziono filmów',
   'No series found': 'Nie znaleziono seriali',
   'Could not play: {error}': 'Nie udało się odtworzyć: {error}',

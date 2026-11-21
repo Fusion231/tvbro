@@ -286,8 +286,10 @@ class _WebMetadataCache {
     write(sourceId, item, metadata);
   }
 
+  // The TV port caches external metadata separately from its catalog snapshots.
   Future<void> updateMediaDisplayFields(String sourceId, List<MediaItem> items,
-      {String? expectedCacheIdentity}) async => _ensureCurrent(expectedCacheIdentity);
+      {({DateTime? syncedAt})? seriesCatalogVersion, String? expectedCacheIdentity}) async =>
+      _ensureCurrent(expectedCacheIdentity);
 
   String key(String scope, String sourceId) => sha256.convert(utf8.encode(
       jsonEncode(['external-metadata-v1', scope, sourceId]))).toString();

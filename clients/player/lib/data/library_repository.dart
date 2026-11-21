@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:developer' as developer;
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, ValueNotifier, debugPrint;
 
-import '../sources/source.dart';
 import '../sources/epg_mapping.dart';
+import '../sources/m3u_source.dart';
+import '../sources/source.dart';
 import 'app_database.dart';
 import 'diagnostics_log.dart';
 import 'epg_models.dart';
@@ -70,6 +72,8 @@ class MediaLibrarySnapshot {
       );
 }
 
+enum M3uSeriesBackfillStatus { loading, failed, complete }
+
 /// Sits between a [Source] and the [AppDatabase]: serves channels from cache
 /// when available, refreshes EPG when stale, and only hits the provider for
 /// the heavy fetch on a cold start or an explicit refresh.
@@ -93,10 +97,17 @@ class LibraryRepository {
   final Set<ContentKind> _forcedCatalogSyncs = {};
   final Map<Object, Future<dynamic>> _sharedReads = {};
   LoadToken? _catalogBatchToken;
+  Future<void>? _m3uCatalogSync;
+  Object? _m3uBackfillError;
+  int _catalogCancellationGeneration = 0;
+  int _m3uSeriesCacheGeneration = 0;
+  final _m3uSeriesBackfill = ValueNotifier<M3uSeriesBackfillStatus?>(null);
   Object _implicitCatalogRefreshKey = Object();
   LibrarySnapshot? _lastLiveCatalogSnapshot;
 
   Stream<ContentKind> get catalogChanged => _catalogChanged.stream;
+  ValueListenable<M3uSeriesBackfillStatus?> get m3uSeriesBackfill =>
+      _m3uSeriesBackfill;
 
   /// EPG is re-fetched if older than this (or on a forced refresh).
   static const _epgMaxAge = Duration(hours: 6);
@@ -171,40 +182,108 @@ class LibraryRepository {
   }
 
   void cancelCatalogSync() {
+    _catalogCancellationGeneration++;
     _catalogBatchToken?.cancel();
     for (final token in _catalogTokens.values) {
       token.cancel();
     }
+    final currentSource = source;
+    if (currentSource is M3uSource &&
+        _m3uSeriesBackfill.value == M3uSeriesBackfillStatus.loading) {
+      currentSource.invalidate();
+    }
   }
 
-  /// Refresh each due section independently. A failed provider read leaves the
-  /// previous section and its timestamp intact; successful sections still land.
-  Future<void> synchronizeCatalog({bool forceRefresh = false}) async {
+  Future<bool> backfillM3uSeriesCache({bool retry = false}) async {
+    if (source is! M3uSource) return false;
+    final generation = _catalogCancellationGeneration;
+    await _cacheIdentityForCurrentCall();
+    final complete = await db.m3uSeriesCacheComplete(source.id);
+    if (complete != false) return complete ?? false;
+    if (generation != _catalogCancellationGeneration) {
+      throw const LoadCancelledException();
+    }
+    final error = _m3uBackfillError;
+    if (!retry && error != null && _m3uCatalogSync == null) throw error;
+    try {
+      await synchronizeCatalog();
+    } catch (_) {
+      if (await db.m3uSeriesCacheComplete(source.id) != true) rethrow;
+    }
+    if (await db.m3uSeriesCacheComplete(source.id) == true) return true;
+    throw const LoadCancelledException();
+  }
+
+  /// Whole-library M3U refreshes share both their download and cache commit.
+  Future<void> synchronizeCatalog({bool forceRefresh = false}) {
+    if (source is! M3uSource) {
+      return _synchronizeCatalog(forceRefresh: forceRefresh);
+    }
+    final pending = _m3uCatalogSync;
+    if (pending != null) {
+      if (_catalogBatchToken?.isCancelled != true) return pending;
+      return pending.catchError((Object _) {}).then(
+        (_) => synchronizeCatalog(forceRefresh: forceRefresh),
+      );
+    }
+    return _m3uCatalogSync = _synchronizeCatalog(forceRefresh: forceRefresh)
+        .whenComplete(() {
+          _m3uCatalogSync = null;
+        });
+  }
+
+  /// Failed sections retain their previous catalog and timestamp.
+  Future<void> _synchronizeCatalog({required bool forceRefresh}) async {
     final token = LoadToken();
     _catalogBatchToken = token;
+    final isM3u = source is M3uSource;
+    if (isM3u) await _cacheIdentityForCurrentCall();
+    final backfilling =
+        isM3u && await db.m3uSeriesCacheComplete(source.id) == false;
+    if (token.isCancelled) return;
+    if (backfilling) {
+      _m3uBackfillError = null;
+      _m3uSeriesBackfill.value = M3uSeriesBackfillStatus.loading;
+    }
     Object? failure;
-    for (final kind in _catalogKinds) {
-      if (token.isCancelled) return;
-      try {
-        await _synchronizeCatalogKind(
-          kind,
-          forceRefresh: forceRefresh,
-          token: token,
-        );
-      } on LoadCancelledException {
-        return;
-      } on ProviderRequestBlocked {
-        rethrow;
-      } catch (error) {
-        failure ??= error;
-        DiagnosticsLog.instance.add(
-          'library',
-          '${kind.name} catalog refresh failed; retaining cached catalog: '
-              '${redactText(error.toString())}',
-        );
+    try {
+      for (final kind in _catalogKinds) {
+        if (token.isCancelled) return;
+        try {
+          await _synchronizeCatalogKind(
+            kind,
+            forceRefresh: forceRefresh || backfilling,
+            token: token,
+          );
+        } on LoadCancelledException {
+          token.cancel();
+          return;
+        } on ProviderRequestBlocked catch (error) {
+          failure = error;
+          break;
+        } catch (error) {
+          failure ??= error;
+          DiagnosticsLog.instance.add(
+            'library',
+            '${kind.name} catalog refresh failed; retaining cached catalog: '
+                '${redactText(error.toString())}',
+          );
+        }
+      }
+      if (failure != null) throw failure;
+    } finally {
+      if (backfilling) {
+        final complete = !token.isCancelled &&
+            await db.m3uSeriesCacheComplete(source.id) == true;
+        if (complete) _m3uSeriesCacheGeneration++;
+        _m3uBackfillError = complete || token.isCancelled ? null : failure;
+        _m3uSeriesBackfill.value = complete
+            ? M3uSeriesBackfillStatus.complete
+            : _m3uBackfillError != null
+            ? M3uSeriesBackfillStatus.failed
+            : null;
       }
     }
-    if (failure != null) throw failure;
   }
 
   Future<void> synchronizeMediaCatalog(
@@ -265,12 +344,17 @@ class LibraryRepository {
             );
           } else {
             await source.connect();
-            final categories = await source.mediaCategories(kind);
-            final items = await _fetchCompleteMediaCatalog(
-              kind,
-              categories,
-              activeToken,
-            );
+            final currentSource = source;
+            final m3uCatalog =
+                kind == ContentKind.series && currentSource is M3uSource
+                ? await currentSource.mediaCatalog()
+                : null;
+            final categories = m3uCatalog == null
+                ? await source.mediaCategories(kind)
+                : m3uCatalog.categories[kind] ?? const [];
+            final items = m3uCatalog == null
+                ? await _fetchCompleteMediaCatalog(kind, categories, activeToken)
+                : m3uCatalog.roots[kind] ?? const [];
             await db.replaceMediaLibrary(
               source.id,
               kind,
@@ -278,6 +362,7 @@ class LibraryRepository {
               items,
               completeCatalog: true,
               refreshSeriesChildren: kind == ContentKind.series,
+              seriesChildren: m3uCatalog?.children,
               expectedCacheIdentity: expectedCacheIdentity,
               token: activeToken,
             );
@@ -859,8 +944,20 @@ class LibraryRepository {
     bool enrichChildren = true,
   }) {
     final token = loadToken;
+    final generation = parent != null && source is M3uSource
+        ? _m3uSeriesCacheGeneration
+        : null;
     return _shareRead(
-      ('media', kind, categoryId, parent?.id, forceRefresh, enrichChildren, token),
+      (
+        'media',
+        kind,
+        categoryId,
+        parent?.id,
+        forceRefresh,
+        enrichChildren,
+        token,
+        generation,
+      ),
       () => _loadMedia(
         kind,
         categoryId: categoryId,
@@ -918,20 +1015,43 @@ class LibraryRepository {
       (source as RefreshableSource).invalidate();
     }
     if (!forceRefresh) {
-      final sync = await db.mediaSyncState(
+      Future<({DateTime syncedAt, int loadedPages, int totalPages})?>
+      readSync() => db.mediaSyncState(
         source.id,
         kind,
         categoryId: categoryId,
         parentId: parentId,
       );
-      if (sync != null) {
-        final items = await db.readMediaItems(
-          source.id,
-          kind,
-          categoryId: categoryId,
-          parentId: parentId,
-        );
-        if (items.isNotEmpty || sync.loadedPages >= sync.totalPages) {
+      Future<List<MediaItem>> readItems() => db.readMediaItems(
+        source.id,
+        kind,
+        categoryId: categoryId,
+        parentId: parentId,
+      );
+      Future<({DateTime? syncedAt})?> readVersion() async =>
+          source is M3uSource &&
+              parent != null &&
+              enrichChildren &&
+              metadataProviders.isNotEmpty
+          ? (syncedAt: await db.lastCatalogSynced(source.id, ContentKind.series))
+          : null;
+      var sync = await readSync();
+      var version = sync == null ? null : await readVersion();
+      var items = sync == null ? const <MediaItem>[] : await readItems();
+      final missing = sync == null ||
+          (items.isEmpty && sync.loadedPages < sync.totalPages);
+      final m3uTree = missing && parentId != null &&
+          (kind == ContentKind.season || kind == ContentKind.episode) &&
+          await backfillM3uSeriesCache();
+      if (m3uTree) {
+        sync = await readSync();
+        version = await readVersion();
+        items = await readItems();
+      }
+      if (sync != null || m3uTree) {
+        if (items.isNotEmpty ||
+            sync == null ||
+            sync.loadedPages >= sync.totalPages) {
           var mergedItems = await _mergeCachedMetadata(items);
           if (parent != null && enrichChildren) {
             mergedItems = await _applyChildExternalMetadata(
@@ -939,6 +1059,7 @@ class LibraryRepository {
               mergedItems,
               action: 'cache-child',
               persistChanges: true,
+              seriesCatalogVersion: version,
             );
           }
           final categories = await db.readMediaCategories(source.id, kind);
@@ -950,9 +1071,9 @@ class LibraryRepository {
             categories: categories,
             items: mergedItems,
             fromCache: true,
-            syncedAt: sync.syncedAt,
-            loadedPages: sync.loadedPages,
-            totalPages: sync.totalPages,
+            syncedAt: sync?.syncedAt,
+            loadedPages: sync?.loadedPages ?? 1,
+            totalPages: sync?.totalPages ?? 1,
           );
         }
       }
@@ -1183,6 +1304,11 @@ class LibraryRepository {
     // `source.mediaItemsPage(parent:)`, which reads its locator.
     if (parent != null) parent = await db.revealMediaItem(parent);
     final parentId = parent?.id;
+    final seriesCatalogVersion =
+        source is M3uSource &&
+            (kind == ContentKind.season || kind == ContentKind.episode)
+        ? (syncedAt: await db.lastCatalogSynced(source.id, ContentKind.series))
+        : null;
     final sync = await db.mediaSyncState(
       source.id,
       kind,
@@ -1212,6 +1338,18 @@ class LibraryRepository {
       );
     }
 
+    if (parentId != null &&
+        (kind == ContentKind.season || kind == ContentKind.episode) &&
+        await backfillM3uSeriesCache()) {
+      return _loadMedia(
+        kind,
+        categoryId: categoryId,
+        parent: parent,
+        forceRefresh: false,
+        enrichChildren: enrichChildren,
+        token: token,
+      );
+    }
     await source.connect();
     var loadedPages = sync.loadedPages;
     var totalPages = sync.totalPages;
@@ -1277,6 +1415,7 @@ class LibraryRepository {
       parentId: parentId,
       loadedPages: loadedPages,
       totalPages: totalPages,
+      seriesCatalogVersion: seriesCatalogVersion,
       expectedCacheIdentity: expectedCacheIdentity,
     );
     await _ensureCacheIdentityCurrent(expectedCacheIdentity);
@@ -1457,6 +1596,7 @@ class LibraryRepository {
     List<MediaItem> items, {
     required String action,
     bool persistChanges = false,
+    ({DateTime? syncedAt})? seriesCatalogVersion,
   }) async {
     if (metadataProviders.isEmpty || items.isEmpty) return items;
     final expectedCacheIdentity = await _cacheIdentityForCurrentCall();
@@ -1493,11 +1633,18 @@ class LibraryRepository {
         : _enrichConcurrency;
     await Future.wait(List.generate(workerCount, (_) => worker()));
     if (persistChanges) {
-      await db.updateMediaDisplayFields(
-        source.id,
-        changed,
-        expectedCacheIdentity: expectedCacheIdentity,
-      );
+      try {
+        await db.updateMediaDisplayFields(
+          source.id,
+          changed,
+          seriesCatalogVersion: seriesCatalogVersion,
+          expectedCacheIdentity: expectedCacheIdentity,
+        );
+      } on LoadCancelledException {
+        // A newer catalog owns the rows now. This read can still display its
+        // snapshot without writing old locators back into the new catalog.
+        await _ensureCacheIdentityCurrent(expectedCacheIdentity);
+      }
     }
     await _ensureCacheIdentityCurrent(expectedCacheIdentity);
     return out;

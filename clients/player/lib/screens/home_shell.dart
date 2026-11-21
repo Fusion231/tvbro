@@ -20,6 +20,7 @@ import '../data/local_profile_store.dart';
 import '../data/metadata_clients.dart';
 import '../data/metadata_provider.dart';
 import '../data/net.dart' show sourceLoadErrorMessage;
+import '../sources/m3u_source.dart';
 import '../data/parental_controls.dart';
 import '../data/source_store.dart';
 import '../data/source_identity_migration.dart';
@@ -75,6 +76,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _checkingSource = false;
   String? _preloadError;
   String? _libraryWarning;
+  VoidCallback? _removeDeferredGuideListener;
   final Map<ContentKind, bool?> _preloadStages = {};
   bool? _preloadEpgReady;
   String? _preloadEpgMessage;
@@ -422,6 +424,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void dispose() {
     _preloadToken?.cancel();
     _stopCatalogRefresh();
+    _removeDeferredGuideListener?.call();
     WidgetsBinding.instance.removeObserver(this);
     if (_keyboardLogger case final logger?) {
       HardwareKeyboard.instance.removeHandler(logger);
@@ -463,6 +466,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final gen = ++_loadActiveGeneration;
     _preloadToken?.cancel();
     _stopCatalogRefresh();
+    _removeDeferredGuideListener?.call();
+    _removeDeferredGuideListener = null;
     _catalogRetryAfter = null;
     if (mounted) {
       setState(() {
@@ -670,15 +675,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             ? null
             : '${warnings.join('\n')}\n${tr('Saved content is still available. Open the unavailable section to try again.')}';
       });
-    } else if (_repo case final repo?) {
-      unawaited(_refreshCachedEpg(repo, gen));
     }
     // A failed onboarding section already exhausted its bounded retries.
     // Leave the successful cache usable and retry that section later.
     if (preloadContent) {
       _catalogRetryAfter = DateTime.now().add(const Duration(hours: 1));
     }
-    unawaited(_scheduleCatalogRefresh());
+    unawaited(_scheduleCatalogRefresh(refreshCachedGuide: !preloadContent));
     _loadProfileInfo();
   }
 
@@ -738,7 +741,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _repo?.cancelCatalogSync();
   }
 
-  Future<void> _scheduleCatalogRefresh() async {
+  Future<void> _scheduleCatalogRefresh({bool refreshCachedGuide = false}) async {
     final repo = _repo;
     final generation = ++_catalogRefreshGeneration;
     _catalogRefreshTimer?.cancel();
@@ -749,6 +752,48 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _loading ||
         _preloadingContent) {
       return;
+    }
+    final source = repo.source;
+    final loadGeneration = _loadActiveGeneration;
+    final independentGuide =
+        source is! M3uSource || source.epgUrl?.isNotEmpty == true;
+    if (refreshCachedGuide && independentGuide) {
+      unawaited(_refreshCachedEpg(repo, loadGeneration));
+    }
+    if (source is M3uSource) {
+      try {
+        await repo.backfillM3uSeriesCache();
+      } on LoadCancelledException {
+        return;
+      } catch (_) {
+        if (!mounted || generation != _catalogRefreshGeneration) return;
+        // A failed upgrade already attempted the playlist for this cycle.
+        _catalogRetryAfter ??= DateTime.now().add(const Duration(hours: 1));
+      }
+      if (!mounted || generation != _catalogRefreshGeneration) return;
+      if (refreshCachedGuide && !independentGuide) {
+        final canRefresh =
+            repo.m3uSeriesBackfill.value != M3uSeriesBackfillStatus.failed ||
+            await source.canRefreshGuideWithoutPlaylist();
+        if (!mounted || generation != _catalogRefreshGeneration) return;
+        if (canRefresh) {
+          unawaited(_refreshCachedEpg(repo, loadGeneration));
+        } else {
+          final status = repo.m3uSeriesBackfill;
+          void refreshDeferredGuide() {
+            if (status.value != M3uSeriesBackfillStatus.complete) return;
+            status.removeListener(refreshDeferredGuide);
+            _removeDeferredGuideListener = null;
+            if (mounted && loadGeneration == _loadActiveGeneration) {
+              unawaited(_refreshCachedEpg(repo, loadGeneration));
+            }
+          }
+          _removeDeferredGuideListener =
+              () => status.removeListener(refreshDeferredGuide);
+          status.addListener(refreshDeferredGuide);
+          refreshDeferredGuide();
+        }
+      }
     }
     var delay = const Duration(hours: 1);
     try {
@@ -772,7 +817,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final repo = _repo;
     if (repo == null || identical(_manualCatalogRefresh, repo)) return;
     _manualCatalogRefresh = repo;
-    _stopCatalogRefresh();
+    if (repo.m3uSeriesBackfill.value != M3uSeriesBackfillStatus.loading) {
+      _stopCatalogRefresh();
+    }
     try {
       await _refreshCatalog(repo, _catalogRefreshGeneration, forceRefresh: true);
     } finally {

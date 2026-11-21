@@ -4391,6 +4391,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                       onFavoritesSelected: _selectFavorites,
                       favoritesFocusNode: _favoritesTabFocusNode,
                       autofocusFavorites: _showFavorites,
+                      status: M3uSeriesBackfillBanner(
+                        repo: widget.repo,
+                        onRetryCompleted: () => _tabFocusNodes[_tab]?.requestFocus(),
+                      ),
                       recentlyWatched: RecentlyWatchedView(
                         key: ValueKey((widget.repo, _homeVisit)),
                         repo: widget.repo,

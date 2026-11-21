@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -5,8 +6,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/load_token.dart';
+import 'package:iptvs/data/metadata_provider.dart';
 import 'package:iptvs/data/net.dart';
 import 'package:iptvs/data/secret_locator_vault.dart';
+import 'package:iptvs/data/source_identity_migration.dart';
 import 'package:iptvs/sources/m3u_source.dart';
 import 'package:iptvs/sources/source.dart';
 
@@ -21,12 +24,160 @@ https://example.invalid/movie/11.mkv
 https://example.invalid/series/210.mp4
 #EXTINF:-1 group-title="Series",Show S01 E02
 https://example.invalid/series/102.mp4
-#EXTINF:-1 group-title="Series",Show S01 E01
+#EXTINF:-1 group-title="Series" catchup-source="https://example.invalid/private-catchup",Show S01 E01
+#EXTVLCOPT:http-user-agent=Episode Agent
 https://example.invalid/series/101.mp4
 ''';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'a fresh legacy catalog shares its background upgrade with a series opened during it',
+    () => HttpOverrides.runWithHttpOverrides(() async {
+      ProviderRequestGate.instance.debugReset();
+      FlutterSecureStorage.setMockInitialValues({});
+      final directory = Directory.systemTemp.createTempSync('m3u_upgrade_');
+      final db = await AppDatabase.openAt('${directory.path}/library.db');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final retryStarted = Completer<void>();
+      final releaseRetry = Completer<void>();
+      final metadata = _DelayedEpisodeMetadata();
+      var requests = 0, status = 884;
+      server.listen((request) async {
+        requests++;
+        if (requests == 1) {
+          started.complete();
+          await release.future;
+        }
+        if (requests == 2) {
+          retryStarted.complete();
+          await releaseRetry.future;
+        }
+        try {
+          request.response.statusCode = status;
+          if (status == 200) request.response.write(_mixed);
+          await request.response.close();
+        } on SocketException {
+          // The test cancels an in-flight response.
+        } on HttpException {
+          // The test cancels an in-flight response.
+        }
+      });
+      M3uSource buildSource() => M3uSource(
+        sourceId: 'upgrade',
+        playlistUrl: 'http://127.0.0.1:${server.port}/get.php',
+      );
+      final source = buildSource();
+      addTearDown(() async {
+        if (!release.isCompleted) release.complete();
+        if (!releaseRetry.isCompleted) releaseRetry.complete();
+        if (!metadata.release.isCompleted) metadata.release.complete();
+        await source.dispose();
+        await server.close(force: true);
+        await db.close();
+        directory.deleteSync(recursive: true);
+      });
+      final parsed = parseM3uPlaylist(_mixed);
+      final catalog = parsed.media;
+      final series = catalog.roots[ContentKind.series]!.single;
+      const oldSeries = MediaItem(
+        id: 'old-title', title: 'Old title', kind: ContentKind.series,
+      );
+      const oldSeason = MediaItem(
+        id: 'old-season', parentId: 'old-title',
+        title: 'Old season', kind: ContentKind.season,
+      );
+      await db.migrateSourceCacheIdentity(
+        source.id, source.name, sourceCacheIdentityForSource(source)!,
+      );
+      await db.replaceLibrary(source.id, source.name, parsed.categories,
+          parsed.channels, completeCatalog: true);
+      for (final kind in [ContentKind.movie, ContentKind.series]) {
+        await db.replaceMediaLibrary(
+          source.id, kind, catalog.categories[kind]!, [
+            ...catalog.roots[kind]!,
+            if (kind == ContentKind.series) oldSeries,
+          ],
+          completeCatalog: true,
+        );
+      }
+      await db.replaceMediaLibrary(
+        source.id, ContentKind.season, [], [oldSeason], parentId: oldSeries.id,
+      );
+      final oldStamp = await db.lastCatalogSynced(source.id, ContentKind.series);
+      final repo = LibraryRepository(
+        source: source, db: db, metadataProviders: [metadata],
+      );
+      final cancelled = expectLater(
+        repo.backfillM3uSeriesCache(), throwsA(isA<LoadCancelledException>()),
+      );
+      repo.cancelCatalogSync();
+      await cancelled;
+      expect(requests, 0);
+      final background = repo.synchronizeCatalog().then<Object?>(
+        (_) => null, onError: (Object error) => error,
+      );
+      await Future.any([started.future, background]);
+      expect(requests, 1);
+      final opened = repo.loadMedia(ContentKind.season, parent: series);
+      final failure = expectLater(opened, throwsA(isA<StateError>()));
+      release.complete();
+      await failure;
+      expect(await background, isA<StateError>());
+      expect(await db.lastCatalogSynced(source.id, ContentKind.series), oldStamp);
+      final cached = await repo.loadMedia(
+        ContentKind.season, parent: oldSeries, enrichChildren: false,
+      );
+      expect(cached.items.single.id, oldSeason.id);
+      await expectLater(
+        repo.loadMedia(ContentKind.season, parent: series),
+        throwsA(isA<StateError>()),
+      );
+      expect(repo.m3uSeriesBackfill.value, M3uSeriesBackfillStatus.failed);
+      expect(requests, 1);
+
+      status = 200;
+      final stopped = expectLater(
+        repo.backfillM3uSeriesCache(retry: true),
+        throwsA(isA<LoadCancelledException>()),
+      );
+      await retryStarted.future;
+      repo.cancelCatalogSync();
+      releaseRetry.complete();
+      await stopped;
+      expect(await db.m3uSeriesCacheComplete(source.id), isFalse);
+      expect(await db.lastCatalogSynced(source.id, ContentKind.series), oldStamp);
+      expect(repo.m3uSeriesBackfill.value, isNull);
+
+      final staleRead = repo.loadMedia(ContentKind.season, parent: oldSeries);
+      await metadata.started.future;
+      expect(await Future.wait([
+        repo.backfillM3uSeriesCache(retry: true),
+        repo.backfillM3uSeriesCache(retry: true),
+      ]), [true, true]);
+      final refreshed = await repo
+          .loadMedia(ContentKind.season, parent: oldSeries)
+          .timeout(const Duration(seconds: 5));
+      expect(refreshed.items, isEmpty);
+      metadata.release.complete();
+      await staleRead;
+      expect(requests, 3);
+      final restartedSource = buildSource();
+      addTearDown(restartedSource.dispose);
+      final restarted = LibraryRepository(source: restartedSource, db: db);
+      await restarted.synchronizeCatalog();
+      final seasons = await restarted.loadMedia(ContentKind.season, parent: series);
+      expect(seasons.items.map((season) => season.seasonNumber), [1, 2]);
+      expect(
+        (await restarted.loadMedia(ContentKind.season, parent: oldSeries)).items,
+        isEmpty,
+      );
+      expect(requests, 3);
+    }, _RealHttpOverrides()),
+  );
 
   test(
     'classifies mixed M3U and groups numerically ordered seasons and episodes',
@@ -165,15 +316,18 @@ https://example.invalid/movie/six.mkv
   );
 
   test(
-    'catalog batches share one download; cached playback keeps headers and makes no request',
+    'M3U import saves the full series tree for offline browsing after restart',
     () => HttpOverrides.runWithHttpOverrides(() async {
       ProviderRequestGate.instance.debugReset();
       FlutterSecureStorage.setMockInitialValues({});
       final directory = Directory.systemTemp.createTempSync('m3u_media');
-      final db = await AppDatabase.openAt('${directory.path}/library.db');
+      final path = '${directory.path}/library.db';
+      var db = await AppDatabase.openAt(path);
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       var requests = 0, status = 200;
-      var playlist = _mixed;
+      var playlist = '$_mixed'
+          '#EXTINF:-1 group-title="Mirrors",Show S01 E01\n'
+          'https://example.invalid/series/101.mp4\n';
       server.listen((request) async {
         requests++;
         request.response.statusCode = status;
@@ -186,7 +340,9 @@ https://example.invalid/movie/six.mkv
       );
       var source = buildSource();
       var repo = LibraryRepository(source: source, db: db);
+      final metadata = _DelayedEpisodeMetadata();
       addTearDown(() async {
+        if (!metadata.release.isCompleted) metadata.release.complete();
         await source.dispose();
         await server.close(force: true);
         await db.epgIngest.cancelAndWait();
@@ -213,26 +369,48 @@ https://example.invalid/movie/six.mkv
       final movies = await repo.loadMedia(ContentKind.movie);
       expect(movies.items, hasLength(1));
       expect(hasSealedLocator(movies.items.single.extra), isTrue);
-      final series = (await repo.loadMedia(ContentKind.series)).items.single;
+      status = 884;
+      await source.dispose();
+      await db.epgIngest.cancelAndWait();
+      await db.close();
+      db = await AppDatabase.openAt(path);
+      source = buildSource();
+      repo = LibraryRepository(source: source, db: db);
+      final roots = (await repo.loadMedia(ContentKind.series)).items;
+      final series = roots.singleWhere((item) => item.categoryId == 'Series');
+      final mirror = roots.singleWhere((item) => item.categoryId == 'Mirrors');
       final seasons = (await repo.loadMedia(
         ContentKind.season,
         parent: series,
         enrichChildren: false,
       )).items;
+      expect(seasons.map((s) => s.seasonNumber), [1, 2]);
       final episodes = (await repo.loadMedia(
         ContentKind.episode,
         parent: seasons.first,
         enrichChildren: false,
       )).items;
       expect(episodes.map((e) => e.episodeNumber), [1, 2]);
+      expect(
+        episodes.every((episode) => hasSealedLocator(episode.extra)),
+        isTrue,
+      );
+      expect(episodes.first.extra, isNot(contains('catchupSource')));
+      final mirrorSeason = (await repo.loadMedia(
+        ContentKind.season,
+        parent: mirror,
+      )).items.single;
+      final mirrorEpisode = (await repo.loadMedia(
+        ContentKind.episode,
+        parent: mirrorSeason,
+      )).items.single;
+      expect(mirrorEpisode.id, episodes.first.id);
       expect(requests, 1);
-      await source.dispose();
-      source = buildSource();
-      repo = LibraryRepository(source: source, db: db);
       final movieStream = await repo.resolveMedia(movies.items.single);
       final episodeStream = await repo.resolveMedia(episodes.first);
       expect(movieStream.isLive, isFalse);
       expect(episodeStream.isLive, isFalse);
+      expect(episodeStream.url, 'https://example.invalid/series/101.mp4');
       expect(movieStream.headers, {
         'User-Agent': 'Fixture Agent',
         'Referer': 'https://example.invalid/',
@@ -240,8 +418,28 @@ https://example.invalid/movie/six.mkv
       expect(movieStream.providerAccount!.maximumStreams, 1);
       expect(requests, 1);
 
-      playlist = _mixed.replaceAll('Movie (2024)', 'Changed movie');
+      final pendingMetadata = LibraryRepository(
+        source: source,
+        db: db,
+        metadataProviders: [metadata],
+      ).loadMedia(ContentKind.episode, parent: seasons.first);
+      await metadata.started.future;
+      status = 200;
+      playlist = _mixed
+          .replaceAll('Movie (2024)', 'Changed movie')
+          .replaceAll('Show S02 E10', 'Show S03 E10')
+          .replaceAll('Episode Agent', 'Updated Episode Agent');
       await repo.synchronizeCatalog(forceRefresh: true);
+      metadata.release.complete();
+      await pendingMetadata;
+      final updated = (await repo.loadMedia(
+        ContentKind.episode,
+        parent: seasons.first,
+        enrichChildren: false,
+      )).items.first;
+      expect(updated.id, episodes.first.id);
+      expect((await repo.resolveMedia(updated)).headers['User-Agent'],
+          'Updated Episode Agent');
       expect(requests, 2);
       expect(
         (await repo.loadMedia(ContentKind.movie)).items.single.title,
@@ -259,6 +457,28 @@ https://example.invalid/movie/six.mkv
         repo.synchronizeCatalog(forceRefresh: true),
         throwsA(isA<StateError>()),
       );
+      final currentSeasons = await repo.loadMedia(
+        ContentKind.season,
+        parent: series,
+        enrichChildren: false,
+      );
+      expect(currentSeasons.fromCache, isTrue);
+      expect(currentSeasons.items.map((season) => season.seasonNumber), [1, 3]);
+      expect(
+        await db.readMediaItems(
+          source.id,
+          ContentKind.episode,
+          parentId: seasons.last.id,
+        ),
+        isEmpty,
+      );
+      final lastSeason = await repo.loadMedia(
+        ContentKind.episode,
+        parent: currentSeasons.items.last,
+        enrichChildren: false,
+      );
+      expect(lastSeason.fromCache, isTrue);
+      expect(lastSeason.items.single.episodeNumber, 10);
       expect(requests, 5);
       expect(
         (await repo.loadMedia(ContentKind.movie)).items.single.title,
@@ -292,3 +512,49 @@ https://example.invalid/movie/six.mkv
 }
 
 class _RealHttpOverrides extends HttpOverrides {}
+
+class _DelayedEpisodeMetadata extends MetadataProvider {
+  final started = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  String get provider => 'fixture';
+
+  @override
+  String get authMode => 'none';
+
+  @override
+  Future<ExternalMetadata?> search(MediaItem item) async => null;
+
+  @override
+  Future<ExternalMetadata?> episodeMetadata(
+    MediaItem season,
+    MediaItem episode,
+  ) async {
+    if (episode.episodeNumber != 1) return null;
+    return _holdMetadata();
+  }
+
+  @override
+  Future<ExternalMetadata?> seasonMetadata(
+    MediaItem series,
+    MediaItem season,
+  ) async {
+    if (season.id != 'old-season') return null;
+    return _holdMetadata();
+  }
+
+  Future<ExternalMetadata> _holdMetadata() async {
+    started.complete();
+    await release.future;
+    return ExternalMetadata(
+      provider: provider,
+      providerKey: 'episode',
+      overview: 'Episode description',
+      refreshedAt: DateTime(2026),
+    );
+  }
+
+  @override
+  void close() {}
+}

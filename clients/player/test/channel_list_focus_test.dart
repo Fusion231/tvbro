@@ -606,10 +606,12 @@ void main() {
               size: const Size(960, 540),
               rowMode: rowMode,
             );
-            await settle(tester);
             final categoryPane = find.byKey(
               const ValueKey('live.categoryPane'),
             );
+            await pumpUntil(tester, categoryPane);
+            await settle(tester);
+            expect(categoryPane, findsOneWidget);
             final paneElement = categoryPane.evaluate().single;
             final guideState = rowMode
                 ? null
@@ -622,7 +624,6 @@ void main() {
                   );
             final preview = find.byKey(const ValueKey('live.previewThumbnail'));
             final initialPreviewLeft = tester.getTopLeft(preview).dx;
-            expect(categoryPane, findsOneWidget);
             expect(focusLabel(), 'live.channels');
 
             if (tapToPreview) {

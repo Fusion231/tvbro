@@ -145,7 +145,7 @@ class M3uMediaBuilder {
         poster: entry.logo,
         seasonNumber: seasonNumber,
         episodeNumber: episodeNumber,
-        extra: entry.extra,
+        extra: {...entry.extra}..remove('catchupSource'),
       ),
     );
     return true;

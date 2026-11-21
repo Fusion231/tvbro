@@ -31,6 +31,12 @@ class _InfoRepository implements LibraryRepository {
   LoadToken? loadToken;
 
   @override
+  final m3uSeriesBackfill = ValueNotifier<M3uSeriesBackfillStatus?>(null);
+
+  @override
+  Future<bool> backfillM3uSeriesCache({bool retry = false}) async => false;
+
+  @override
   Future<ExternalMetadata?> cachedExternalMetadata(
     MediaItem item,
     String provider,

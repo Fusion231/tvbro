@@ -15,6 +15,7 @@ class LibraryHomeView extends StatelessWidget {
   final VoidCallback onFavoritesSelected;
   final FocusNode favoritesFocusNode;
   final bool autofocusFavorites;
+  final Widget? status;
   final Widget? recentlyWatched;
 
   const LibraryHomeView({
@@ -25,6 +26,7 @@ class LibraryHomeView extends StatelessWidget {
     required this.favoritesFocusNode,
     this.autofocusKind = ContentKind.live,
     this.autofocusFavorites = false,
+    this.status,
     this.recentlyWatched,
   });
 
@@ -140,6 +142,7 @@ class LibraryHomeView extends StatelessWidget {
                                 ],
                               ),
                       ),
+                      ?status,
                       if (recentlyWatched != null) ...[
                         const SizedBox(height: 24),
                         recentlyWatched!,

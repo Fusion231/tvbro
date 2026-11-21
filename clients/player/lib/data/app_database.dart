@@ -2093,6 +2093,29 @@ class AppDatabase {
     return stamp == null ? null : DateTime.fromMillisecondsSinceEpoch(stamp);
   }
 
+  static const _m3uSeriesTreeKey = 'm3u_series_children';
+
+  /// Null means there is no series catalog to backfill.
+  Future<bool?> m3uSeriesCacheComplete(String sourceId) async {
+    final rows = await _db.query(
+      'catalog_sync',
+      columns: ['kind', 'synced_at'],
+      where: 'source_id = ? AND kind IN (?, ?)',
+      whereArgs: [sourceId, ContentKind.series.name, _m3uSeriesTreeKey],
+    );
+    final stamps = {for (final row in rows) row['kind']: row['synced_at']};
+    final seriesStamp = stamps[ContentKind.series.name];
+    if (seriesStamp != null) return seriesStamp == stamps[_m3uSeriesTreeKey];
+    final legacy = await _db.query(
+      'media_items',
+      columns: ['id'],
+      where: 'source_id = ? AND kind = ?',
+      whereArgs: [sourceId, ContentKind.series.name],
+      limit: 1,
+    );
+    return legacy.isEmpty ? null : false;
+  }
+
   static Future<int?> _catalogStamp(
     DatabaseExecutor executor,
     String sourceId,
@@ -2371,7 +2394,7 @@ class AppDatabase {
     ContentKind kind,
     Map<String, dynamic> extra,
   ) => MediaItem(
-    id: r['id'] as String,
+    id: _mediaItemModelId(r['id'] as String, kind, r['parent_id'] as String?),
     title: r['title'] as String,
     kind: kind,
     parentId: r['parent_id'] as String?,
@@ -2387,6 +2410,20 @@ class AppDatabase {
     providerId: r['provider_id'] as String?,
     extra: extra,
   );
+
+  static String _mediaItemModelId(
+    String id,
+    ContentKind kind,
+    String? parentId,
+  ) {
+    if (kind == ContentKind.episode &&
+        isStableM3uChannelId(id) &&
+        parentId != null &&
+        id.endsWith(':$parentId')) {
+      return id.substring(0, id.length - parentId.length - 1);
+    }
+    return id;
+  }
 
   static int? _readInt(Object? value) {
     if (value is int) return value;
@@ -2407,6 +2444,8 @@ class AppDatabase {
   /// [readMediaItems] for the same `(kind, categoryId, parentId)` key, because
   /// that pair is `LibraryRepository.loadMedia`'s legacy cache-read gate.
   /// A complete root catalog is valid even when it contains no items.
+  /// [seriesChildren] contains the nonempty child lists from a complete import,
+  /// keyed by the series or season ID.
   Future<bool> replaceMediaLibrary(
     String sourceId,
     ContentKind kind,
@@ -2419,6 +2458,7 @@ class AppDatabase {
     bool onlyIfAbsent = false,
     bool completeCatalog = false,
     bool refreshSeriesChildren = false,
+    Map<String, List<MediaItem>>? seriesChildren,
     ({DateTime? syncedAt})? seriesCatalogVersion,
     String? expectedCacheIdentity,
     LoadToken? token,
@@ -2426,9 +2466,23 @@ class AppDatabase {
     if (completeCatalog && (categoryId != null || parentId != null)) {
       throw ArgumentError('A complete media catalog must be unfiltered');
     }
+    if (seriesChildren != null &&
+        (!completeCatalog ||
+            kind != ContentKind.series ||
+            !refreshSeriesChildren)) {
+      throw ArgumentError('Series children require a complete series refresh');
+    }
     final protectedExtras = [
       for (final item in items) await protectSecretLocators(item.extra, _vault),
     ];
+    final protectedChildren = {
+      if (seriesChildren != null)
+        for (final entry in seriesChildren.entries)
+          entry.key: [
+            for (final item in entry.value)
+              await protectSecretLocators(item.extra, _vault),
+          ],
+    };
     var wrote = true;
     await _db.transaction((txn) async {
       if (expectedCacheIdentity != null &&
@@ -2477,9 +2531,9 @@ class AppDatabase {
         }
       }
       if (completeCatalog && kind == ContentKind.series && refreshSeriesChildren) {
-        // Providers can append episodes without changing the root series row.
-        // Invalidate only after a successful catalog download, atomically with
-        // its replacement. Progress/favorites remain in their separate tables.
+        // Replace the subtree when this download includes it. API sources can
+        // append episodes without changing the root row, so refresh their
+        // children on the next open. Progress and favorites are separate.
         previousDetails.clear();
         for (final childKind in [ContentKind.season, ContentKind.episode]) {
           for (final table in ['media_items', 'media_page_state', 'media_sync']) {
@@ -2597,11 +2651,55 @@ class AppDatabase {
         'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
       }, conflictAlgorithm: ConflictAlgorithm.replace);
       await batch.commit(noResult: true);
+      if (seriesChildren != null) {
+        var childBatch = txn.batch();
+        final episodeIds = <String>{};
+        final parentIds = seriesChildren.keys.toList()..sort();
+        for (final childParentId in parentIds) {
+          final children = seriesChildren[childParentId]!;
+          final extras = protectedChildren[childParentId]!;
+          final childKind = children.first.kind;
+          for (var i = 0; i < children.length; i++) {
+            final item = children[i];
+            final row = _mediaItemRow(
+              sourceId,
+              childKind,
+              item,
+              parentId: childParentId,
+              displayOrder: i,
+              protectedExtra: extras[i],
+            );
+            // A repeated locator keeps the same playback identity in both
+            // seasons. Only the additional SQLite row needs a distinct key.
+            if (childKind == ContentKind.episode && !episodeIds.add(item.id)) {
+              row['id'] = '${item.id}:$childParentId';
+            }
+            childBatch.insert('media_items', row);
+            if (childBatch.length >= 500) {
+              await childBatch.commit(noResult: true);
+              childBatch = txn.batch();
+            }
+          }
+          childBatch.insert('media_page_state', {
+            'source_id': sourceId,
+            'kind': childKind.name,
+            'parent_id': childParentId,
+            'category_id': '',
+            'synced_at': syncedAt,
+            'loaded_pages': 1,
+            'total_pages': 1,
+          });
+        }
+        if (childBatch.length > 0) await childBatch.commit(noResult: true);
+      }
       if (hadCache && token?.isCancelled == true) {
         throw const LoadCancelledException();
       }
       if (completeCatalog && !onlyIfAbsent && token?.isCancelled != true) {
-        await _writeCatalogSync(txn, sourceId, kind, syncedAt);
+        await _writeCatalogSync(txn, sourceId, kind.name, syncedAt);
+        if (seriesChildren != null) {
+          await _writeCatalogSync(txn, sourceId, _m3uSeriesTreeKey, syncedAt);
+        }
       }
     });
     return wrote;
@@ -2667,6 +2765,7 @@ class AppDatabase {
     String? parentId,
     required int loadedPages,
     required int totalPages,
+    ({DateTime? syncedAt})? seriesCatalogVersion,
     String? expectedCacheIdentity,
   }) async {
     final protectedExtras = [
@@ -2680,6 +2779,11 @@ class AppDatabase {
             expectedCacheIdentity,
           )) {
         return;
+      }
+      if (seriesCatalogVersion != null &&
+          await _catalogStamp(txn, sourceId, ContentKind.series) !=
+              seriesCatalogVersion.syncedAt?.millisecondsSinceEpoch) {
+        throw const LoadCancelledException();
       }
       if (parentId == null) {
         await txn.delete(
@@ -2919,6 +3023,10 @@ class AppDatabase {
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
         final extra = protectedExtras[i];
+        final parentId = item.parentId;
+        final m3uEpisode = item.kind == ContentKind.episode &&
+            parentId?.startsWith('m3u-series:') == true &&
+            isStableM3uChannelId(item.id);
         batch.update(
           'media_items',
           {
@@ -2931,8 +3039,16 @@ class AppDatabase {
             'provider_id': item.providerId,
             'extra': extra.isEmpty ? null : jsonEncode(extra),
           },
-          where: 'source_id = ? AND kind = ? AND id = ?',
-          whereArgs: [sourceId, item.kind.name, item.id],
+          where: m3uEpisode
+              ? 'source_id = ? AND kind = ? AND parent_id = ? AND id IN (?, ?)'
+              : 'source_id = ? AND kind = ? AND id = ?',
+          whereArgs: [
+            sourceId,
+            item.kind.name,
+            if (m3uEpisode) parentId,
+            item.id,
+            if (m3uEpisode) '${item.id}:$parentId',
+          ],
         );
       }
       await batch.commit(noResult: true);
@@ -3272,7 +3388,7 @@ class AppDatabase {
           whereArgs: [sourceId, ContentKind.live.name],
         );
         if (completeCatalog && !onlyIfAbsent && token?.isCancelled != true) {
-          await _writeCatalogSync(txn, sourceId, ContentKind.live, now);
+          await _writeCatalogSync(txn, sourceId, ContentKind.live.name, now);
         }
       });
     } finally {
@@ -3319,11 +3435,11 @@ class AppDatabase {
   static Future<void> _writeCatalogSync(
     DatabaseExecutor txn,
     String sourceId,
-    ContentKind kind,
+    String kind,
     int syncedAt,
   ) => txn.insert('catalog_sync', {
     'source_id': sourceId,
-    'kind': kind.name,
+    'kind': kind,
     'synced_at': syncedAt,
   }, conflictAlgorithm: ConflictAlgorithm.replace);
 
