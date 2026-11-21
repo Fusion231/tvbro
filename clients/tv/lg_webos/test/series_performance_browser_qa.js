@@ -33,7 +33,7 @@ async (page) => {
     await page.setViewportSize({width:1280,height:720});
     await page.goto(origin);
     await page.locator('#language-view').waitFor({state:'visible'});
-    await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true}));
+    await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate(page.locator('#language-continue'));
     await activate('#add-profile');
     const input = page.locator('.dialog:not([hidden]) input').first();
     await activate(input); await input.fill('Series performance'); await input.press('Escape');

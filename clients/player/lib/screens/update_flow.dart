@@ -32,13 +32,14 @@ bool get updateInstallFlowActive => _activeInstallFlows > 0;
 ///   *fresh* newer release exists (respects the skipped-version preference).
 ///
 /// Store builds open only their configured Store listing on a manual request.
-/// [service] / [store] / [channel] are injectable for tests.
+/// [service], [store], [channel] and [installer] are injectable for tests.
 Future<void> runUpdateCheck(
   BuildContext context, {
   required bool manual,
   UpdateService? service,
   UpdateStore? store,
   DistributionChannel? channel,
+  UpdateInstaller? installer,
 }) async {
   if (updateInstallFlowActive) return;
   _activeInstallFlows += 1;
@@ -58,7 +59,11 @@ Future<void> runUpdateCheck(
     }
     if (Platform.isAndroid &&
         UpdateInstaller.isSupported &&
-        await _resumePendingUpdate(context, store: store)) {
+        await _resumePendingUpdate(
+          context,
+          store: store,
+          installer: installer,
+        )) {
       return;
     }
     if (!context.mounted) return;
@@ -67,6 +72,7 @@ Future<void> runUpdateCheck(
       manual: manual,
       service: service,
       store: store,
+      installer: installer,
     );
   } catch (e) {
     if (manual && context.mounted) {
@@ -88,6 +94,7 @@ Future<void> _runDirectUpdateCheck(
   required bool manual,
   UpdateService? service,
   UpdateStore? store,
+  UpdateInstaller? installer,
 }) async {
   final prefs = store ?? const UpdateStore();
   final svc = service ?? UpdateService(track: await prefs.track());
@@ -137,7 +144,7 @@ Future<void> _runDirectUpdateCheck(
       await prefs.setSkippedVersion(release.version);
     case UpdateChoice.update:
       if (context.mounted) {
-        await _downloadAndInstall(context, release, current, prefs);
+        await _downloadAndInstall(context, release, current, prefs, installer);
       }
     case UpdateChoice.later:
     case null:
@@ -248,6 +255,7 @@ Future<bool> _resumePendingUpdate(
       release,
       file,
       pending.artifact,
+      prefs,
     );
     if (outcome == InstallOutcome.needsPermission && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -259,7 +267,6 @@ Future<bool> _resumePendingUpdate(
       await prefs.clearPendingUpdate();
     }
   } catch (e) {
-    await prefs.clearPendingUpdate();
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -496,31 +503,42 @@ Future<void> _downloadAndInstall(
   ReleaseInfo release,
   String current,
   UpdateStore store,
+  UpdateInstaller? suppliedInstaller,
 ) async {
   if (!isUpdateAllowed(release, current)) {
     throw StateError('Refusing to install a non-upgrade release');
   }
-  final installer = UpdateInstaller();
+  final installer = suppliedInstaller ?? UpdateInstaller();
   final asset = release.assetForCurrentPlatform();
   final artifact = release.artifactForCurrentPlatform();
 
   // Nothing to install in-app (macOS/Linux, or a release missing this
   // platform's asset) — just open the release page.
-  if (!UpdateInstaller.isSupported || asset == null || artifact == null) {
-    await installer.openReleasePage(release.htmlUrl);
-    installer.close();
+  if ((suppliedInstaller == null && !UpdateInstaller.isSupported) ||
+      asset == null ||
+      artifact == null) {
+    try {
+      await installer.openReleasePage(release.htmlUrl);
+    } finally {
+      installer.close();
+    }
     return;
   }
 
   final progress = ValueNotifier<double>(0);
+  final navigator = Navigator.of(context, rootNavigator: true);
+  late final DialogRoute<void> progressRoute;
   var dialogOpen = true;
   var canceled = false;
 
   void closeDialog() {
-    if (dialogOpen && context.mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
-    }
+    if (!dialogOpen) return;
     dialogOpen = false;
+    if (progressRoute.isCurrent) {
+      navigator.pop();
+    } else if (progressRoute.isActive) {
+      navigator.removeRoute(progressRoute);
+    }
   }
 
   // Cancel = abort the in-flight download (force-closing the client breaks the
@@ -533,15 +551,16 @@ Future<void> _downloadAndInstall(
     closeDialog();
   }
 
+  progressRoute = DialogRoute<void>(
+    context: context,
+    barrierDismissible: false,
+    traversalEdgeBehavior: TraversalEdgeBehavior.closedLoop,
+    themes: InheritedTheme.capture(from: context, to: navigator.context),
+    builder: (_) => _ProgressDialog(progress: progress, onCancel: cancel),
+  );
   unawaited(
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _ProgressDialog(progress: progress, onCancel: cancel),
-    ).then((_) {
-      dialogOpen = false;
-      // Dismissed some other way (Back button) — treat as cancel.
-      if (!canceled) cancel();
+    navigator.push(progressRoute).then((_) {
+      if (dialogOpen) cancel(); // The user pressed Back.
     }),
   );
 
@@ -553,7 +572,7 @@ Future<void> _downloadAndInstall(
         if (!canceled) progress.value = p;
       },
     );
-    if (canceled) return;
+    if (canceled || !progressRoute.isActive) return;
     closeDialog();
     if (!context.mounted) return;
 
@@ -575,6 +594,7 @@ Future<void> _downloadAndInstall(
       release,
       file,
       artifact,
+      store,
     );
     if (!context.mounted) return;
     switch (outcome) {
@@ -624,6 +644,7 @@ Future<InstallOutcome> _installWithPermissionRetry(
   ReleaseInfo release,
   File file,
   ReleaseArtifact artifact,
+  UpdateStore store,
 ) async {
   var outcome = await installer.install(release, file);
   if (outcome != InstallOutcome.needsPermission || !context.mounted) {
@@ -635,7 +656,12 @@ Future<InstallOutcome> _installWithPermissionRetry(
         ? InstallOutcome.openedInBrowser
         : InstallOutcome.needsPermission;
   }
-  await validateCachedArtifact(file, artifact);
+  try {
+    await validateCachedArtifact(file, artifact);
+  } catch (_) {
+    await store.clearPendingUpdate();
+    rethrow;
+  }
   outcome = await installer.install(release, file);
   return outcome;
 }

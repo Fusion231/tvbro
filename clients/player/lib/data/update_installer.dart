@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -155,12 +157,26 @@ class UpdateInstaller {
 
   /// Sends the user to Android's per-app "install unknown apps" settings.
   Future<bool> requestInstallPermission() async {
+    final returned = Completer<bool>();
+    void finish(bool resumed) {
+      if (!returned.isCompleted) returned.complete(resumed);
+    }
+
+    // The Settings activity supplies no permission result. Read the actual
+    // grant when TVBro is back in the foreground and can open the installer.
+    final listener = AppLifecycleListener(
+      onResume: () => finish(true),
+      onDetach: () => finish(false),
+    );
     try {
-      return await _channel.invokeMethod<bool>('requestInstallPermission') ??
-          false;
+      await _channel.invokeMethod<void>('openInstallPermissionSettings');
+      if (!await returned.future) return false;
+      return await _channel.invokeMethod<bool>('canInstallApks') ?? false;
     } catch (e) {
       DiagnosticsLog.instance.add('update', 'Permission request failed: $e');
       return false;
+    } finally {
+      listener.dispose();
     }
   }
 
@@ -178,14 +194,8 @@ class UpdateInstaller {
 
   /// Opens [url] (the release page) in the system browser.
   Future<void> openReleasePage(Uri url) async {
-    try {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } catch (e) {
-      DiagnosticsLog.instance.add(
-        'update',
-        'Open browser failed: ${redactUrl(url)}',
-      );
-    }
+    final opened = await launchUrl(url, mode: LaunchMode.externalApplication);
+    if (!opened) throw StateError('Could not open the update page');
   }
 
   /// Writes a PowerShell helper that waits for this process to exit, unzips the

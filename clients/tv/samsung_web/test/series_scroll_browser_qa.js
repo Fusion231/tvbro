@@ -65,7 +65,7 @@ async (page) => {
   }
   for (const size of [{width:1280,height:720},{width:1920,height:1080}]) {
     await page.setViewportSize(size); await page.goto(origin);
-    await shown('#language-view'); await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true}));
+    await shown('#language-view'); await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate(page.locator('#language-continue'));
     await shown('#profiles-view'); await activate('#add-profile'); await edit(modal().locator('input').first(),'Series scroll QA');
     await activate(modal().getByRole('button',{name:'Save',exact:true}));
     await shown('#setup-view'); await activate('#setup-source'); await shown('#sources-view'); await activate('#kind-xtream');

@@ -66,6 +66,7 @@ function harness(initial = items(0,14), hasMore = true) {
     focus(node) { env.document.activeElement = node; },
     status() {},report(error) { failures.push(error); },
     renderMediaItems() { throw Error('Series must append without replacing the grid'); },
+    enrichMediaCards() {},
     afterLoadingPaint() { const paint = deferred(); paints.push(paint); return paint.promise; },
     query(action,args) { calls.push({action,args}); const request = deferred(); requests.push(request); return request.promise; }
   };

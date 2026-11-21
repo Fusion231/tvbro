@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:media_kit/media_kit.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/data/metadata_provider.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/screens/favorites_tab_view.dart';
@@ -55,6 +57,7 @@ const _series = MediaItem(
 
 class _NavigationSource extends Source {
   int detailsOpened = 0;
+  Completer<void>? providerDetails;
 
   @override
   String get id => _active.id;
@@ -92,8 +95,33 @@ class _NavigationSource extends Source {
   @override
   Future<MediaItem> mediaDetails(MediaItem item) async {
     detailsOpened++;
-    return item;
+    await providerDetails?.future;
+    return item.copyWith(
+      description: 'Provider synopsis',
+      extra: {...item.extra, 'details': <String, dynamic>{}},
+    );
   }
+}
+
+class _SlowDetailsMetadata extends MetadataProvider {
+  final result = Completer<ExternalMetadata?>();
+  int searches = 0;
+
+  @override
+  String get provider => 'tmdb';
+
+  @override
+  String get authMode => 'test';
+
+  @override
+  Future<ExternalMetadata?> search(MediaItem item) {
+    if (item.extra['details'] is! Map) return Future.value();
+    searches++;
+    return result.future;
+  }
+
+  @override
+  void close() {}
 }
 
 class _OfflineForeignSource extends _NavigationSource {
@@ -229,7 +257,11 @@ void main() {
     matching: find.text(title),
   );
 
-  Future<void> pumpScreen(WidgetTester tester, {bool openLive = true}) async {
+  Future<void> pumpScreen(
+    WidgetTester tester, {
+    bool openLive = true,
+    MetadataProvider? metadataProvider,
+  }) async {
     tester.view.physicalSize = const Size(960, 540);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -242,7 +274,11 @@ void main() {
           child: child!,
         ),
         home: ChannelListScreen(
-          repo: LibraryRepository(source: source, db: db),
+          repo: LibraryRepository(
+            source: source,
+            db: db,
+            metadataProvider: metadataProvider,
+          ),
           config: _active,
           store: store,
         ),
@@ -273,6 +309,96 @@ void main() {
       }
     });
   }
+
+  navigationTest('reopening the library restores the last section', (
+    tester,
+  ) async {
+    await pumpScreen(tester, openLive: false);
+    await openSection(tester, 'Favorites');
+    final movie = favoriteText(_localMovie.title);
+    await until(tester, movie);
+    await tester.pumpWidget(const SizedBox.shrink());
+
+    await pumpScreen(tester, openLive: false);
+    await until(tester, movie);
+    expect(movie, findsOneWidget);
+  }, requiresMediaKit: false);
+
+  navigationTest('movie details open and update during optional enrichment', (
+    tester,
+  ) async {
+    final metadata = _SlowDetailsMetadata();
+    await pumpScreen(tester, openLive: false, metadataProvider: metadata);
+    await openSection(tester, 'Favorites');
+    final movie = favoriteText(_localMovie.title);
+    final sheet = find.byType(MediaDetailsSheet);
+    final enriched = find.descendant(
+      of: sheet,
+      matching: find.text('Enriched synopsis'),
+    );
+    await until(tester, movie);
+    await tester.tap(movie);
+    await until(tester, sheet);
+    expect(find.text('Provider synopsis'), findsOneWidget);
+    expect(enriched, findsNothing);
+    expect(find.widgetWithText(FilledButton, 'Play'), findsOneWidget);
+
+    for (var frame = 0; frame < 50 && metadata.searches == 0; frame++) {
+      await drain(tester);
+    }
+    expect(metadata.searches, 1);
+    await tester.tap(find.byTooltip('Close details'));
+    await until(tester, movie.hitTestable());
+    await tester.tap(movie);
+    await until(tester, sheet);
+    expect(find.text('Provider synopsis'), findsOneWidget);
+    expect(source.detailsOpened, 1);
+
+    metadata.result.complete(
+      ExternalMetadata(
+        provider: 'tmdb',
+        providerKey: '42',
+        overview: 'Enriched synopsis',
+        payload: const {'credits': {'cast': []}},
+        refreshedAt: DateTime.now(),
+      ),
+    );
+    await until(tester, enriched);
+    expect(source.detailsOpened, 1);
+    expect(metadata.searches, 1);
+
+    await tester.tap(find.byTooltip('Close details'));
+    await until(tester, movie.hitTestable());
+    await tester.tap(movie);
+    await until(tester, sheet);
+    expect(enriched, findsOneWidget);
+    await until(tester, find.textContaining('TMDB ·'));
+    expect(source.detailsOpened, 1);
+    expect(metadata.searches, 1);
+  }, requiresMediaKit: false);
+
+  navigationTest('cancelling provider details skips optional enrichment', (
+    tester,
+  ) async {
+    final metadata = _SlowDetailsMetadata();
+    final providerDetails = source.providerDetails = Completer<void>();
+    await pumpScreen(tester, openLive: false, metadataProvider: metadata);
+    await openSection(tester, 'Favorites');
+    final movie = favoriteText(_localMovie.title);
+    await until(tester, movie);
+    await tester.tap(movie);
+    await until(tester, find.text('Cancel'));
+    for (var frame = 0; frame < 50 && source.detailsOpened == 0; frame++) {
+      await drain(tester);
+    }
+    expect(source.detailsOpened, 1);
+    await tester.tap(find.text('Cancel'));
+    await until(tester, movie.hitTestable());
+    providerDetails.complete();
+    await drain(tester);
+    expect(find.byType(MediaDetailsSheet), findsNothing);
+    expect(metadata.searches, 0);
+  }, requiresMediaKit: false);
 
   navigationTest('Favorites returns through Home to the Series catalogue', (
     tester,

@@ -11,8 +11,8 @@
   var hostedHttpMessage = 'This provider uses HTTP. This TV version needs HTTPS. Ask your provider for an HTTPS address or use TVBro on Android, Windows or Samsung.';
   var cacheMigrationMessage = 'Saved source data could not be moved safely. The source settings were not changed.';
   var scheduleTimer = options.setTimeout || setTimeout, cancelTimer = options.clearTimeout || clearTimeout;
-  var backupCodec = options.backup || (typeof require==='function' ? require('./backup.js').create({}) :
-    typeof window!=='undefined' && window.TVBroSamsungBackup ? window.TVBroSamsungBackup.create({environment:window}) : null);
+  var backupCodec = options.backup || (typeof require==='function' ? require('./backup.js').create({languageOptions:languageOptions}) :
+    typeof window!=='undefined' && window.TVBroSamsungBackup ? window.TVBroSamsungBackup.create({environment:window,languageOptions:languageOptions}) : null);
   var backupInspection = null;
   var createSource = options.createSource || core.createSource;
   var verifyPin = options.verifyPin || core.verifyPin, hashPin = options.hashPin || core.hashPin;
@@ -987,9 +987,15 @@
     }).catch(function (failure) { check(expected); return null; });
   }
   function savePreparedCatalog(source, expected, detached) {
-    if (!catalogStore || typeof catalogStore.writeBatch !== 'function' || !source.cacheKey) return Promise.resolve(false);
+    if (!catalogStore || !source.cacheKey) { source.cachePersisted = false; return Promise.resolve(false); }
+    if (typeof catalogStore.writeBatch !== 'function') return saveCatalog(source, expected, detached);
+    if (source.catalogExportFlight) return source.catalogExportFlight.catch(function () {}).then(function () {
+      return savePreparedCatalog(source, expected, detached);
+    });
     source.cacheDirty = false;
-    return invoke('beginCatalogExport', { scope: source.cacheScope }, source).then(function (manifest) {
+    // The canonical engine has one export plan per source. Keep the manifest
+    // and every exported part in the same operation, including queued disk IO.
+    var operation = invoke('beginCatalogExport', { scope: source.cacheScope }, source).then(function (manifest) {
       if (!detached) check(expected);
       if ((!detached && active !== source) || !manifest || !Array.isArray(manifest.parts)) return false;
       return catalogStore.writeBatch(source.cacheKey, manifest, function (descriptor) {
@@ -1003,6 +1009,10 @@
       source.cachePersisted = saved;
       return saved;
     });
+    source.catalogExportFlight = operation;
+    function finished() { if (source.catalogExportFlight === operation) source.catalogExportFlight = null; }
+    operation.then(finished, finished);
+    return operation;
   }
   function setupMetadata(source, expected) {
     if (source.metadataReady) return source.metadataReady;
@@ -1233,17 +1243,17 @@
     var batch = prepareCatalogBatch(source, expected, catalogKinds, false, progress);
     return batch.then(function (updated) {
       return readPreparedLive(source, expected, updated).then(function () {
-        setPreparationStage(source, progress);
-        return attemptGuide(source, expected, true);
-      }).then(function () {
         return catalogState(source, expected).then(function (finalState) {
           source.catalogState = finalState;
           if (catalogHasContent(source, finalState)) {
             var persistProgress = beginLoading('catalog-persist');
             return savePreparedCatalog(source, expected, false).then(function () {
               if (source.cachePersisted === false && options.onProgress) options.onProgress();
-              source.preparationChecked = true; armPreparedCatalogRefresh(source, expected);
+              source.preparationChecked = true;
               persistProgress(null);
+              // Commit usable lists before guide work. A slow or unavailable
+              // XMLTV feed must not gate browsing, playback or the next restart.
+              schedulePreparedBackground(source, expected);
               return source.catalog;
             }, function (failure) {
               persistProgress(null); throw failure;
@@ -1325,9 +1335,13 @@
     clearTimeout(source.cacheSaveTimer); source.cacheSaveTimer = null;
     clearTimeout(source.guideSaveTimer); source.guideSaveTimer = null;
     clearTimeout(source.metadataSaveTimer); source.metadataSaveTimer = null;
+    function drainExports() {
+      var flight = source.catalogExportFlight;
+      return flight ? flight.catch(function () {}).then(drainExports) : Promise.resolve();
+    }
     var operation = Promise.all([source.cacheSaveFlight, source.guideSaveFlight, source.guideReadFlight, source.metadataSaveFlight].map(function (flight) {
       return Promise.resolve(flight).catch(function () {});
-    })).then(function () {
+    })).then(drainExports).then(function () {
       if (!detached) check(expected);
       // A guide that completed while flushing may have scheduled fresh timers.
       clearTimeout(source.cacheSaveTimer); source.cacheSaveTimer = null;
@@ -1963,7 +1977,7 @@
       return cacheCloudPins(rows).then(function () { return rows; });
     });
   }
-  function bootstrap(reuseCloud) {
+  function bootstrap(reuseCloud, preserveSelection) {
     reuseCloud = reuseCloud === true && cloudListingAvailable && !!cloudBootstrapStatus && cloudBootstrapStatus.paired === true;
     var state = storage.read(), rows = profiles(state);
     if (!rows.length && state[K.migrated] !== 'true') {
@@ -1984,7 +1998,7 @@
       cloudBootstrapStatus = status;
       if (cloudStatus && !cloudStatus.error && cloudStatus.paired) {
         return refreshCloudProfiles().then(function (listed) {
-          var id = cloudStatus.profileId;
+          var id = preserveSelection ? storage.get(K.cloudId) : cloudStatus.profileId;
           cloudActiveId = id && listed.some(function (row) { return row.id === id; }) ? id : null;
           if (cloudActiveId) return mutate(function (next) { next[K.cloudId] = cloudActiveId; });
         }).catch(function () { cloudListingAvailable = false; cloudProfiles = []; cloudActiveId = null; });
@@ -2067,7 +2081,10 @@
     if (action === 'pairing.get') return cloud.query('status', {});
     if (action === 'pairing.start') {
       var request = Object.assign({}, args);
-      request.language = request.language || languageState().languageCode;
+      var language = languageState();
+      if (!language.languages.some(function (row) { return row.code === request.language; })) {
+        request.language = language.languageCode;
+      }
       return cloud.query('pairing.start', request);
     }
     if (action === 'pairing.status') return cloud.query('pairing.status', args);
@@ -2120,7 +2137,7 @@
     var expectedRevision = revision, selected, outgoing, target, previousCloudId, previousSourceIds, previousActiveId;
     var previousOwnerless, shortcutResult, cloudBucket;
     var operationStarted = false, selectionAttempted = false, committed = false;
-    return bootstrap(true).then(function () {
+    return bootstrap().then(function () {
       check(expectedRevision); previousCloudId = storage.get(K.cloudId); previousSourceIds = storage.get(K.cloudSources);
       previousActiveId = storage.get(K.active); previousOwnerless = storage.get(K.ownerless);
       operationStarted = true;
@@ -2136,7 +2153,8 @@
       var hasCachedSources = target.sources.length && target.sources.every(function (source) {
         return source && source.fields && !options.validation.validateSource(source.kind, source.label, source.fields);
       });
-      if (!onboarding && !forcePull && hasCachedSources) {
+      var unchangedRevision = selected.updated_at && target.cloudRevision === selected.updated_at;
+      if (!onboarding && !forcePull && hasCachedSources && (unchangedRevision || !cloudListingAvailable)) {
         var activate = activeIsTarget ? Promise.resolve() : release().then(function () {
           if (revision !== expectedRevision + 1) throw error('Wczytywanie anulowano.', 'cancelled');
           selectionAttempted = true;
@@ -2178,7 +2196,23 @@
       });
       if (onboarding && !remote.length) throw error('Profil z chmury nie zawiera użytecznego źródła.', 'cloud_no_usable_sources');
       var priorManaged = Array.isArray(target.managedIds) ? target.managedIds : [], managed = remoteIds;
-      var extras = (target.sources || []).filter(function (source) { return !source || priorManaged.indexOf(source.id) < 0; });
+      // Opening a profile can refresh its remote revision even with auto sync
+      // disabled. Keep edits that are still waiting in this profile's outbox,
+      // just as autoPull does; an explicit full download retains its old policy.
+      var preservePending = !onboarding && !forcePull;
+      var pending = preservePending ? objectValue(K.outbox, {}, storage.read())[cloudBucket] || {} : {};
+      remote = remote.filter(function (source) { return !pending.drafts || pending.drafts[source.id] !== 'remove'; }).map(function (source) {
+        var local = (target.sources || []).filter(function (row) { return row.id === source.id; })[0];
+        if (local && pending.drafts && pending.drafts[source.id] === 'edit') {
+          source.kind = local.kind; source.label = local.label; source.fields = copy(local.fields);
+        }
+        source.settings = settingsPatch(source.settings, sourcePatch(pending.settings, source.id));
+        return source;
+      });
+      var extras = (target.sources || []).filter(function (source) {
+        return !source || priorManaged.indexOf(source.id) < 0 ||
+          pending.drafts && pending.drafts[source.id] === 'edit' && remoteIds.indexOf(source.id) < 0;
+      });
       extras.forEach(function (source) {
         if (!source || typeof source.id !== 'string' || !source.fields || typeof source.fields !== 'object' ||
             options.validation.validateSource(source.kind, source.label, source.fields)) {
@@ -2196,13 +2230,25 @@
         if (outgoing) saveCurrentSnapshotInState(state);
         var activeSource = target.activeSourceId;
         if (!mergedSources.some(function (source) { return source.id === activeSource; })) activeSource = mergedSources.length ? mergedSources[0].id : null;
-        var stored = { sources: mergedSources, activeSourceId: activeSource, managedIds: managed };
+        var stored = { sources: mergedSources, activeSourceId: activeSource, managedIds: managed,
+          cloudRevision: snapshot.profile.updated_at || null };
         var metadata = snapshot.metadata || target.metadata;
         if (metadata) stored.metadata = metadata;
         saveCloudSnapshotInState(state, selected.id, stored);
         state[K.cloudId] = selected.id; state[K.cloudSources] = managed.join(','); delete state[K.active]; delete state[K.ownerless];
         var favorites = objectValue(K.favorites, {}, state);
-        favorites[cloudBucket] = mergeCloudFavorites(favorites[cloudBucket], snapshot.favorites || [], managed);
+        var previousFavorites = favorites[cloudBucket] || [];
+        var mergedFavorites = mergeCloudFavorites(previousFavorites, snapshot.favorites || [], managed);
+        var latestPending = preservePending ? objectValue(K.outbox, {}, state)[cloudBucket] || {} : {};
+        Object.keys(latestPending.favorites || {}).forEach(function (key) {
+          var change = latestPending.favorites[key];
+          mergedFavorites = mergedFavorites.filter(function (row) { return dataKey(row.sourceId, row.item || row.channel) !== key; });
+          if (change.add) {
+            var local = previousFavorites.filter(function (row) { return dataKey(row.sourceId, row.item || row.channel) === key; })[0];
+            if (local) mergedFavorites.push(local);
+          }
+        });
+        favorites[cloudBucket] = mergedFavorites;
         state[K.favorites] = JSON.stringify(favorites);
         if (snapshot.playbackPositionsAvailable && Array.isArray(snapshot.playbackPositions)) {
           var positions = objectValue(K.positions, {}, state);
@@ -2267,7 +2313,16 @@
         action === 'pairing.profiles' || action === 'pairing.selectProfile' || action === 'pairing.pull' || action === 'pairing.unpair') {
       return pairingBeforeProfile(action, args);
     }
-    if (action === 'bootstrap') return bootstrap();
+    if (action === 'bootstrap') return bootstrap().then(function (result) {
+      var profile = result.profile;
+      if (!result.showProfilePicker && profile && profile.source === 'cloud' && !profile.locked && cloudListingAvailable) {
+        var row = cloudRow(profile.id), saved = cloudSnapshot(storage.read(), profile.id);
+        if (row && (!row.updated_at || saved.cloudRevision !== row.updated_at)) {
+          return selectCloudProfile({profileId:profile.id}, false);
+        }
+      }
+      return result;
+    });
     if (action === 'backup.export' || action === 'backup.inspect' || action === 'backup.import') {
       if (!backupCodec || !backupCodec.available()) return Promise.reject(error('Szyfrowane kopie zapasowe są niedostępne na tym telewizorze.','backup_unavailable'));
       return (current() ? authorize(args) : parentalProof(args,parental())).then(function () {
@@ -2297,7 +2352,7 @@
     if (action === 'pairing.autoSync') return enqueueAuto(function () {return autoPull().then(autoPush).then(autoPushPlayback);});
     if (action === 'pairing.flush') return enqueueAuto(function () {return autoPush().then(autoPushPlayback);});
     if (action === 'sources.cancel') return release();
-    if (action === 'profiles.list') return bootstrap().then(function (value) { return { profiles: value.profiles, profile: value.profile }; });
+    if (action === 'profiles.list') return bootstrap(false, args.preserveSelection === true).then(function (value) { return { profiles: value.profiles, profile: value.profile }; });
     if (action === 'profiles.create') {
       var name = String(args.name || '').trim();
       if (!name) return Promise.reject(error('Podaj nazwę profilu.'));
@@ -2474,6 +2529,14 @@
       if (action==='catalog.categories') return invoke('mediaCategories',{kind:args.kind},browsingSource).then(function (rows) {check(browsingRevision);return visibleCategories(browsingConfig,rows,args.kind);});
       return args.query ? invoke('searchMedia',args,browsingSource).then(function (items) {check(browsingRevision);return {items:visibleMedia(browsingConfig,items,args.kind),page:1,hasMore:false};}) :
         invoke('mediaItemsPage',args,browsingSource).then(function (page) {check(browsingRevision);page.items=visibleMedia(browsingConfig,page.items,args.kind);return page;});
+    }
+    if (action === 'media.enrich') {
+      var enriching = active, enrichmentRevision = revision;
+      var enrichmentItems = Array.isArray(args.items) ? args.items.slice(0,40) : [];
+      if (!enriching || !enrichmentItems.length) return Promise.resolve(enrichmentItems);
+      return Promise.resolve(setupMetadata(enriching, enrichmentRevision)).then(function () {
+        return invoke('metadata.enrich', {items:enrichmentItems,limit:40}, enriching).catch(function () { return enrichmentItems; });
+      }).then(function (items) { check(enrichmentRevision); scheduleMetadataSave(enriching); return items; });
     }
     if (action === 'media.details') return mediaDetailsWithMetadata(args.item, active);
     if (action === 'media.refresh') {

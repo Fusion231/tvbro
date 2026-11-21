@@ -101,7 +101,9 @@ async (page) => {
     await check(bootSdk.saves >= 2 && bootSdk.duplicates === 0,'Fresh boot must complete both migrations without overwriting a create-only KeyManager alias.');
     await shown('#language-view');
     await check(await page.locator('#language-view h1').textContent() === 'Choose your language','Unsaved language must use canonical English first choice.');
-    await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true})); await shown('#profiles-view');
+    await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true}));
+    await check((await bootstrap()).languageSelected === false,'Preview must wait for Continue before saving.');
+    await activate('#language-continue'); await shown('#profiles-view');
     await check(await page.locator('html').getAttribute('lang') === 'pl','Polish selection must translate the actual page.');
     await check(await page.locator('#profiles-view h1').textContent() === 'Kto ogląda?','Polish profile heading is missing.');
     await reloadWithSdkAliases(); await shown('#profiles-view');
@@ -113,7 +115,7 @@ async (page) => {
     await check((await page.locator('#setup-title').textContent()).includes('Settings'),'User profile name was translated as UI content.');
     await activate('#setup-demo'); await shown('#home-view'); await activate('#show-settings'); await shown('#settings-view');
     await activate(page.locator('#settings-list .setting-row').first()); await shown('#language-view');
-    await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await shown('#settings-view');
+    await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate('#language-continue'); await shown('#settings-view');
     await check(await page.locator('#settings-view h1').textContent() === 'Settings','English Settings heading was not translated.');
     await check(await page.locator('#show-profiles').textContent() === 'Profiles','English global controls were not translated.');
     await check(await page.locator('#settings-profile').textContent() === 'Settings','User profile name must remain byte-identical.');
@@ -124,7 +126,7 @@ async (page) => {
     await page.keyboard.press('Escape'); await shown('#settings-view');
     await check((await bootstrap()).languageCode === 'en','Back from language selection must preserve the saved language.');
     await activate(page.locator('#settings-list .setting-row').first());
-    await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true})); await shown('#settings-view');
+    await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true})); await activate('#language-continue'); await shown('#settings-view');
     phases.push('Real Settings PL→EN, reload, Back without commit, and EN→PL; user name preserved');
 
     await activate('#show-profiles'); await shown('#profiles-view'); await activate('#manage-profiles');

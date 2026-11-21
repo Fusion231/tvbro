@@ -502,6 +502,12 @@ class SourceStore {
     return all.firstWhere((c) => c.id == id, orElse: () => all.first);
   }
 
+  Future<String?> librarySection(String sourceId) =>
+      _storage.read(key: 'library_section:$sourceId');
+
+  Future<void> setLibrarySection(String sourceId, String? section) =>
+      _storage.write(key: 'library_section:$sourceId', value: section);
+
   Future<MetadataConfig> metadataConfig() async {
     final raw = await _storage.read(key: _kMetadata);
     if (raw == null || raw.isEmpty) return const MetadataConfig();

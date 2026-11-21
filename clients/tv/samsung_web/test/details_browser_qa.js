@@ -36,7 +36,7 @@ async (page) => {
   }
   await page.goto(origin);
   await shown('#language-view');
-  await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true}));
+  await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate(page.locator('#language-continue'));
   await shown('#profiles-view');
   await activate('#add-profile'); await edit(modal().locator('input').first(),'Details QA');
   await activate(modal().getByRole('button',{name:'Save',exact:true}));

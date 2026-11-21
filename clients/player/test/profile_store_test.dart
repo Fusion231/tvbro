@@ -118,10 +118,10 @@ void main() {
   });
 
   group('shouldShowPickerAtStartup', () {
-    test('auto shows only with more than one profile', () {
+    test('auto resumes the remembered profile even when several exist', () {
       expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 0), isTrue);
       expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 1), isFalse);
-      expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 2), isTrue);
+      expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 2), isFalse);
     });
 
     test('always shows regardless of count', () {

@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/distribution_channel.dart';
+import 'package:iptvs/data/update_installer.dart';
+import 'package:iptvs/data/update_manifest.dart';
 import 'package:iptvs/data/update_service.dart';
 import 'package:iptvs/screens/update_flow.dart';
 import 'package:iptvs/theme.dart';
@@ -245,6 +248,88 @@ void main() {
     expect(service.checks, 0);
     expect(updateInstallFlowActive, isFalse);
   });
+
+  testWidgets('an install failure is visible after the download closes', (
+    tester,
+  ) async {
+    late BuildContext context;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (value) {
+              context = value;
+              return const SizedBox();
+            },
+          ),
+        ),
+      ),
+    );
+    final service = _WaitingUpdateService()
+      ..result.complete(_InstallableRelease());
+    final installer = _WaitingInstaller();
+    final check = runUpdateCheck(
+      context,
+      manual: true,
+      service: service,
+      installer: installer,
+      channel: DistributionChannel.githubDirect,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(FilledButton));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('Downloading update'), findsOneWidget);
+
+    installer.downloaded.complete(File('fixture.apk'));
+    await tester.pumpAndSettle();
+    expect(find.text('Downloading update'), findsNothing);
+    installer.installed.completeError(StateError('Installer unavailable'));
+    await tester.pumpAndSettle();
+    await check;
+
+    expect(find.textContaining('Update failed:'), findsOneWidget);
+  });
+}
+
+class _InstallableRelease extends ReleaseInfo {
+  _InstallableRelease()
+    : super(
+        version: '1.5.0',
+        tagName: 'v1.5.0',
+        name: 'TVBro 1.5.0',
+        notes: '',
+        htmlUrl: Uri.parse(
+          'https://github.com/Fusion231/tvbro/releases/tag/v1.5.0',
+        ),
+      );
+
+  @override
+  Uri assetForCurrentPlatform() => htmlUrl;
+
+  @override
+  ReleaseArtifact artifactForCurrentPlatform() => const ReleaseArtifact(
+    platform: 'android',
+    filename: 'iptvs-1.5.0-android.apk',
+    byteSize: 1,
+    sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  );
+}
+
+class _WaitingInstaller extends UpdateInstaller {
+  final downloaded = Completer<File>();
+  final installed = Completer<InstallOutcome>();
+
+  @override
+  Future<File> download(
+    Uri url,
+    ReleaseArtifact artifact, {
+    void Function(double)? onProgress,
+  }) => downloaded.future;
+
+  @override
+  Future<InstallOutcome> install(ReleaseInfo release, File file) =>
+      installed.future;
 }
 
 class _WaitingUpdateService extends UpdateService {

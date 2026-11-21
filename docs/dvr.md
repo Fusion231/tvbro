@@ -81,7 +81,7 @@ One-off scheduled recordings remain free. Creating a recurring weekday schedule
 requires a supporter place on this device. Each recurring occurrence checks
 access before starting; expiry leaves an actionable failed schedule and stops
 creating further occurrences. It does not interrupt a recording already running.
-See [subscriptions.md](https://tvbro.online/) for device activation and offline expiry.
+See [subscriptions.md](subscriptions.md) for device activation and offline expiry.
 
 `DvrScheduler` persists occurrences in app-private `schedules.json`, alongside the DVR directory.
 The EPG and custom channel/time dialog use the same API. Each occurrence stores only local profile,
@@ -198,7 +198,7 @@ played at 25 fps from the library; the final build also played saved HLS with th
 Separately, the black Windows HLS preview before activating timeshift was traced to creating
 the video controller after opening the stream. The output-before-open fix passed Windows runtime
 validation on 2026-10-22: first-open HLS displayed video before any timeshift activation, and
-adopted fullscreen plus return preserved the picture. See [player.md](https://tvbro.online/support).
+adopted fullscreen plus return preserved the picture. See [player.md](player.md#live-preview--seamless-handoff-android).
 The user's real TVN RAW preview also showed video and EPG without DVR. Android DVR checks used
 emulators and a controlled test source; physical Android devices and DVR on the user's IPTV
 provider were not tested. The iOS loopback/native transport has not yet had an Xcode build or

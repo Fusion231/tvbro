@@ -136,7 +136,10 @@
     if (settings.active_local_profile_id != null && !profileIds[settings.active_local_profile_id]) invalid();
     if (settings.metadata_config != null) metadata(readJson(settings.metadata_config));
     if (settings.tvbro_parental_controls_v1 != null) parental(readJson(settings.tvbro_parental_controls_v1));
-    if (settings.app_language != null && ['en','pl'].indexOf(settings.app_language) < 0) invalid();
+    if (settings.app_language != null) {
+      var languages = options.languageOptions ? options.languageOptions() : [{code:'en'},{code:'pl'}];
+      if (!languages.some(function (language) { return language.code === settings.app_language; })) invalid();
+    }
     if (settings.profile_picker_startup != null && ['auto','always','off'].indexOf(settings.profile_picker_startup) < 0) invalid();
     Object.keys(settings).forEach(function (key) {
       if (key.indexOf('playback_v1_') !== 0) return;

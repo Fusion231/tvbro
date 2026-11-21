@@ -52,18 +52,26 @@ void main() {
         AppLinks.repository,
         base == null
             ? null
-            : panelAccountLink(
-                base.resolve('support.html#source-code').toString(),
-                DistributionConfig.channel,
+            : pairingPanelLink(
+                panelAccountLink(
+                  base.resolve('support.html#source-code').toString(),
+                  DistributionConfig.channel,
+                ),
+                '',
+                language: 'en',
               ),
       );
       expect(
         AppLinks.support,
         base == null
             ? null
-            : panelAccountLink(
-                base.resolve('support.html').toString(),
-                DistributionConfig.channel,
+            : pairingPanelLink(
+                panelAccountLink(
+                  base.resolve('support.html').toString(),
+                  DistributionConfig.channel,
+                ),
+                '',
+                language: 'en',
               ),
       );
       expect(AppLinks.website, AppLinks.support);
@@ -127,15 +135,15 @@ void main() {
         final channelName = DistributionConfig.channel.name;
         expect(
           AppLinks.privacyPolicy,
-          '$base/privacy.html?channel=$channelName',
+          '$base/privacy.html?channel=$channelName&lang=en',
         );
         expect(
           AppLinks.deleteCloudAccount,
-          '$base/delete-account.html?channel=$channelName',
+          '$base/delete-account.html?channel=$channelName&lang=en',
         );
       } else {
-        expect(AppLinks.privacyPolicy, '$base/privacy');
-        expect(AppLinks.deleteCloudAccount, '$base/delete-account');
+        expect(AppLinks.privacyPolicy, '$base/privacy?lang=en');
+        expect(AppLinks.deleteCloudAccount, '$base/delete-account?lang=en');
       }
     } else {
       expect(AppLinks.privacyPolicy, isNull);

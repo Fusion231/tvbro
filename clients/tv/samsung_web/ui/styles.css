@@ -157,10 +157,23 @@ body.player-open .app-shell { display: none; }
 .profile-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-lock { display: block; color: #a9b0bd; font-size: 15px; margin-top: 6px; }
 .profile-origin { display: block; color: #a9b0bd; font-size: 15px; margin-top: 6px; }
-.language-view { width: 480px; max-width: 100%; margin: 43px auto; text-align: center; }
-.language-list { margin: 28px 0 16px; }
-.language-choice { display: block; width: 100%; min-height: 60px; margin-bottom: 12px; }
-.language-view > .button { margin: 8px 4px; }
+.language-view { display: flex; flex-direction: column; width: 100%; max-width: 1140px; margin: 18px auto 12px; }
+.language-view h1 { font-size: 38px; margin: 0 0 4px; }
+.language-view > p { margin-bottom: 12px; }
+.language-view > .dialog-error:empty { display: none; }
+.language-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-wrap: wrap; align-content: flex-start; padding: 4px; }
+.language-choice { position: relative; width: calc(33.333% - 12px); min-height: 74px; margin: 0 6px 12px; text-align: inherit; padding: 10px 15px; font-size: 22px; }
+.language-choice:focus { outline-width: 3px; }
+.language-choice-name, .language-device { display: block; }
+.language-device { color: #a9b0bd; font-size: 15px; }
+.language-choice[aria-pressed="true"] { border-color: #ff5264; box-shadow: inset 0 0 0 1px #ff5264; padding-right: 46px; }
+.language-choice[aria-pressed="true"]::after { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: #ff5264; content: '✓'; }
+.language-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.language-actions .button { min-width: 160px; min-height: 50px; margin: 0 4px; font-size: 18px; }
+.language-arrow { display: inline-block; margin: 0 8px; }
+[dir="rtl"] .language-arrow { transform: scaleX(-1); }
+[dir="rtl"] .language-choice[aria-pressed="true"] { padding-right: 15px; padding-left: 46px; }
+[dir="rtl"] .language-choice[aria-pressed="true"]::after { right: auto; left: 14px; }
 .profile-actions .button { margin: 10px; }
 .profile-cloud { display: block; width: 100%; max-width: 660px; margin: 24px auto 0; text-align: left; }
 .setup-view { overflow-y: auto; text-align: center; padding: 14px 12px 12px; }

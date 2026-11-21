@@ -27,7 +27,7 @@ async (page) => {
   await page.setViewportSize({width:1920,height:1080});
   await page.goto(origin);
   await page.locator('#language-view').waitFor({state:'visible'});
-  await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true}));
+  await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate(page.locator('#language-continue'));
   await activate('#add-profile');
   const input = modal().locator('input').first(); await activate(input); await input.fill('Guide performance'); await input.press('Escape');
   await activate(modal().getByRole('button',{name:'Save',exact:true}));

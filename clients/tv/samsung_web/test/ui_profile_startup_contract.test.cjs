@@ -10,7 +10,7 @@ const acorn = require('acorn');
 // Execute the shipped startup and selection handlers. Only the UI and query
 // boundaries are doubled; PIN authorization stays behind profiles.select.
 const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
-const names = ['routeAfterLanguage', 'selectExistingProfile'];
+const names = ['routeAfterLanguage', 'selectExistingProfile', 'refreshProfileListing'];
 const declarations = acorn.parse(source, {ecmaVersion:2022}).body[0].expression.callee.body.body;
 const handlers = declarations.filter(node => node.type === 'FunctionDeclaration' && names.includes(node.id.name))
   .map(node => source.slice(node.start,node.end)).join('\n');
@@ -90,4 +90,31 @@ test('a changed startup screen cannot receive a late automatic profile authoriza
   kit.selection.resolve({profile:{id:'remembered',locked:false}}); await kit.settle();
   assert.equal(kit.calls.some(call => call[0] === 'authorized'),false);
   assert.equal(kit.view.screen,'language');
+});
+
+test('resuming refreshes profile choices without changing playback or the selected source', async () => {
+  const kit=harness();
+  kit.env.dialogs=[];
+  kit.view.languageSelected=true;
+  kit.view.source={id:'playing-source'};
+  kit.view.player=true;
+  kit.env.array=value=>value || [];
+  kit.env.query=action=>{kit.calls.push([action]);return kit.selection.promise;};
+  const pending=kit.env.refreshProfileListing();
+  kit.selection.resolve({profiles:[{id:'new-cloud-profile'}],profile:null});
+  await pending;
+  assert.equal(kit.view.profiles[0].id,'new-cloud-profile');
+  assert.equal(kit.view.profile.id,'remembered');
+  assert.equal(kit.view.source.id,'playing-source');
+  assert.equal(kit.view.player,true);
+  assert.deepEqual(kit.calls,[['profiles.list']]);
+});
+
+test('a late profile list refresh cannot replace a newer profile selection', async () => {
+  const kit=harness();kit.env.dialogs=[];kit.env.array=value=>value || [];kit.view.languageSelected=true;
+  kit.env.query=()=>kit.selection.promise;
+  const pending=kit.env.refreshProfileListing();
+  kit.view.request++;kit.view.profiles=[{id:'newer'}];
+  kit.selection.resolve({profiles:[{id:'obsolete'}]});await pending;
+  assert.equal(kit.view.profiles[0].id,'newer');
 });

@@ -175,6 +175,8 @@ class HdrPlayerActivity : ComponentActivity() {
     private var startupDrawListener: ViewTreeObserver.OnPreDrawListener? = null
     private val startupChromeReady = mutableStateOf(false)
     private val startupWaitingForFrame = mutableStateOf(false)
+    private var episodeReplaced = false
+    private val showStartupLoader get() = startupWaitingForFrame.value && !episodeReplaced
     private var startupChromeDeadline: Job? = null
 
     // Live re-resolve round trip (see [withFreshLiveLocator]). The gate keeps
@@ -337,7 +339,7 @@ class HdrPlayerActivity : ComponentActivity() {
             finish()
             return
         }
-        if (startupWaitingForFrame.value) {
+        if (showStartupLoader) {
             finish()
             return
         }
@@ -676,7 +678,7 @@ class HdrPlayerActivity : ComponentActivity() {
                     callbacks = playerCallbacks(),
                     onVideoViewCreated = { logNative("startup video view created") },
                     chromeReady = startupChromeReady.value,
-                    showStartupLoader = startupWaitingForFrame.value,
+                    showStartupLoader = showStartupLoader,
                 )
                 if (firstComposition) {
                     logNative("startup compose body workMs=${SystemClock.elapsedRealtime() - compositionStartedAtMs}")
@@ -999,6 +1001,8 @@ class HdrPlayerActivity : ComponentActivity() {
         episodeSwitchPending = false
         selectedEpisodeId = null
         frameLiveness.reset()
+        // Report the new episode's first frame while keeping its controls available.
+        episodeReplaced = true
         startupWaitingForFrame.value = true
         engine?.updateHeaders(headers)
         configureAdaptiveBuffer(reset = true)
@@ -1933,6 +1937,7 @@ class HdrPlayerActivity : ComponentActivity() {
     /** Enters PiP if currently eligible; also invoked from a manual overlay button so entry
      *  doesn't depend solely on the OS calling [onUserLeaveHint] (inconsistent across OEMs). */
     private fun enterPip() {
+        if (!::uiState.isInitialized) return
         if (uiState.inPip || isFinishing || !uiState.isPlaying) return
         if (!supportsPip()) return
         try {

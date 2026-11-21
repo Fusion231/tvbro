@@ -139,7 +139,12 @@ class IptvApp extends StatelessWidget {
         // The picker itself decides whether to appear (startup-mode setting +
         // profile count) and silently short-circuits to HomeShell otherwise.
         home: AppLanguageController.instance.hasSelection
-            ? ProfilePickScreen(db: db, store: store, bootMode: true)
+            ? ProfilePickScreen(
+                key: ValueKey(AppLanguageController.instance.language),
+                db: db,
+                store: store,
+                bootMode: true,
+              )
             : const LanguageSelectionScreen(),
       ),
     );

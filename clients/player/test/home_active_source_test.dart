@@ -70,19 +70,20 @@ void main() {
       await initial.built.future.timeout(const Duration(seconds: 5));
     });
     await tester.runAsync(() => tester.pump());
-    final refresh = tester
+    final reloadSource = tester
         .widget<ChannelListScreen>(find.byType(ChannelListScreen))
-        .onRefreshSource!;
+        .onSourcePreferencesChanged!;
 
-    late Completer<SourceConfig?> staleRead;
-    Future<void>? staleLoad;
+    late final Completer<SourceConfig?> staleRead;
     await tester.runAsync(() async {
       staleRead = Completer<SourceConfig?>();
       store.nextRead = staleRead;
-      staleLoad = refresh();
+      reloadSource();
       await store.readStarted.future.timeout(const Duration(seconds: 5));
-      store.config = _TrackedConfig('Current');
-      await refresh();
+      final current = _TrackedConfig('Current');
+      store.config = current;
+      reloadSource();
+      await current.built.future.timeout(const Duration(seconds: 5));
     });
     await tester.runAsync(() => tester.pump());
     final currentRepository = tester
@@ -90,8 +91,9 @@ void main() {
         .repo;
 
     await tester.runAsync(() async {
-      staleRead.complete(initial);
-      await staleLoad;
+      final stale = _TrackedConfig('Stale');
+      staleRead.complete(stale);
+      await stale.disposed.future.timeout(const Duration(seconds: 5));
       final stream = await currentRepository.resolve(
         const Channel(id: 'channel', name: 'Fixture channel'),
       );
@@ -167,17 +169,19 @@ class _TrackedConfig extends SourceConfig {
     : super(id: 'demo', kind: SourceKind.demo, label: label, fields: const {});
 
   final built = Completer<void>();
+  final disposed = Completer<void>();
 
   @override
   Source build() {
     if (!built.isCompleted) built.complete();
-    return _TrackedSource(label);
+    return _TrackedSource(label, disposed);
   }
 }
 
 class _TrackedSource extends DemoSource {
-  _TrackedSource(String name) : super(displayName: name);
+  _TrackedSource(String name, this._closed) : super(displayName: name);
 
+  final Completer<void> _closed;
   bool _disposed = false;
 
   @override
@@ -192,5 +196,8 @@ class _TrackedSource extends DemoSource {
   }
 
   @override
-  Future<void> dispose() async => _disposed = true;
+  Future<void> dispose() async {
+    _disposed = true;
+    if (!_closed.isCompleted) _closed.complete();
+  }
 }

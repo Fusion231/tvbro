@@ -1014,6 +1014,36 @@ void main() {
     );
   }
 
+  focusTestWidgets(
+    'Back from movie details keeps the poster and scroll position',
+    (tester) async {
+      await pumpWideScreenWith(tester, _MenuMediaSource());
+      await openSection(tester, ContentKind.movie);
+      await pumpUntil(tester, find.text('movie 0'));
+      final media = tester.widget<MediaTabView>(find.byType(MediaTabView));
+      media.scrollController.jumpTo(
+        media.scrollController.position.maxScrollExtent / 2,
+      );
+      await settle(tester);
+      final poster = find.byType(MediaGridTile).hitTestable().first;
+      final focus = tester.widget<FocusableActionDetector>(
+        find.descendant(
+          of: poster,
+          matching: find.byType(FocusableActionDetector),
+        ),
+      ).focusNode;
+      final offset = media.scrollController.offset;
+      expect(offset, greaterThan(0));
+
+      await tester.tap(poster);
+      await pumpUntil(tester, find.byType(MediaDetailsSheet));
+      expect(find.byType(MediaDetailsSheet), findsOneWidget);
+      await back(tester);
+      expect(FocusManager.instance.primaryFocus, same(focus));
+      expect(media.scrollController.offset, closeTo(offset, 2));
+    },
+  );
+
   // ── Category sidebar: Down wraps, Up escapes (the "stuck" fix) ─────────────
 
   focusTestWidgets(

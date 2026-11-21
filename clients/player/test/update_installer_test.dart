@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/update_installer.dart';
 import 'package:iptvs/data/update_manifest.dart';
@@ -96,13 +97,65 @@ void main() {
   });
 
   test(
-    'install permission request waits for and returns native result',
+    'a truncated download leaves no cache file and can be retried',
     () async {
+      final cache = await Directory.systemTemp.createTemp(
+        'tvbro-download-test-',
+      );
+      addTearDown(() => cache.delete(recursive: true));
+      const paths = MethodChannel('plugins.flutter.io/path_provider');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(paths, (_) async => cache.path);
+      addTearDown(() => messenger.setMockMethodCallHandler(paths, null));
+
+      const bytes = [1, 2, 3, 4, 5];
+      final artifact = ReleaseArtifact(
+        platform: 'android',
+        filename: _artifact.filename,
+        byteSize: bytes.length,
+        sha256: sha256.convert(bytes).toString(),
+      );
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var truncated = true;
+      server.listen((request) async {
+        request.response.add(truncated ? bytes.take(2).toList() : bytes);
+        await request.response.close();
+      });
+      final local = Uri.http('127.0.0.1:${server.port}');
+      final installer = UpdateInstaller(http: _LocalUpdateHttp(local));
+      addTearDown(installer.close);
+      final release = Uri.https(
+        'github.com',
+        '/Fusion231/tvbro/releases/download/v1.4.2/${artifact.filename}',
+      );
+
+      await expectLater(
+        installer.download(release, artifact),
+        throwsA(isA<FormatException>()),
+      );
+      expect(await cache.list().toList(), isEmpty);
+
+      truncated = false;
+      final downloaded = await installer.download(release, artifact);
+      expect(await downloaded.readAsBytes(), bytes);
+      await validateCachedArtifact(downloaded, artifact, tempDirectory: cache);
+    },
+  );
+
+  for (final granted in [true, false]) {
+    testWidgets('reads install permission on return (granted: $granted)', (
+      tester,
+    ) async {
       const channel = MethodChannel('iptvs/updates');
+      final calls = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (call) async {
-            expect(call.method, 'requestInstallPermission');
-            return true;
+            calls.add(call.method);
+            if (call.method == 'canInstallApks') return granted;
+            // Android Settings opens a page without a permission result.
+            return null;
           });
       addTearDown(
         () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -111,9 +164,36 @@ void main() {
       final installer = UpdateInstaller();
       addTearDown(installer.close);
 
-      expect(await installer.requestInstallPermission(), isTrue);
-    },
-  );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      final permission = installer.requestInstallPermission();
+      await tester.pump();
+      expect(calls, ['openInstallPermissionSettings']);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+
+      expect(await permission, granted);
+      expect(calls, ['openInstallPermissionSettings', 'canInstallApks']);
+    });
+  }
+
+  test('reports an unavailable browser as a failed release handoff', () async {
+    const channel = MethodChannel('plugins.flutter.io/url_launcher');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (_) async => false);
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final installer = UpdateInstaller();
+    addTearDown(installer.close);
+
+    await expectLater(
+      installer.openReleasePage(
+        Uri.parse('https://github.com/Fusion231/tvbro/releases/tag/v1.5.0'),
+      ),
+      throwsStateError,
+    );
+  });
 
   group('Windows update script', () {
     final script = windowsUpdateScript(
@@ -206,3 +286,18 @@ void main() {
     });
   });
 }
+
+class _LocalUpdateHttp extends Fake implements HttpClient {
+  _LocalUpdateHttp(this.destination);
+
+  final Uri destination;
+  final _client = _LocalNetworkOverrides().createHttpClient(null);
+
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) => _client.getUrl(destination);
+
+  @override
+  void close({bool force = false}) => _client.close(force: force);
+}
+
+class _LocalNetworkOverrides extends HttpOverrides {}

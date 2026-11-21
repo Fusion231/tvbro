@@ -201,6 +201,7 @@ Future<void> main(List<String> args) async {
     'lib/data/tvdb_client.dart',
     'lib/data/mdblist_client.dart',
     'lib/data/tvmaze_client.dart',
+    'lib/data/wikimedia_client.dart',
   ]) {
     declarations(relative, null);
   }
@@ -275,11 +276,12 @@ Future<void> main(List<String> args) async {
   declarations('lib/data/cloud_config.dart', {'CloudConfig', 'panelAccountLink', 'panelUrlForChannel', 'isConfiguredApiUrl', 'isConfiguredPanelUrl', 'pairingPanelLink'});
   // Locale is a Flutter value at this boundary; translations and supported
   // language definitions below remain the application's original Dart.
-  generated.writeln('class Locale { final String languageCode; const Locale(this.languageCode); }');
+  generated.writeln('class Locale { final String languageCode; const Locale(this.languageCode); const Locale.fromSubtags({required this.languageCode, String? countryCode, String? scriptCode}); }');
   declarations('lib/l10n/app_language.dart', {'AppLanguage'});
   for (final file in ['messages_browsing.dart', 'messages_settings.dart', 'messages_player.dart', 'messages_onboarding.dart']) {
     declarations('lib/l10n/$file', null);
   }
+  declarations('lib/l10n/international_messages.dart', {'internationalMessages'});
   declarations('lib/l10n/app_localizations.dart', {'polishMessages', 'translate'});
   declarations(repository, {'LibrarySnapshot'});
   final repositoryClass = (unit(repository).unit as CompilationUnit).declarations.whereType<ClassDeclaration>()
@@ -405,6 +407,7 @@ Future<void> main(List<String> args) async {
 }
 
 const imports = '''
+import 'canonical.media_presentation.dart' show MediaInfo;
 // Generated from owner AST declarations. Do not hand-edit business rules.
 import 'dart:async';
 import 'dart:convert';

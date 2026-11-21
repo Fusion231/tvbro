@@ -71,7 +71,6 @@ class ProfileSetupChoices extends StatelessWidget {
                 style: const TextStyle(color: AppColors.textLo),
               ),
               const SizedBox(height: 28),
-              const BootAutostartSetting(),
               FocusTraversalGroup(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -140,6 +139,7 @@ class ProfileSetupChoices extends StatelessWidget {
                   ],
                 ),
               ),
+              const BootAutostartSetting(),
             ],
           ),
         ),

@@ -23,6 +23,19 @@ function fixture(files) {
   return {api,calls,options,environment,documentEvents,events,enable:()=>{enabled=true;},rejectGuide:failure=>{guideFailure=failure;}};
 }
 
+for (const [code,tag] of [['list','LISTA'],['read','ODCZYT'],['write','ZAPIS']]) {
+  test('native secure storage '+code+' failures retain a safe visible diagnostic',async()=>{
+    const kit=fixture();
+    kit.rejectGuide({name:'UnknownError',code:'secure_store_'+code+'_failed',message:'private-provider-secret'});
+    await assert.rejects(kit.api.query('guide'),failure=>{
+      assert.equal(failure.name,'UnknownError');
+      assert.ok(failure.message.includes('[PAMIĘĆ:'+tag+']'));
+      assert.doesNotMatch(failure.message,/private-provider-secret/);
+      return true;
+    });
+  });
+}
+
 for(const deferred of [false,true]) test('oversized M3U guide gives the source-settings remedy even during its retry wait: '+deferred,async()=>{
   const kit=fixture();kit.rejectGuide({code:deferred?'epg_retry_deferred':'epg_size_limit',causeCode:'epg_size_limit',retryAt:Date.now()+900000});
   await assert.rejects(kit.api.query('guide'),failure=>{

@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/app_database.dart';
+import 'package:iptvs/data/device_class.dart';
 import 'package:iptvs/data/local_profile_store.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
@@ -92,6 +94,37 @@ void main() {
     );
     await pumpUntil(tester, find.text('Set up Kids'));
   }
+
+  testWidgets('TV welcome shows demo before autostart permission', (
+    tester,
+  ) async {
+    const device = MethodChannel('iptvs/device');
+    debugIsTelevision = true;
+    tester.view.physicalSize = const Size(960, 540);
+    tester.view.devicePixelRatio = 1;
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(device, (call) async {
+      if (call.method != 'getBootAutostart') throw MissingPluginException();
+      return {'enabled': true, 'permissionRequired': true};
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(device, null);
+      debugIsTelevision = false;
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HomeShell(db: db, store: sourceStore),
+      ),
+    );
+    await pumpUntil(tester, find.text('Allow autostart'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add a source').hitTestable(), findsOneWidget);
+    expect(find.text('Use demo streams').hitTestable(), findsOneWidget);
+  });
 
   testWidgets(
     'canceled setup resumes in Home and Demo is saved only to that profile',

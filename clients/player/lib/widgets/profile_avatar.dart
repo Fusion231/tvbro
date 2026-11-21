@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../l10n/app_localizations.dart';
+import '../theme.dart';
 
 /// Cycling avatar palette shared by the boot-time profile picker and the
 /// channel list's AppBar avatar.
@@ -27,8 +28,6 @@ int profileColorIndexFor(String id) {
   return h % kProfileAvatarColors.length;
 }
 
-enum _ProfileMenuAction { changeProfile, profileSettings }
-
 /// The AppBar avatar: the active profile's initial in its colour, opening a
 /// dropdown with "Change profile" and (when wired) "Profile settings".
 class ProfileAvatarButton extends StatelessWidget {
@@ -47,62 +46,80 @@ class ProfileAvatarButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final name = (profileName?.isNotEmpty == true) ? profileName! : null;
+    final name = profileName?.isNotEmpty == true ? profileName : null;
     final initial = name != null ? name[0].toUpperCase() : null;
     final color = profileAvatarColor(colorIndex);
 
-    return PopupMenuButton<_ProfileMenuAction>(
+    return PopupMenuButton<VoidCallback>(
       tooltip: name ?? tr('Profile'),
       offset: const Offset(0, 48),
-      onSelected: (action) {
-        switch (action) {
-          case _ProfileMenuAction.changeProfile:
-            onChangeProfile?.call();
-          case _ProfileMenuAction.profileSettings:
-            onProfileSettings?.call();
-        }
-      },
+      padding: EdgeInsets.zero,
+      style: AppTheme.textButtonTheme.style!.copyWith(
+        padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+      ),
+      onSelected: (action) => action(),
       itemBuilder: (_) => [
-        if (onChangeProfile != null)
-          PopupMenuItem(
-            value: _ProfileMenuAction.changeProfile,
-            child: Row(
-              children: [
-                const Icon(Icons.switch_account_outlined, size: 18),
-                const SizedBox(width: 10),
-                Text(tr('Change profile')),
-              ],
-            ),
+        if (onChangeProfile case final change?)
+          _ProfileMenuItem(
+            autofocus: true,
+            value: change,
+            icon: Icons.switch_account_outlined,
+            label: tr('Change profile'),
           ),
-        if (onProfileSettings != null)
-          PopupMenuItem(
-            value: _ProfileMenuAction.profileSettings,
-            child: Row(
-              children: [
-                const Icon(Icons.cloud_sync_outlined, size: 18),
-                const SizedBox(width: 10),
-                Text(tr('TVBro account')),
-              ],
-            ),
+        if (onProfileSettings case final settings?)
+          _ProfileMenuItem(
+            autofocus: onChangeProfile == null,
+            value: settings,
+            icon: Icons.cloud_sync_outlined,
+            label: tr('TVBro account'),
           ),
       ],
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: CircleAvatar(
-          radius: 16,
-          backgroundColor: color,
-          child: initial != null
-              ? Text(
-                  initial,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                  ),
-                )
-              : const Icon(Icons.person_outline, color: Colors.white, size: 18),
-        ),
+      icon: CircleAvatar(
+        radius: 16,
+        backgroundColor: color,
+        child: initial != null
+            ? Text(
+                initial,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              )
+            : const Icon(Icons.person_outline, color: Colors.white, size: 18),
       ),
     );
   }
+}
+
+class _ProfileMenuItem extends PopupMenuItem<VoidCallback> {
+  final bool autofocus;
+  final IconData icon;
+  final String label;
+
+  const _ProfileMenuItem({
+    required this.autofocus,
+    required this.icon,
+    required this.label,
+    required super.value,
+  }) : super(child: null);
+
+  @override
+  PopupMenuItemState<VoidCallback, _ProfileMenuItem> createState() =>
+      _ProfileMenuItemState();
+}
+
+class _ProfileMenuItemState
+    extends PopupMenuItemState<VoidCallback, _ProfileMenuItem> {
+  @override
+  Widget build(BuildContext context) => TextButton.icon(
+    autofocus: widget.autofocus,
+    onPressed: handleTap,
+    style: AppTheme.textButtonTheme.style!.copyWith(
+      alignment: AlignmentDirectional.centerStart,
+      minimumSize: const WidgetStatePropertyAll(Size(0, 48)),
+    ),
+    icon: Icon(widget.icon, size: 18),
+    label: Text(widget.label),
+  );
 }

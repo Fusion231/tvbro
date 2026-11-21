@@ -81,6 +81,11 @@ android {
         }
     }
 
+    sourceSets {
+        getByName("development").java.srcDir("src/nonPlay/kotlin")
+        getByName("githubDirect").java.srcDir("src/nonPlay/kotlin")
+    }
+
     signingConfigs {
         // This fixed public key is for explicitly non-distributable debug builds.
         // Release builds never fall back to it.
@@ -139,6 +144,7 @@ flutter {
 }
 
 dependencies {
+    add("googlePlayImplementation", "com.android.billingclient:billing:8.3.0")
     // Declared explicitly because this module imports it directly — FileProvider
     // (`MainActivity`) and the WindowCompat/WindowInsetsControllerCompat edge-to-edge
     // APIs (`HdrPlayerActivity`). It also arrives transitively via media3/activity/
@@ -158,6 +164,7 @@ dependencies {
     // compositor switching the panel into HDR — something mpv's GL render path can't
     // do on Android.
     implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-exoplayer-dash:1.11.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
 

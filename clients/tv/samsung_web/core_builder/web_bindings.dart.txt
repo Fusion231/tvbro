@@ -10,7 +10,7 @@ class HttpStatus {
 class HttpHeaders {
   static const userAgentHeader='user-agent', acceptHeader='accept',
     cookieHeader='cookie', refererHeader='referer', authorizationHeader='authorization',
-    contentEncodingHeader='content-encoding';
+    contentEncodingHeader='content-encoding', retryAfterHeader='retry-after';
   final Map<String,String> _values;
   HttpHeaders(Map<String,String> values) : _values={for(final e in values.entries)e.key.toLowerCase():e.value};
   String? value(String name) => _values[name.toLowerCase()];

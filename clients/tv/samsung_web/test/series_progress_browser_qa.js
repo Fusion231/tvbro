@@ -78,7 +78,7 @@ async (page) => {
   await page.setViewportSize({width:1280,height:720});
   await page.goto(origin);
   await page.locator('#language-view').waitFor({state:'visible'});
-  await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true}));
+  await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate(page.locator('#language-continue'));
   await page.locator('#profiles-view').waitFor({state:'visible'});
   await activate('#add-profile'); await edit(modal().locator('input').first(),'Series progress QA');
   await activate(modal().getByRole('button',{name:'Save',exact:true}));

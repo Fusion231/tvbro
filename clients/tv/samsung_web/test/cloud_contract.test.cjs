@@ -294,14 +294,14 @@ test('pairing.start creates and stores an anonymous session only after the expli
     }]};
   });
   assert.equal(kit.api.hasSession(), false);
-  const pairing = await kit.api.query('pairing.start', {label:'Living room', language:'pl'});
+  const pairing = await kit.api.query('pairing.start', {label:'Living room', language:'pt-br'});
   assert.equal(pairing.code, 'ABCD2345');
-  assert.equal(pairing.panelLink, 'https://panel.tvbro.test/?code=ABCD2345&lang=pl');
+  assert.equal(pairing.panelLink, 'https://panel.tvbro.test/?code=ABCD2345&lang=pt-br');
   assert.equal(kit.calls.length, 2);
   assert.equal(kit.calls[0].method, 'POST');
   assert.equal(kit.calls[0].url.endsWith('/auth/v1/signup'), true);
   assert.deepEqual(kit.calls[0].body, {data:{}});
-  assert.deepEqual(kit.calls[1].body, {p_label:'Living room', p_language:'pl'});
+  assert.deepEqual(kit.calls[1].body, {p_label:'Living room', p_language:'pt-br'});
   assert.equal(kit.calls[1].headers.authorization, 'Bearer new-access');
   assert.equal(JSON.parse(kit.state.get('supabase_session')).user.id, deviceId);
   assert.equal(kit.state.reload().get('supabase_session'), kit.state.get('supabase_session'));

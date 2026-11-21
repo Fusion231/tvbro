@@ -884,7 +884,7 @@ class CloudSync {
           .maybeSingle();
       final pid = row?['active_profile_id'] as String?;
       if (pid != null) {
-        if (cacheResult) await _storage.write(key: _kProfileId, value: pid);
+        if (cacheResult) await cacheActiveProfileId(pid);
         return pid;
       }
     }
@@ -899,6 +899,9 @@ class CloudSync {
   /// reads this instead.
   Future<String?> cachedProfileId() => readCachedProfileId(storage: _storage);
 
+  Future<void> cacheActiveProfileId(String profileId) =>
+      _storage.write(key: _kProfileId, value: profileId);
+
   /// Storage-only access for offline consumers that do not need an SDK/session.
   static Future<String?> readCachedProfileId({
     FlutterSecureStorage storage = const FlutterSecureStorage(),
@@ -911,7 +914,7 @@ class CloudSync {
       'set_device_profile',
       params: {'p_profile_id': profileId},
     );
-    await _storage.write(key: _kProfileId, value: profileId);
+    await cacheActiveProfileId(profileId);
   }
 
   /// Notifications carry no credentials and are scoped by the existing profile

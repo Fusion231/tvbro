@@ -1,4 +1,7 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../l10n/app_localizations.dart';
 import '../sources/source.dart';
@@ -94,14 +97,21 @@ class LibraryHomeView extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        tr('What would you like to watch?'),
-                        style: TextStyle(
-                          color: AppColors.textHi,
-                          fontSize: wide ? 26 : 22,
-                          fontWeight: FontWeight.w600,
-                          height: 1.2,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              tr('What would you like to watch?'),
+                              style: TextStyle(
+                                color: AppColors.textHi,
+                                fontSize: wide ? 26 : 22,
+                                fontWeight: FontWeight.w600,
+                                height: 1.2,
+                              ),
+                            ),
+                          ),
+                          if (Platform.isAndroid) const HomeNetworkStatus(),
+                        ],
                       ),
                       const SizedBox(height: 16),
                       FocusTraversalGroup(
@@ -232,4 +242,70 @@ class LibraryHomeView extends StatelessWidget {
       ),
     );
   }
+}
+
+class HomeNetworkStatus extends StatelessWidget {
+  const HomeNetworkStatus({super.key});
+
+  static final _status = const EventChannel('iptvs/network_status')
+      .receiveBroadcastStream()
+      .distinct();
+
+  Future<void> _openSettings(BuildContext context) async {
+    try {
+      final opened = await const MethodChannel('iptvs/device')
+          .invokeMethod<bool>('openNetworkSettings');
+      if (opened == true) return;
+    } on PlatformException {
+      // Some TV firmware does not expose its network settings to apps.
+    } on MissingPluginException {
+      // The home widget can also run without an Android host in previews.
+    }
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            tr('Open network settings from the Android home screen.'),
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder(
+    stream: _status,
+    builder: (context, snapshot) {
+      final (label, icon) = switch (snapshot.data) {
+        'wifi' => ('Wi-Fi', Icons.wifi),
+        'ethernet' => ('Ethernet', Icons.lan_outlined),
+        'online' => (tr('Online'), Icons.language),
+        'offline' => (tr('No internet'), Icons.wifi_off),
+        _ => (null, null),
+      };
+      if (label == null) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsetsDirectional.only(start: 12),
+        child: Tooltip(
+          message: tr('Network settings'),
+          child: TextButton.icon(
+            onPressed: () => _openSettings(context),
+            style: AppTheme.textButtonTheme.style!.copyWith(
+              padding: const WidgetStatePropertyAll(
+                EdgeInsets.symmetric(horizontal: 10),
+              ),
+            ),
+            icon: Icon(
+              icon,
+              size: 16,
+              color: snapshot.data == 'offline'
+                  ? AppColors.warning
+                  : AppColors.success,
+            ),
+            label: Text(label, style: const TextStyle(fontSize: 12)),
+          ),
+        ),
+      );
+    },
+  );
 }

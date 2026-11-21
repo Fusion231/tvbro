@@ -27,6 +27,7 @@ import '../widgets/tv_text_field.dart';
 import 'backup_screen.dart';
 import 'cloud_sync_screen.dart';
 import 'diagnostics_screen.dart';
+import 'language_selection_screen.dart';
 import 'legal_screen.dart';
 import 'profile_pick_screen.dart';
 import 'source_settings_screen.dart';
@@ -63,7 +64,7 @@ Future<bool?> showAppSettingsPanel({
       alignment: Alignment.centerRight,
       child: SizedBox(
         key: const ValueKey('app-settings-panel'),
-        width: width < 720 ? width : 480,
+        width: width < 600 ? width : 408,
         height: double.infinity,
         child: _AppSettingsScreen(
           store: store,
@@ -374,18 +375,29 @@ class _AppSettingsScreen extends StatelessWidget {
     centerOnFocus: false,
     onTap: onTap,
     child: ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      leading: Icon(icon, color: AppColors.textLo),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+      minTileHeight: subtitle == null ? 44 : 52,
+      minVerticalPadding: 4,
+      horizontalTitleGap: 12,
+      minLeadingWidth: 22,
+      leading: Icon(icon, size: 20, color: AppColors.textLo),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
       subtitle: subtitle == null
           ? null
-          : Text(subtitle, style: const TextStyle(color: AppColors.textLo)),
-      trailing: const Icon(Icons.chevron_right, color: AppColors.textLo),
+          : Text(
+              subtitle,
+              style: const TextStyle(fontSize: 12, color: AppColors.textLo),
+            ),
+      trailing: const Icon(
+        Icons.chevron_right,
+        size: 18,
+        color: AppColors.textLo,
+      ),
     ),
   );
 
   Widget _section(String title) => Padding(
-    padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
+    padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
     child: Text(
       tr(title),
       style: const TextStyle(
@@ -403,6 +415,7 @@ class _AppSettingsScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: AppColors.ink,
       appBar: AppBar(
+        toolbarHeight: 48,
         leading: BackButton(onPressed: () => Navigator.of(context).pop()),
         title: Text(tr('Settings')),
         backgroundColor: AppColors.ink,
@@ -412,114 +425,151 @@ class _AppSettingsScreen extends StatelessWidget {
       body: SafeArea(
         top: false,
         child: FocusTraversalGroup(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-            children: [
-              if (hasAutostart) ...[
-                _section('Startup'),
-                Material(
-                  color: AppColors.panel,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.tile),
-                    side: const BorderSide(color: AppColors.line),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: const BootAutostartSetting(autofocus: true),
-                ),
-              ],
-              if (onSourceSettings != null || onEpgMapping != null)
-                _section('Channels & EPG'),
-              if (onSourceSettings case final open?)
-                _link(
-                  autofocus: !hasAutostart,
-                  title: tr('Source settings'),
-                  subtitle: tr('Channels, groups and playback'),
-                  icon: Icons.tune,
-                  onTap: open,
-                ),
-              if (onEpgMapping case final open?)
-                _link(
-                  autofocus: !hasAutostart && onSourceSettings == null,
-                  title: tr('EPG mapping'),
-                  subtitle: tr('Match guide data and correct programme times'),
-                  icon: Icons.event_note_outlined,
-                  onTap: open,
-                ),
-              _section('Profiles & data'),
-              _link(
-                autofocus:
-                    !hasAutostart &&
-                    onSourceSettings == null &&
-                    onEpgMapping == null,
-                title: tr('Profiles'),
-                icon: Icons.switch_account_outlined,
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (ctx) => ProfilePickScreen(
-                      db: db,
-                      store: store,
-                      onDone: () => Navigator.of(ctx).pop(),
-                    ),
-                  ),
-                ),
-              ),
-              if (CloudConfig.isConfigured)
-                _link(
-                  title: tr('Cloud sync'),
-                  icon: Icons.cloud_sync_outlined,
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => CloudSyncScreen(store: store, db: db),
-                    ),
-                  ),
-                ),
-              _link(
-                title: tr('Backup & restore'),
-                subtitle: tr('Save or restore an encrypted backup file'),
-                icon: Icons.backup_outlined,
-                onTap: () => _openBackup(context),
-              ),
-              _section('Help & updates'),
-              if (DistributionConfig.updateEntryEnabled) const _UpdateCard(),
-              _link(
-                title: tr('Diagnostics'),
-                icon: Icons.receipt_long_outlined,
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
-                ),
-              ),
-              _link(
-                title: tr('Privacy & support'),
-                icon: Icons.info_outline,
-                onTap: () => Navigator.of(
-                  context,
-                ).push(MaterialPageRoute(builder: (_) => const LegalScreen())),
-              ),
-              const SizedBox(height: 20),
-              ExpansionTile(
-                shape: const Border(),
-                collapsedShape: const Border(),
-                title: Text(tr('Advanced settings')),
-                leading: const Icon(Icons.tune, color: AppColors.textLo),
-                childrenPadding: const EdgeInsets.only(top: 4),
+          // Keep every settings row mounted so the remote can focus past the viewport.
+          child: Scrollbar(
+            thumbVisibility: isTelevision,
+            child: SingleChildScrollView(
+              primary: true,
+              padding: const EdgeInsets.fromLTRB(14, 4, 14, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  if (hasAutostart) ...[
+                    _section('Startup'),
+                    Material(
+                      color: AppColors.panel,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.tile),
+                        side: const BorderSide(color: AppColors.line),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: const BootAutostartSetting(autofocus: true),
+                    ),
+                  ],
+                  if (onSourceSettings != null || onEpgMapping != null)
+                    _section('Channels & EPG'),
+                  if (onSourceSettings case final open?)
+                    _link(
+                      autofocus: !hasAutostart,
+                      title: tr('Source settings'),
+                      subtitle: tr('Channels, groups and playback'),
+                      icon: Icons.tune,
+                      onTap: open,
+                    ),
+                  if (onEpgMapping case final open?)
+                    _link(
+                      autofocus: !hasAutostart && onSourceSettings == null,
+                      title: tr('EPG mapping'),
+                      subtitle: tr(
+                        'Match guide data and correct programme times',
+                      ),
+                      icon: Icons.event_note_outlined,
+                      onTap: open,
+                    ),
                   _link(
-                    title: tr('Metadata'),
-                    subtitle: tr('Posters, ratings and descriptions'),
-                    icon: Icons.auto_awesome_outlined,
+                    title: tr('Language'),
+                    subtitle: AppLanguageController.instance.language.name,
+                    icon: Icons.language,
+                    onTap: () {
+                      final navigator = Navigator.of(context);
+                      final previous = AppLanguageController.instance.language;
+                      navigator.push(
+                        MaterialPageRoute(
+                          builder: (_) => LanguageSelectionScreen(
+                            onConfirmed: () {
+                              if (AppLanguageController.instance.language == previous) {
+                                navigator.pop();
+                              } else {
+                                navigator.popUntil((route) => route.isFirst);
+                              }
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  _section('Profiles & data'),
+                  _link(
+                    autofocus:
+                        !hasAutostart &&
+                        onSourceSettings == null &&
+                        onEpgMapping == null,
+                    title: tr('Profiles'),
+                    icon: Icons.switch_account_outlined,
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) =>
-                            MetadataSettingsScreen(store: store, db: db),
+                        builder: (ctx) => ProfilePickScreen(
+                          db: db,
+                          store: store,
+                          onDone: () => Navigator.of(ctx).pop(),
+                        ),
                       ),
                     ),
                   ),
-                  const _PickerStartupCard(),
-                  if (DistributionConfig.directUpdaterEnabled)
-                    const _UpdateTrackCard(),
+                  if (CloudConfig.isConfigured)
+                    _link(
+                      title: tr('Cloud sync'),
+                      icon: Icons.cloud_sync_outlined,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => CloudSyncScreen(store: store, db: db),
+                        ),
+                      ),
+                    ),
+                  _link(
+                    title: tr('Backup & restore'),
+                    subtitle: tr('Save or restore an encrypted backup file'),
+                    icon: Icons.backup_outlined,
+                    onTap: () => _openBackup(context),
+                  ),
+                  _section('Help & updates'),
+                  if (DistributionConfig.updateEntryEnabled)
+                    const _UpdateCard(),
+                  _link(
+                    title: tr('Diagnostics'),
+                    icon: Icons.receipt_long_outlined,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const DiagnosticsScreen(),
+                      ),
+                    ),
+                  ),
+                  _link(
+                    title: tr('Privacy & support'),
+                    icon: Icons.info_outline,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const LegalScreen()),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ExpansionTile(
+                    tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+                    minTileHeight: 44,
+                    shape: const Border(),
+                    collapsedShape: const Border(),
+                    title: Text(tr('Advanced settings')),
+                    leading: const Icon(Icons.tune, color: AppColors.textLo),
+                    childrenPadding: const EdgeInsets.only(top: 4),
+                    children: [
+                      _link(
+                        title: tr('Metadata'),
+                        subtitle: tr('Posters, ratings and descriptions'),
+                        icon: Icons.auto_awesome_outlined,
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                MetadataSettingsScreen(store: store, db: db),
+                          ),
+                        ),
+                      ),
+                      const _PickerStartupCard(),
+                      if (DistributionConfig.directUpdaterEnabled)
+                        const _UpdateTrackCard(),
+                    ],
+                  ),
                 ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -1504,7 +1554,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                     children: [
                       Text(
                         tr(
-                          'TVmaze supplies series descriptions for everyone, free and without an API key. TMDB and TheTVDB are optional; TheTVDB also supports movies and requires a project API key.',
+                          'Wikidata and Wikipedia can fill gaps when you open a movie. TVmaze supplies series descriptions. These sources work without an API key.',
                         ),
                         style: TextStyle(color: AppColors.textLo),
                       ),
@@ -1666,7 +1716,7 @@ class _PickerStartupCardState extends State<_PickerStartupCard> {
   String get _hint => switch (_mode) {
     ProfilePickerStartup.always => tr('Shown on every launch'),
     ProfilePickerStartup.off => tr('Never shown at startup'),
-    _ => tr('Shown when more than one profile exists'),
+    _ => tr('Resume the last profile'),
   };
 
   @override

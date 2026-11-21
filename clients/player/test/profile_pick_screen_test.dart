@@ -120,6 +120,59 @@ void main() {
       return done;
     }
 
+    testWidgets('boot opens the last selected profile with several profiles', (
+      tester,
+    ) async {
+      final store = SourceStore();
+      await localStore.createProfile('First', 0, snapshot: snap('first'));
+      final last = await localStore.createProfile(
+        'Last',
+        1,
+        snapshot: snap('last'),
+      );
+      await localStore.setActive(last.id);
+      await store.setAll([cfg('last')]);
+      await store.setActive('last');
+
+      expect(await pumpPicker(tester, store: store, bootMode: true), isTrue);
+      expect(await localStore.activeId(), last.id);
+      expect(await store.activeId(), 'last');
+    });
+
+    testWidgets('picker shows the focused profile in touch highlight mode', (
+      tester,
+    ) async {
+      final focusManager = FocusManager.instance;
+      final previous = focusManager.highlightStrategy;
+      focusManager.highlightStrategy = FocusHighlightStrategy.alwaysTouch;
+      addTearDown(() => focusManager.highlightStrategy = previous);
+      await localStore.createProfile('First', 0);
+      await localStore.createProfile('Second', 1);
+      await pumpPicker(tester, store: SourceStore());
+
+      Color ring(String name) {
+        final tile = find
+            .ancestor(
+              of: find.text(name),
+              matching: find.byType(FocusableActionDetector),
+            )
+            .first;
+        final avatar = find
+            .descendant(of: tile, matching: find.byType(AnimatedContainer))
+            .first;
+        final decoration =
+            tester.widget<AnimatedContainer>(avatar).decoration!
+                as BoxDecoration;
+        return (decoration.border! as Border).top.color;
+      }
+
+      expect(ring('First'), Colors.white);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pumpAndSettle();
+      expect(ring('Second'), Colors.white);
+      expect(ring('First'), isNot(Colors.white));
+    });
+
     testWidgets('cloud download opens onboarding and finishes directly', (
       tester,
     ) async {
@@ -927,6 +980,22 @@ void main() {
       await tester.tap(find.widgetWithText(FilledButton, 'Create'));
       await pumpFor(tester);
     }
+
+    testWidgets('blank profile name keeps the dialog open for correction', (
+      tester,
+    ) async {
+      await localStore.createProfile('Existing', 0, snapshot: snap('source'));
+      await pumpPicker(tester, store: SourceStore());
+      await createProfileFromPicker(tester, '   ');
+      expect(find.text('New profile'), findsOneWidget);
+      expect(find.text('Profile name is required'), findsOneWidget);
+      expect(await localStore.loadAll(), hasLength(1));
+      await tester.enterText(find.byType(TextField).last, '  News  ');
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await pumpFor(tester);
+      expect(find.text('Set up News'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
 
     testWidgets('new profile can choose Demo without inheriting old sources', (
       tester,

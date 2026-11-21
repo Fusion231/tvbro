@@ -148,16 +148,25 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed &&
-        _cloudLoadFailed &&
         (ModalRoute.of(context)?.isCurrent ?? false)) {
-      _reload();
+      _reload(preserveListing: true);
     }
   }
 
-  Future<void> _reload() async {
-    if (!mounted || _checking || _busy || _leaving) return;
+  Future<void> _reload({bool preserveListing = false}) async {
+    if (!mounted ||
+        _checking ||
+        _busy ||
+        _leaving ||
+        (preserveListing && _refreshingCloud)) {
+      return;
+    }
     final generation = _refreshGeneration;
-    await _check(cachedOnly: true, generation: generation);
+    // Resuming keeps a successful listing visible while checking the cloud.
+    // Local edits and failed-read recovery still reload cached profiles first.
+    if (!preserveListing || _cloudLoadFailed) {
+      await _check(cachedOnly: true, generation: generation);
+    }
     if (_canRefresh(generation)) await _refreshCloud();
   }
 
@@ -179,7 +188,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
     }
     _refreshingCloud = true;
     try {
-      await _check(generation: _refreshGeneration);
+      await _check(checkStartup: _checking, generation: _refreshGeneration);
     } finally {
       _refreshingCloud = false;
     }
@@ -198,7 +207,6 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
     bool isPaired = false;
     bool pairingKnown = false;
     bool cloudListed = false;
-    bool cachedIdentityUnavailable = false;
     String? cloudActiveId;
     String? cloudError;
     final sync = _sync;
@@ -209,7 +217,6 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
         cloudActiveId =
             await (sync?.cachedProfileId() ?? CloudSync.readCachedProfileId());
       } catch (e) {
-        cachedIdentityUnavailable = true;
         cloudError = tr(friendlyCloudError(e));
       }
     } else if (sync != null) {
@@ -408,30 +415,43 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
     final lockedBoot =
         widget.bootMode &&
         ((activeEntry?.locked ?? false) ||
-            (cachedIdentityUnavailable &&
-                localActiveId == null &&
-                cachedLocks.isNotEmpty));
+            (activeEntry == null &&
+                cachedLocks.isNotEmpty &&
+                !(pairingKnown && !isPaired)));
 
     if (widget.bootMode && checkStartup) {
       final mode = await _localStore.pickerStartup();
       if (!isCurrent()) return;
-      if (!shouldShowPickerAtStartup(
-        mode,
-        entries.length,
-        activeProfileLocked: lockedBoot,
-        // Nothing owns the device state — the active profile was deleted and
-        // the live store is the empty baseline. Booting past this screen would
-        // load an empty library that no restart can fix, because the picker is
-        // the only thing that restores a snapshot and with one profile left
-        // `auto` never opens it again.
-        //
-        // Read from the mark, not from `activeId`: a device that is merely
-        // *offline* can't fetch its cloud profile list, and its store
-        // does still hold that profile's sources. Inferring ownership from the
-        // entry list would put "Who's watching?" in front of that user on
-        // every launch with no network.
-        hasActiveProfile: !ownerless,
-      )) {
+      // Give a paired device one bounded lookup before showing an empty picker.
+      if (cachedOnly &&
+          entries.isEmpty &&
+          !ownerless &&
+          sync?.hasSession == true) {
+        return;
+      }
+      if (cloudListed && activeEntry?.isCloud == true) {
+        try {
+          await sync!.cacheActiveProfileId(activeEntry!.id);
+        } catch (_) {
+          // The recovered profile can still open if the cache is unavailable.
+        }
+        if (!isCurrent()) return;
+      }
+      final resumeSavedLibrary =
+          mode == ProfilePickerStartup.auto &&
+          entries.isEmpty &&
+          !ownerless &&
+          localActiveId == null &&
+          cachedLocks.isEmpty &&
+          await widget.store.activeConfig() != null;
+      if (!isCurrent()) return;
+      if (resumeSavedLibrary ||
+          !shouldShowPickerAtStartup(
+            mode,
+            entries.length,
+            activeProfileLocked: lockedBoot,
+            hasActiveProfile: activeEntry != null,
+          )) {
         _goHome();
         return;
       }
@@ -1113,7 +1133,8 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
                                   entry: _profiles[i],
                                   isActive: _profiles[i].id == _activeProfileId,
                                   autofocus:
-                                      _profiles[i].id == _activeProfileId,
+                                      _profiles[i].id == _activeProfileId ||
+                                      (_activeProfileId == null && i == 0),
                                   busy: _busy,
                                   manageMode: _manageMode,
                                   avatarSize: avatarSize,
@@ -1335,7 +1356,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
       autofocus: widget.autofocus,
       focusNode: _focusNode,
       mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) => setState(() => _focused = v),
+      onFocusChange: (v) => setState(() => _focused = v),
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
@@ -1548,7 +1569,7 @@ class _AddProfileCircleState extends State<_AddProfileCircle> {
       autofocus: widget.autofocus,
       focusNode: _focusNode,
       mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) => setState(() => _focused = v),
+      onFocusChange: (v) => setState(() => _focused = v),
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
@@ -1571,10 +1592,10 @@ class _AddProfileCircleState extends State<_AddProfileCircle> {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: AppColors.accent.withValues(
-                      alpha: _focused ? 1 : 0.6,
-                    ),
-                    width: _focused ? 2.5 : 1.5,
+                    color: _focused
+                        ? Colors.white
+                        : AppColors.accent.withValues(alpha: 0.6),
+                    width: _focused ? 3 : 1.5,
                   ),
                   color: AppColors.accent.withValues(
                     alpha: _focused ? 0.2 : 0.1,
@@ -1626,6 +1647,16 @@ class _CreateProfileDialog extends StatefulWidget {
 
 class _CreateProfileDialogState extends State<_CreateProfileDialog> {
   final _controller = TextEditingController();
+  bool _missingName = false;
+
+  void _submit(String value) {
+    final name = value.trim();
+    if (name.isEmpty) {
+      setState(() => _missingName = true);
+      return;
+    }
+    Navigator.of(context).pop(name);
+  }
 
   @override
   void dispose() {
@@ -1646,9 +1677,17 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
         controller: _controller,
         label: tr('Profile name'),
         hintText: tr('e.g. Living room'),
+        errorText: _missingName
+            ? tr('{field} is required', {'field': tr('Profile name')})
+            : null,
+        onChanged: (value) {
+          if (_missingName && value.trim().isNotEmpty) {
+            setState(() => _missingName = false);
+          }
+        },
         autofocus: true,
         textInputAction: TextInputAction.done,
-        onSubmitted: (v) => Navigator.of(context).pop(v.trim()),
+        onSubmitted: _submit,
       ),
       actions: [
         TextButton(
@@ -1656,7 +1695,7 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
           child: Text(tr('Cancel')),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
+          onPressed: () => _submit(_controller.text),
           child: Text(tr('Create')),
         ),
       ],

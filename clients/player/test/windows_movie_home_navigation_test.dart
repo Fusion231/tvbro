@@ -61,7 +61,7 @@ void main() {
     if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
-  testWidgets('mouse Home works after returning from a Windows movie', (
+  testWidgets('Windows movie Back restores the poster and Home', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1280, 720);
@@ -94,9 +94,28 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('home-movie')));
       await _pumpUntil(
         tester,
-        () => find.text('More info').evaluate().isNotEmpty,
+        () => find.byType(MediaGridTile).evaluate().isNotEmpty,
       );
-      await tester.tap(find.text('More info'));
+      await tester.pump(const Duration(milliseconds: 300));
+      final media = tester.widget<MediaTabView>(find.byType(MediaTabView));
+      final scroll = media.scrollController;
+      scroll.jumpTo(scroll.position.maxScrollExtent * 0.7);
+      await tester.pump(const Duration(milliseconds: 300));
+      final visiblePosters = find.byType(MediaGridTile).hitTestable();
+      expect(
+        visiblePosters,
+        findsWidgets,
+        reason: '${media.visible.length} movies at ${scroll.offset}',
+      );
+      final item = tester.widget<MediaGridTile>(visiblePosters.first).item;
+      final poster = find.byWidgetPredicate(
+        (widget) => widget is MediaGridTile && widget.item.id == item.id,
+      );
+      await tester.ensureVisible(poster);
+      await tester.pump();
+      final offset = scroll.offset;
+      expect(offset, greaterThan(0));
+      await tester.tap(poster);
       await _pumpUntil(
         tester,
         () => find.byType(MediaDetailsSheet).evaluate().isNotEmpty,
@@ -123,6 +142,17 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
       expect(nativeCalls, contains('prepareExit'));
       expect(find.byType(MediaDetailsSheet), findsNothing);
+      expect(poster.hitTestable(), findsOneWidget);
+      expect(scroll.offset, closeTo(offset, 2));
+      final focusedPoster = tester
+          .widget<FocusableActionDetector>(
+            find.descendant(
+              of: poster,
+              matching: find.byType(FocusableActionDetector),
+            ),
+          )
+          .focusNode;
+      expect(focusedPoster?.hasPrimaryFocus, isTrue);
 
       final home = find.byTooltip('Home');
       final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
@@ -169,7 +199,13 @@ class _MovieSource extends DemoSource {
     String? categoryId,
     MediaItem? parent,
     int? maxPages,
-  }) async => kind == ContentKind.movie ? const [_movie] : const [];
+  }) async => kind == ContentKind.movie
+      ? [
+          _movie,
+          for (var i = 1; i < 60; i++)
+            MediaItem(id: 'movie$i', title: 'Movie $i', kind: kind),
+        ]
+      : const [];
 
   @override
   Future<StreamInfo> resolveMedia(MediaItem item) async => const StreamInfo(

@@ -32,6 +32,8 @@ import 'package:iptvs/widgets/tv_text_field.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:sqflite/sqflite.dart' as native_sqlite;
 
+import 'support/journey_http.dart';
+
 const _seriesId = '50001';
 const _seasonId = '$_seriesId:season:1';
 const _seasonKey = ValueKey('media.season.$_seasonId');
@@ -55,7 +57,9 @@ void main() {
       'tvbro_portal_journey_',
     );
     final fixture = await _PortalFixture.start();
-    final network = _LoopbackOnlyHttp();
+    final network = await JourneyHttp.start(
+      (title) => title == 'Portal Paged Series',
+    );
     final rendered = _RenderedState(binding);
     final input = _NativeTextInput(binding.defaultBinaryMessenger);
     final phases = <Map<String, Object?>>[];
@@ -310,6 +314,7 @@ void main() {
       expect(fixture.counts['seasons.1'], 1);
       expect(fixture.unexpected, isEmpty);
       expect(network.deniedHosts, isEmpty);
+      expect(network.tvmazeSearches, isPositive);
       metrics['status'] = 'succeeded';
     } catch (error) {
       metrics['status'] = 'failed';
@@ -333,8 +338,9 @@ void main() {
         metrics['requests'] = fixture.requests;
         metrics['unexpectedRequests'] = fixture.unexpected;
         metrics['deniedOutboundHosts'] = network.deniedHosts.toList();
+        metrics['localTvmazeSearches'] = network.tvmazeSearches;
         await fixture.close();
-        network.close();
+        await network.close();
         input.close();
         HttpOverrides.global = oldHttp;
         PathProviderPlatform.instance = oldPaths;
@@ -651,33 +657,6 @@ class _MemorySecureStorage extends FlutterSecureStoragePlatform {
   @override
   Future<void> deleteAll({required Map<String, String> options}) async =>
       _values.clear();
-}
-
-class _LoopbackOnlyHttp extends HttpOverrides {
-  final deniedHosts = <String>{};
-  final _clients = <HttpClient>[];
-  @override
-  HttpClient createHttpClient(SecurityContext? context) {
-    final client = super.createHttpClient(context);
-    client.findProxy = (_) => 'DIRECT';
-    client.connectionFactory = (uri, proxyHost, proxyPort) {
-      if (uri.host != '127.0.0.1' &&
-          uri.host != 'localhost' &&
-          uri.host != '::1') {
-        deniedHosts.add(uri.host);
-        throw StateError('Only synthetic device-loopback HTTP is allowed.');
-      }
-      return Socket.startConnect(uri.host, uri.port);
-    };
-    _clients.add(client);
-    return client;
-  }
-
-  void close() {
-    for (final client in _clients) {
-      client.close(force: true);
-    }
-  }
 }
 
 class _NativeTextInput {

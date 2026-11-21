@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:iptvs/data/app_database.dart';
+import 'package:iptvs/data/device_class.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/l10n/app_localizations.dart';
 import 'package:iptvs/main.dart';
@@ -52,7 +53,7 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(sessionChannel, (_) async => false);
-    await controller.initialize();
+    await controller.initialize(deviceLocales: const [Locale('en')]);
   });
 
   tearDown(() {
@@ -74,14 +75,19 @@ void main() {
   testWidgets('language can be selected and saved with a TV remote', (
     tester,
   ) async {
+    debugIsTelevision = true;
+    addTearDown(() => debugIsTelevision = false);
     await tester.pumpWidget(languageApp());
     await tester.pumpAndSettle();
     expect(find.text('Choose your language'), findsOneWidget);
 
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
     expect(find.text('Wybierz język'), findsOneWidget);
+    expect(controller.hasSelection, isFalse);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
     expect(controller.hasSelection, isTrue);
     final restored = AppLanguageController();
     addTearDown(restored.dispose);
@@ -92,27 +98,35 @@ void main() {
 
   for (final kind in [PointerDeviceKind.mouse, PointerDeviceKind.touch]) {
     for (final language in AppLanguage.values) {
-      testWidgets(
-        '${kind.name} selects and saves ${language.name} in one click',
-        (tester) async {
-          await tester.pumpWidget(languageApp());
-          await tester.pumpAndSettle();
-          final option = find.widgetWithText(OutlinedButton, language.name);
+      testWidgets('${kind.name} previews and confirms ${language.name}', (
+        tester,
+      ) async {
+        await tester.pumpWidget(languageApp());
+        await tester.pumpAndSettle();
+        final option = find.widgetWithText(OutlinedButton, language.name);
 
-          await tester.tapAt(
-            tester.getTopLeft(option) + const Offset(24, 30),
-            kind: kind,
-          );
-          await tester.pumpAndSettle();
+        await tester.ensureVisible(option);
+        await tester.pumpAndSettle();
+        await tester.tapAt(
+          tester.getTopLeft(option) + const Offset(24, 30),
+          kind: kind,
+        );
+        await tester.pumpAndSettle();
 
-          expect(controller.hasSelection, isTrue);
-          final restored = AppLanguageController();
-          addTearDown(restored.dispose);
-          await restored.initialize();
-          expect(restored.language, language);
-          expect(tester.takeException(), isNull);
-        },
-      );
+        expect(controller.hasSelection, isFalse);
+        expect(
+          find.text(translate('Choose your language', language)),
+          findsOneWidget,
+        );
+        await tester.tap(find.byType(FilledButton), kind: kind);
+        await tester.pumpAndSettle();
+        expect(controller.hasSelection, isTrue);
+        final restored = AppLanguageController();
+        addTearDown(restored.dispose);
+        await restored.initialize();
+        expect(restored.language, language);
+        expect(tester.takeException(), isNull);
+      });
     }
   }
 
@@ -131,6 +145,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(LanguageSelectionScreen), findsOneWidget);
     await tester.tap(find.text('Polski'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dalej'));
     await tester.pumpAndSettle();
 
     expect(find.byType(LanguageSelectionScreen), findsNothing);

@@ -85,6 +85,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Timer? _catalogRefreshTimer;
   int _catalogRefreshGeneration = 0;
   bool _catalogRefreshPaused = false;
+  LibraryRepository? _manualCatalogRefresh;
   DateTime? _catalogRetryAfter;
   int _librarySession = 0;
   Future<void>? _inactivityReset;
@@ -321,6 +322,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _resumeApp() async {
+    final checkUpdates = !updateInstallFlowActive;
     await _resetAfterInactivity();
     if (!mounted ||
         WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
@@ -337,9 +339,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
     // Another device may have changed favorites while this one was away.
     unawaited(_cloudAutoSync?.pullNow(onResume: true) ?? _startCloudAutoSync());
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _resumePendingThenCheck(),
-    );
+    if (checkUpdates) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _resumePendingThenCheck(),
+      );
+    }
   }
 
   Future<void> _resetAfterInactivity() {
@@ -365,6 +369,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       return;
     }
     if (!reset || !mounted) return;
+    if (_config case final config?) {
+      try {
+        await widget.store.setLibrarySection(config.id, null);
+      } catch (_) {
+        DiagnosticsLog.instance.add('library', 'could not clear saved section');
+      }
+    }
+    if (!mounted) return;
     final route = ModalRoute.of(context);
     if (route == null) return;
     final navigator = Navigator.of(context);
@@ -690,7 +702,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     return null;
   }
 
-  Future<void> _refreshCachedEpg(LibraryRepository repo, int generation) async {
+  Future<void> _refreshCachedEpg(
+    LibraryRepository repo,
+    int generation, {
+    bool forceRefresh = false,
+  }) async {
     bool current() =>
         mounted &&
         generation == _loadActiveGeneration &&
@@ -698,7 +714,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     try {
       final channels = await widget.db.readChannels(repo.source.id);
       if (!current() || channels.isEmpty) return;
-      await repo.refreshEpg(channels);
+      await repo.refreshEpg(channels, forceRefresh: forceRefresh);
       final refresh = repo.pendingEpgRefresh;
       if (refresh == null) return;
       await refresh;
@@ -752,22 +768,59 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _refreshCatalog(LibraryRepository repo, int generation) async {
+  Future<void> _refreshActiveCatalog() async {
+    final repo = _repo;
+    if (repo == null || identical(_manualCatalogRefresh, repo)) return;
+    _manualCatalogRefresh = repo;
+    _stopCatalogRefresh();
     try {
-      await repo.synchronizeCatalog();
+      await _refreshCatalog(repo, _catalogRefreshGeneration, forceRefresh: true);
+    } finally {
+      if (identical(_manualCatalogRefresh, repo)) _manualCatalogRefresh = null;
+    }
+  }
+
+  Future<void> _refreshCatalog(
+    LibraryRepository repo,
+    int generation, {
+    bool forceRefresh = false,
+  }) async {
+    Object? failure;
+    var connected = false;
+    try {
+      if (forceRefresh) {
+        await repo.source.connect();
+        if (!mounted || generation != _catalogRefreshGeneration) return;
+        connected = true;
+      }
+      await repo.synchronizeCatalog(forceRefresh: forceRefresh);
     } on LoadCancelledException {
       return;
     } catch (error) {
+      failure = error;
       DiagnosticsLog.instance.add(
         'library',
         'catalog refresh failed: ${error.runtimeType}',
       );
     }
     if (!mounted || generation != _catalogRefreshGeneration) return;
+    if (forceRefresh) {
+      if (connected) {
+        await _refreshCachedEpg(repo, _loadActiveGeneration, forceRefresh: true);
+      }
+      if (!mounted || generation != _catalogRefreshGeneration) return;
+      if (failure == null) {
+        DiagnosticsLog.instance.add(
+          'library',
+          'manual catalog refresh completed',
+        );
+      }
+    }
     // Missing or failed sections stay due; one retry deadline prevents a
     // failed provider from turning that into a zero-delay timer loop.
     _catalogRetryAfter = DateTime.now().add(const Duration(hours: 1));
     await _scheduleCatalogRefresh();
+    if (forceRefresh && failure != null) throw failure;
   }
 
   Future<void> _loadProfileInfo() async {
@@ -1094,12 +1147,15 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                               ),
                             ),
                             const SizedBox(height: 28),
-                            const BootAutostartSetting(),
                             FilledButton.icon(
                               autofocus: true,
                               onPressed: _manageSources,
                               icon: const Icon(Icons.add),
                               label: Text(tr('Add a source')),
+                            ),
+                            TextButton(
+                              onPressed: _useDemo,
+                              child: Text(tr('Use demo streams')),
                             ),
                             const SizedBox(height: 8),
                             if (CloudConfig.isConfigured)
@@ -1108,15 +1164,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                                 icon: const Icon(Icons.qr_code_rounded),
                                 label: Text(tr('Add using your phone')),
                               ),
-                            TextButton(
-                              onPressed: _useDemo,
-                              child: Text(tr('Use demo streams')),
-                            ),
                             TextButton.icon(
                               onPressed: _openRecordings,
                               icon: const Icon(Icons.video_library_outlined),
                               label: Text(tr('Recordings on this device')),
                             ),
+                            const BootAutostartSetting(),
                           ],
                         ),
                       ),
@@ -1134,7 +1187,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       store: widget.store,
       initialWarning: _libraryWarning,
       onManageSources: _manageSources,
-      onRefreshSource: () => _loadActive(forcePreload: true),
+      onRefreshSource: _refreshActiveCatalog,
       onBeforeSourcePreferences: _pauseCloudAutoSync,
       onSourcePreferencesChanged: () {
         _editingSources = false;

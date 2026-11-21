@@ -16,6 +16,7 @@ import '../data/source_store.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/google_play_supporter.dart';
 import '../widgets/pairing_qr.dart';
 import '../widgets/pin_entry.dart';
 import 'profile_pick_screen.dart';
@@ -699,7 +700,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   Future<void> _openPanel() async {
     final uri = Uri.tryParse(
       pairingPanelLink(
-        CloudConfig.accountPanelUrl,
+        CloudConfig.accountPanelUrl(),
         _paired ? '' : _code?.code ?? '',
         language: AppLanguageController.instance.language.code,
       ),
@@ -1284,7 +1285,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       Center(
         child: PairingQrView(
           link: pairingPanelLink(
-            CloudConfig.accountPanelUrl,
+            CloudConfig.accountPanelUrl(),
             code.code,
             language: AppLanguageController.instance.language.code,
           ),
@@ -1322,7 +1323,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
               const SizedBox(width: 6),
               Flexible(
                 child: Text(
-                  CloudConfig.accountPanelUrl,
+                  CloudConfig.accountPanelUrl(),
                   softWrap: true,
                   style: const TextStyle(
                     color: AppColors.accent,
@@ -1438,6 +1439,14 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       ..._transferDetails(),
       const SizedBox(height: 20),
       ..._transferActions(),
+    ],
+    if (canOpenGooglePlaySupporter && _direction == null) ...[
+      const SizedBox(height: 12),
+      OutlinedButton.icon(
+        onPressed: () => showGooglePlaySupporter(context),
+        icon: const Icon(Icons.star_outline),
+        label: Text(tr('Supporter in Google Play')),
+      ),
     ],
     const SizedBox(height: 28),
     TextButton.icon(

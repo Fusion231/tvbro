@@ -6,6 +6,7 @@ import 'package:iptvs/data/device_class.dart';
 import 'package:iptvs/screens/library_home_view.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/theme.dart';
+import 'package:iptvs/widgets/profile_avatar.dart';
 
 void main() {
   final kinds = [ContentKind.live, ContentKind.movie, ContentKind.series];
@@ -110,6 +111,94 @@ void main() {
     final movies = tester.getRect(find.byKey(const ValueKey('home-movie')));
     expect(movies.left, greaterThan(tv.right));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Home updates its network badge and opens Android settings', (
+    tester,
+  ) async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    var settingsOpened = false;
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('iptvs/network_status'),
+      (_) async => null,
+    );
+    messenger.setMockMethodCallHandler(const MethodChannel('iptvs/device'), (
+      call,
+    ) async {
+      settingsOpened = call.method == 'openNetworkSettings';
+      return settingsOpened;
+    });
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: HomeNetworkStatus())),
+    );
+
+    Future<void> publish(String status) async {
+      await messenger.handlePlatformMessage(
+        'iptvs/network_status',
+        const StandardMethodCodec().encodeSuccessEnvelope(status),
+        null,
+      );
+      await tester.pump();
+    }
+
+    await publish('wifi');
+    expect(find.text('Wi-Fi'), findsOneWidget);
+    await publish('offline');
+    expect(find.text('No internet'), findsOneWidget);
+    await tester.tap(find.text('No internet'));
+    await tester.pump();
+    expect(settingsOpened, isTrue);
+    await publish('ethernet');
+    expect(find.text('Ethernet'), findsOneWidget);
+    expect(find.text('No internet'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('profile menu highlights the focused option in touch mode', (
+    tester,
+  ) async {
+    final focusManager = FocusManager.instance;
+    final previous = focusManager.highlightStrategy;
+    focusManager.highlightStrategy = FocusHighlightStrategy.alwaysTouch;
+    addTearDown(() => focusManager.highlightStrategy = previous);
+    var settingsOpened = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          appBar: AppBar(
+            leading: ProfileAvatarButton(
+              profileName: 'Living room',
+              colorIndex: 0,
+              onChangeProfile: () {},
+              onProfileSettings: () => settingsOpened = true,
+            ),
+          ),
+        ),
+      ),
+    );
+    Color? borderOf(String title) {
+      final material = find
+          .ancestor(of: find.text(title), matching: find.byType(Material))
+          .first;
+      final shape = tester.widget<Material>(material).shape;
+      return shape is OutlinedBorder ? shape.side.color : null;
+    }
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pumpAndSettle();
+    expect(borderOf('L'), AppColors.accent);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(borderOf('Change profile'), AppColors.accent);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    expect(borderOf('TVBro account'), AppColors.accent);
+    expect(borderOf('Change profile'), isNot(AppColors.accent));
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(settingsOpened, isTrue);
   });
 
   testWidgets('remote and pointer activate their home sections', (

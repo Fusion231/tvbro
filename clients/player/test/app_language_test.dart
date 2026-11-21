@@ -1,5 +1,6 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/widgets.dart';
 
 import 'package:iptvs/l10n/app_localizations.dart';
 import 'package:iptvs/data/net.dart';
@@ -12,7 +13,7 @@ void main() {
   test('first launch uses English and requires a language choice', () async {
     final controller = AppLanguageController();
     addTearDown(controller.dispose);
-    await controller.initialize();
+    await controller.initialize(deviceLocales: const [Locale('xx')]);
 
     expect(controller.language, AppLanguage.english);
     expect(controller.hasSelection, isFalse);
@@ -32,21 +33,36 @@ void main() {
       await restored.initialize();
 
       expect(restored.language, language);
-      expect(restored.locale.languageCode, language.code);
+      expect(restored.locale, language.locale);
       expect(restored.hasSelection, isTrue);
     });
   }
 
   test('unsupported saved language requires a new choice', () async {
     FlutterSecureStorage.setMockInitialValues({
-      AppLanguageController.storageKey: 'fr',
+      AppLanguageController.storageKey: 'xx',
     });
     final controller = AppLanguageController();
     addTearDown(controller.dispose);
-    await controller.initialize();
+    await controller.initialize(deviceLocales: const [Locale('xx')]);
 
     expect(controller.language, AppLanguage.english);
     expect(controller.hasSelection, isFalse);
+  });
+
+  test('first launch suggests the first supported device language', () async {
+    final controller = AppLanguageController();
+    addTearDown(controller.dispose);
+    await controller.initialize(
+      deviceLocales: const [Locale('xx'), Locale('pt', 'BR')],
+    );
+    expect(controller.language, AppLanguage.brazilianPortuguese);
+    expect(controller.deviceLanguage, AppLanguage.brazilianPortuguese);
+    expect(controller.hasSelection, isFalse);
+    await controller.confirm(AppLanguage.arabic);
+    await controller.initialize(deviceLocales: const [Locale('zh', 'CN')]);
+    expect(controller.language, AppLanguage.arabic);
+    expect(controller.deviceLanguage, AppLanguage.simplifiedChinese);
   });
 
   test('Polish translations preserve content template parameters', () {

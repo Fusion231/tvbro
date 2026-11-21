@@ -247,7 +247,7 @@ async (page) => {
   await check(await calls('keymanager.duplicate') === 0,'Boot attempted to overwrite a create-only KeyManager alias.');
   const registeredKeys = await page.evaluate(() => window.__samsungFixture.calls.filter(row => row[0] === 'registerKey').map(row => row[1]));
   await check(registeredKeys.includes('ChannelUp') && registeredKeys.includes('ChannelDown'),'The Samsung platform must register dedicated channel keys');
-  await shown('#language-view'); await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true}));
+  await shown('#language-view'); await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true})); await activate(page.locator('#language-continue'));
   await shown('#profiles-view'); await activate('#add-profile'); await edit(modal().locator('input').first(),'Dom QA'); await action('Zapisz');
   await shown('#setup-view'); await activate('#setup-source');
   await shown('#sources-view');

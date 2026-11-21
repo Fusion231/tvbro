@@ -9,6 +9,8 @@ import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
 
+typedef _RecentItem = ({Object item, String? seriesId, MediaItem? series});
+
 class RecentlyWatchedView extends StatefulWidget {
   final LibraryRepository repo;
   final RecentlyWatchedStore store;
@@ -32,7 +34,7 @@ class RecentlyWatchedView extends StatefulWidget {
 }
 
 class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
-  late Future<List<Object>> _items;
+  late Future<List<_RecentItem>> _items;
 
   @override
   void initState() {
@@ -57,7 +59,7 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
     });
   }
 
-  Future<List<Object>> _load() async {
+  Future<List<_RecentItem>> _load() async {
     final repo = widget.repo;
     final entries = await widget.store.read(repo.source.id);
     // Existing VOD resume points populate the rail on the first upgraded run.
@@ -87,9 +89,41 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
           ]),
         );
       }
-      if (items.length >= RecentlyWatchedStore.limit) break;
     }
-    return items;
+    final episodeParents = {
+      for (final item in items.whereType<MediaItem>())
+        if (item.kind == ContentKind.episode && item.parentId != null)
+          item.id: item.parentId!,
+    };
+    final seasons = await repo.db.readMediaItemsByIds(
+      repo.source.id,
+      ContentKind.season,
+      episodeParents.values.toSet().toList(),
+    );
+    final seasonSeries = {
+      for (final season in seasons) season.id: season.parentId,
+    };
+    final seriesIds = episodeParents.map(
+      (episodeId, parentId) =>
+          MapEntry(episodeId, seasonSeries[parentId] ?? parentId),
+    );
+    final seriesItems = await repo.db.readMediaItemsByIds(
+      repo.source.id,
+      ContentKind.series,
+      seriesIds.values.toSet().toList(),
+    );
+    final seriesById = {for (final series in seriesItems) series.id: series};
+    return [
+      for (final item in items)
+        if (item is MediaItem && item.kind == ContentKind.episode)
+          (
+            item: item,
+            seriesId: seriesIds[item.id],
+            series: seriesById[seriesIds[item.id]],
+          )
+        else
+          (item: item, seriesId: null, series: null),
+    ];
   }
 
   @override
@@ -111,7 +145,7 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
         ),
       ),
       const SizedBox(height: 12),
-      FutureBuilder<List<Object>>(
+      FutureBuilder<List<_RecentItem>>(
         future: _items,
         builder: (context, snapshot) {
           if (!snapshot.hasData) {
@@ -122,15 +156,25 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
                   : const LinearProgressIndicator(),
             );
           }
-          final items = snapshot.data!
-              .where(
-                (item) => switch (item) {
-                  Channel channel => widget.channelAllowed(channel),
-                  MediaItem media => widget.mediaAllowed(media),
-                  _ => false,
-                },
-              )
-              .toList();
+          final seenSeries = <String>{};
+          final items = <_RecentItem>[];
+          for (final entry in snapshot.data!) {
+            final allowed = switch (entry.item) {
+              Channel channel => widget.channelAllowed(channel),
+              MediaItem media => widget.mediaAllowed(media),
+              _ => false,
+            };
+            if (!allowed) continue;
+            if (entry.series case final series?
+                when !widget.mediaAllowed(series)) {
+              continue;
+            }
+            if (entry.seriesId case final id? when !seenSeries.add(id)) {
+              continue;
+            }
+            items.add(entry);
+            if (items.length == RecentlyWatchedStore.limit) break;
+          }
           if (items.isEmpty) {
             return Padding(
               padding: const EdgeInsets.symmetric(vertical: 20),
@@ -164,11 +208,12 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
     ],
   );
 
-  Widget _card(BuildContext context, Object item, TextScaler scale) {
+  Widget _card(BuildContext context, _RecentItem entry, TextScaler scale) {
+    final item = entry.item;
     final channel = item is Channel ? item : null;
     final media = item is MediaItem ? item : null;
-    final title = channel?.name ?? media!.title;
-    final artwork = channel?.logo ?? media?.poster;
+    final title = channel?.name ?? entry.series?.title ?? media!.title;
+    final artwork = channel?.logo ?? entry.series?.poster ?? media?.poster;
     final label = channel != null
         ? tr('TV')
         : media!.kind == ContentKind.movie
@@ -186,7 +231,9 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
       key: ValueKey(
         'recent-${channel != null ? 'live' : media!.kind.name}-${channel?.id ?? media!.id}',
       ),
-      semanticsLabel: '$label: $title',
+      semanticsLabel: entry.series == null
+          ? '$label: $title'
+          : '$label: $title, ${media!.title}',
       onTap: () => channel != null
           ? widget.onPlayChannel(channel)
           : widget.onPlayMedia(media!),
@@ -227,7 +274,9 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
             ),
             const SizedBox(height: 4),
             Text(
-              label,
+              entry.series == null ? label : media!.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11, color: AppColors.textLo),
             ),
           ],

@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const libraryModule = require('../platform/library.js');
+const {filesystem} = require('./helpers/catalog_filesystem.cjs');
 
 const kinds = ['live', 'movie', 'series'];
 const syncedAt = Date.now();
@@ -101,8 +102,8 @@ function harness(settings = {}) {
           }
           if (method === 'epgMapping.set') return Promise.resolve(JSON.stringify({available:true,revision:0}));
           if (method === 'epgCached') return Promise.resolve(JSON.stringify([]));
-          if (method === 'beginCatalogExport') return Promise.resolve(JSON.stringify({schema:1,scopeKey:'fixture',generation:1,completeAt:syncedAt,kinds:prepared.kinds,
-            parts:settings.batchStore ? [{index:0,key:'live:channels',kind:'live',section:'channels',offset:0,count:1},
+          if (method === 'beginCatalogExport') return Promise.resolve(JSON.stringify({schema:1,key:'d'.repeat(64),scopeKey:'fixture',generation:1,completeAt:syncedAt,kinds:prepared.kinds,
+            parts:settings.batchStore || settings.catalogStore ? [{index:0,key:'live:channels',kind:'live',section:'channels',offset:0,count:1},
               {index:1,key:'series:items',kind:'series',section:'items',offset:0,count:1}] : []}));
           if (method === 'exportCatalogPart') return Promise.resolve(JSON.stringify({raw:'fixture-part-'+args.index,checksum:String(args.index+1).padStart(64,'0')}));
           if (method === 'beginCatalogImport') {
@@ -129,6 +130,8 @@ function harness(settings = {}) {
           if (method === 'guideCacheKey') return Promise.resolve(JSON.stringify('b'.repeat(64)));
           if (method === 'legacyGuideCacheKey') return Promise.resolve(JSON.stringify('c'.repeat(64)));
           if (method === 'metadata.configure') return Promise.resolve(JSON.stringify(true));
+          if (method === 'metadata.enrich') return Promise.resolve(JSON.stringify(args.items.map(item => ({...item,
+            poster:'https://images.test/poster.jpg',description:'Series synopsis'}))));
           if (method === 'metadata.details') return Promise.resolve(JSON.stringify({id:args.item.id,kind:args.item.kind,title:'cached details'}));
           if (method === 'metadata.refresh') return Promise.resolve(JSON.stringify({id:args.item.id,kind:args.item.kind,title:'refreshed details'}));
           if (method === 'metadata.cacheKey') return Promise.resolve(JSON.stringify('c'.repeat(64)));
@@ -254,8 +257,8 @@ function legacyBatchStore(raw) {
     mark(){return Promise.resolve(true);},remove(key){batches.delete(key);return Promise.resolve(true);}};
 }
 
-test('cold source load waits for independent catalog and EPG attempts, then keeps successful sections usable', async t => {
-  const kit = harness();
+test('cold source load persists usable catalogs and opens before the EPG attempt finishes', async t => {
+  const disk = filesystem(), kit = harness({catalogStore:disk.restart()});
   t.after(() => kit.api.dispose());
   await kit.seedSource();
 
@@ -279,13 +282,17 @@ test('cold source load waits for independent catalog and EPG attempts, then keep
   kit.sectionGates.live.resolve({kind:'live',count:1,syncedAt,complete:true});
   kit.sectionGates.movie.resolve({kind:'movie',count:1,syncedAt,complete:true});
   kit.sectionGates.series.reject(new Error('series endpoint unavailable'));
-  const epg = await Promise.race([
-    kit.epgStarted.then(() => 'epg-started'),
-    finished.promise.then(() => 'load-finished')
+  const result = await Promise.race([
+    load.then(() => 'load-finished'),
+    new Promise(resolve => setTimeout(() => resolve('still-waiting-for-epg'),150))
   ]);
-  assert.equal(epg,'epg-started','EPG must be attempted after or alongside catalog preparation');
+  if (result !== 'load-finished') { kit.epgGate.resolve([]); await load; }
+  assert.equal(result,'load-finished','EPG must not delay persistence or access to catalogs');
+  assert.equal(loaded.cachePersisted,true);
+  assert.ok(await disk.restart().readBatch('d'.repeat(64)), 'the real adapter commits all catalog sections before opening');
+  await kit.epgStarted;
   kit.epgGate.reject(Object.assign(new Error('private-guide.fixture could not be reached'),{name:'NetworkError'}));
-  await load;
+  await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(kit.calls.filter(call => call.method === 'prepareCatalog').map(call => call.args.kind).sort(),kinds);
   assert.equal(new Set(kit.calls.filter(call => call.method === 'prepareCatalog').map(call => call.args.refreshKey)).size,1,
@@ -297,14 +304,66 @@ test('cold source load waits for independent catalog and EPG attempts, then keep
   assert.equal(loaded.preparation.sections.live.status,'ready');
   assert.equal(loaded.preparation.sections.movie.status,'ready');
   assert.equal(loaded.preparation.sections.series.status,'failed');
-  assert.equal(loaded.preparation.sections.epg.status,'failed');
+  assert.equal(kit.api.getState().catalogPreparation.sections.epg.status,'failed');
   assert.equal(loaded.preparation.cacheState.kinds.movie.complete,true);
   assert.equal(loaded.preparation.cacheState.kinds.series.complete,false);
   assert.equal(loaded.preparation.warnings.some(warning => warning.kind === 'series'),true);
-  assert.equal(loaded.preparation.warnings.some(warning => warning.kind === 'epg'),true);
+  assert.equal(kit.api.getState().catalogPreparation.warnings.some(warning => warning.kind === 'epg'),true);
 
   const moviePage = await kit.api.query('catalog.items',{kind:'movie',page:1});
   assert.equal(moviePage.items[0].id,'movie-ready','a prepared movie root remains available after another section fails');
+});
+
+test('real Samsung disk cache survives failed EPG and opens after restart without catalog downloads', async t => {
+  const disk=filesystem(),kit=harness({catalogStore:disk.restart()});
+  t.after(()=>kit.api.dispose());
+  await kit.seedSource();
+  const loading=kit.api.query('sources.load',{id:'fixture-source'});
+  await kit.catalogStarted;
+  kinds.forEach(kind=>kit.sectionGates[kind].resolve({kind,count:1,syncedAt,complete:true}));
+  const first=await Promise.race([loading,new Promise(resolve=>setTimeout(()=>resolve(null),150))]);
+  if (!first) {kit.epgGate.resolve([]);await loading;}
+  assert.ok(first,'EPG must not block first load');
+  assert.equal(first.cachePersisted,true);
+  await kit.epgStarted;kit.epgGate.reject(Error('Guide unavailable'));
+  await new Promise(resolve=>setImmediate(resolve));
+  await kit.api.dispose();
+  const start=kit.calls.length;
+  kinds.forEach(kind=>{kit.prepared.kinds[kind]={complete:false,count:0,syncedAt:null};});
+  const restarted=libraryModule.create({...kit.options,catalogStore:disk.restart()});
+  t.after(()=>restarted.dispose());
+  const restored=await restarted.query('sources.load',{id:'fixture-source'});
+  assert.equal(restored.channels.length,1);
+  assert.equal(restored.cachePersisted,true);
+  assert.deepEqual(kit.calls.slice(start).filter(call=>call.method==='prepareCatalog'),[]);
+});
+
+test('flush waits for a catalog export before starting another worker snapshot or disposing it', async t => {
+  const writeStarted=deferred(),releaseWrite=deferred();
+  let writes=0;
+  const catalogStore={read:()=>Promise.resolve(null),readBatch:()=>Promise.resolve(null),
+    async writeBatch(key,manifest,readPart){
+      if(++writes===1){writeStarted.resolve();await releaseWrite.promise;}
+      for(const part of manifest.parts)await readPart(part);
+      return true;
+    }};
+  const kit=harness({catalogStore,epgCapability:'unsupported'});
+  t.after(()=>kit.api.dispose());
+  await kit.seedSource();
+  const loading=kit.api.query('sources.load',{id:'fixture-source'});
+  await kit.catalogStarted;
+  kinds.forEach(kind=>kit.sectionGates[kind].resolve({kind,count:1,syncedAt,complete:true}));
+  await writeStarted.promise;
+  await kit.api.query('media.details',{item:{id:'movie-ready',kind:'movie'}});
+  let flushed=false;
+  const flushing=kit.api.query('cache.flush').then(()=>{flushed=true;});
+  await new Promise(resolve=>setImmediate(resolve));
+  const exportCount=kit.calls.filter(call=>call.method==='beginCatalogExport').length;
+  const flushedEarly=flushed;
+  releaseWrite.resolve();await loading;await flushing;
+  assert.equal(exportCount,1,'a pending write must retain exclusive ownership of the worker export plan');
+  assert.equal(flushedEarly,false,'cache.flush must drain the export already in progress');
+  assert.equal(writes,2,'a dirty catalog is exported again only after the preceding generation commits');
 });
 
 test('a warm complete catalog opens before background EPG or refresh attempts finish', async t => {
@@ -522,12 +581,28 @@ test('a cold EPG success leaves only one canonical refresh timer after nested re
   const loading=kit.api.query('sources.load',{id:'fixture-source'});
   await kit.catalogStarted;
   kinds.forEach(kind=>kit.sectionGates[kind].resolve({kind,count:1,syncedAt:clock,complete:true}));
-  await kit.epgStarted;guide.resolve([]);await loading;
-  await kit.epgStateStarted;await kit.epgStateSecondStarted;
-  stateOne.resolve({nextRefreshAt,retryAt:null});stateTwo.resolve({nextRefreshAt,retryAt:null});
+  await loading;
+  timer.run(0);
+  await kit.epgStateStarted;stateOne.resolve({nextRefreshAt:null,retryAt:null});
+  await kit.epgStarted;guide.resolve([]);
+  await kit.epgStateSecondStarted;stateTwo.resolve({nextRefreshAt,retryAt:null});
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(timer.delays().filter(delay=>delay===sixHours).length,1,
     'the guide success and preload result share one timer rather than scheduling duplicate refreshes');
+});
+
+test('visible catalog metadata works without credentials and is bounded', async t => {
+  const kit=harness({epgCapability:'unsupported'});
+  t.after(()=>kit.api.dispose());
+  await kit.seedSource();
+  kinds.forEach(kind=>{kit.prepared.kinds[kind]={complete:true,count:1,syncedAt};});
+  await kit.api.query('sources.load',{id:'fixture-source'});
+  const items=Array.from({length:60},(_,id)=>({id:String(id),kind:'series',title:'Show'}));
+  const result=await kit.api.query('media.enrich',{items});
+  assert.equal(result.length,40);
+  assert.equal(result[0].poster,'https://images.test/poster.jpg');
+  assert.equal(result[0].description,'Series synopsis');
+  assert.equal(kit.calls.find(call=>call.method==='metadata.enrich').args.items.length,40);
 });
 
 test('full-catalog detail refresh uses metadata refresh without invalidating prepared roots', async t => {

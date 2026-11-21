@@ -675,7 +675,7 @@
     label = label.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
     if (!label) label = options.deviceLabel || 'Samsung TV';
     label = label.slice(0, 64);
-    var language = args.language === 'pl' ? 'pl' : 'en';
+    var language = typeof args.language === 'string' && /^[a-z]{2}(?:-[a-z]{2,4})?$/.test(args.language) ? args.language : 'en';
     return pairingRead('start', function () { return ensureSession().then(function () {
       return rpc('request_pairing', {p_label:label, p_language:language});
     }).then(function (response) {

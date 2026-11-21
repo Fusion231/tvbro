@@ -35,6 +35,23 @@ void main() {
   });
 
   for (final language in AppLanguage.values) {
+    test('QR and direct panel links carry ${language.code}', () {
+      AppLanguageController.instance.preview(language);
+      expect(
+        Uri.parse(CloudConfig.accountPanelUrl(language.code)).queryParameters['lang'],
+        language.code,
+      );
+      final url = pairingPanelLink(
+        CloudConfig.accountPanelUrl(),
+        'ABCD2345',
+        language: language.code,
+      );
+      expect(
+        Uri.parse(url).queryParameters,
+        containsPair('lang', language.code),
+      );
+      expect(Uri.parse(url).queryParameters, containsPair('code', 'ABCD2345'));
+    });
     test(
       'pairing code request sends the selected ${language.code} language',
       () async {

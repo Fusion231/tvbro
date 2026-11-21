@@ -150,9 +150,13 @@ are rejected at the headers, before downloading a known oversized guide.
 Compressed lengths retain separate transferred/decoded limits; HTTP refusals
 retain their original classification and cooldown.
 
-Complete channel and guide results are displayed before large cache snapshots
-are exported and written. Those writes coalesce after one second and are drained
-by cache flush, source changes and disposal before the source worker closes.
+Startup restores the selected profile's saved channels, movies and series before
+starting provider refreshes, including when the saved catalog is older than
+24 hours. A first download commits the catalog before opening the library;
+XMLTV preparation then runs in the background and cannot block browsing or
+playback. Catalog persistence does not depend on a successful EPG download.
+Later cache writes coalesce after one second and are drained by cache flush,
+source changes and disposal before the source worker closes.
 Reopening the already selected source avoids rewriting the profile preference;
 changing the selected source still persists that preference atomically.
 
@@ -163,10 +167,14 @@ are encoded item by item rather than building a second full DTO tree. Payload,
 schema-1 envelope and the RPC string wrapper use chunked UTF-8 encoding; both
 payload and saved envelope are capped at 32 MiB, including Unicode and escaping
 (the RPC wrapper has a separate 64 MiB + 2 byte bound). This bounds serialization,
-not the total memory of arbitrarily large source catalogues. Existing schema-1
-snapshots remain readable. Durable M3U writes may fall back to complete live
-roots with explicitly deferred media; VOD is then loaded from the original
-playlist on first use. Runtime transfer and rollback still require a complete
+not the total memory of arbitrarily large source catalogues. New durable catalogs
+use the canonical checksummed parts of at most 1 MiB, with a manifest and completion
+marker published after every part is written. The Tizen store accounts for all
+parts within its 64 MiB total budget and retains the previous committed generation
+if a replacement is interrupted or exceeds available space. Incomplete generations
+are discarded on the next read/write. Existing schema-1 snapshots remain readable;
+legacy adapters may still save complete live roots with explicitly deferred media.
+Runtime transfer and rollback still require a complete
 snapshot. An export that cannot fit retains the loaded catalogue and does not
 replace the previous disk generation. Manual
 details refresh refuses to invalidate a catalogue it cannot first snapshot for
@@ -316,6 +324,22 @@ A sole profile is selected automatically, with its PIN gate still enforced;
 multiple profiles require a choice. Opening the account screen on an unpaired
 device with no playlists uses the same onboarding flow. Already paired devices
 and local setups with playlists retain manual download/upload management.
+
+Returning to the foreground or coming online refreshes the profile chooser,
+including newly added account profiles, without requiring automatic delta sync
+or changing the profile that owns current playback. Selecting a cloud profile
+checks the server's snapshot revision before reusing saved sources. An older
+revision (including snapshots saved before revision tracking) triggers a full
+pull; an unchanged revision retains TV-local source edits. Failed pulls keep
+the previous saved snapshot. Direct startup with the chooser disabled also
+checks the revision before opening unlocked cloud content. LG webOS and Titan
+OS reuse these shared paths.
+
+Samsung KeyManager failures identify listing, reading or writing protected
+storage with a safe diagnostic code. A native `UnknownError` alone does not
+identify cache corruption, incompatible JSON, quota exhaustion or a firmware
+database fault. Storage tests verify failed-write preservation, not the cause
+of a particular physical-TV failure; that still requires the device diagnostic.
 
 Example for an opted-in custom relay build (replace the origins with the
 operator's production HTTPS origins):

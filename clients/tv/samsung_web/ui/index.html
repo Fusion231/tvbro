@@ -27,8 +27,10 @@
         <h1>Choose your language</h1><p class="muted">Select the language used throughout the app.</p>
         <div id="language-list" class="language-list"></div>
         <p id="language-error" class="dialog-error" role="alert"></p>
-        <button id="language-continue" class="button button-primary" data-nav type="button">Continue</button>
-        <button id="language-back" class="button" data-nav type="button" hidden>Back</button>
+        <div class="language-actions">
+          <button id="language-back" class="button" data-nav type="button" hidden>Back</button>
+          <button id="language-continue" class="button button-primary" data-nav type="button"><span>Continue</span><span class="language-arrow" aria-hidden="true">→</span></button>
+        </div>
       </section>
       <section id="profiles-view" class="profiles-view" data-screen="profiles" hidden>
         <h1>Who is watching?</h1>

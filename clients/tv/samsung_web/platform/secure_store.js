@@ -28,6 +28,13 @@
     return !!error && (error.name === 'NotFoundError' || error.errorType === 'NotFoundError');
   }
 
+  function storageError(error, operation) {
+    var result = makeError(error && (error.name || error.errorType) || 'UnknownError',
+      'Samsung secure storage could not complete ' + operation + '.');
+    result.code = 'secure_store_' + operation + '_failed';
+    return result;
+  }
+
   function keyManager() {
     if (tizen && tizen.keymanager) return tizen.keymanager;
     if (environment && environment.tizen && environment.tizen.keymanager) {
@@ -204,9 +211,11 @@
   }
 
   function aliasMetadata(manager, base) {
-    var list = requiredMethod(manager, 'getDataAliasList').call(manager);
+    var listMethod = requiredMethod(manager, 'getDataAliasList'), list;
+    try { list = listMethod.call(manager); }
+    catch (error) { throw storageError(error, 'list'); }
     if (Object.prototype.toString.call(list) !== '[object Array]') {
-      throw makeError('UnknownError', 'Samsung KeyManager returned an invalid alias list.');
+      throw storageError(null, 'list');
     }
     var packageId = currentPackageId();
     var pattern = generationPattern(base);
@@ -267,9 +276,9 @@
       return requiredMethod(manager, 'getData').call(manager, { name: name });
     } catch (error) {
       if (isNotFound(error)) {
-        throw makeError('UnknownError', 'Samsung KeyManager alias list and stored data disagree.');
+        throw storageError(null, 'read');
       }
-      throw error;
+      throw storageError(error, 'read');
     }
   }
 
@@ -312,7 +321,7 @@
       function failure(error) {
         if (settled) return;
         settled = true;
-        reject(error || makeError('UnknownError', 'Samsung KeyManager could not save source data.'));
+        reject(storageError(error, 'write'));
       }
       try {
         var manager = keyManager();

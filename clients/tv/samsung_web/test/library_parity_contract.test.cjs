@@ -8,6 +8,7 @@ test.afterEach(async()=>{for(const api of profiles)await api.dispose();profiles.
 const clone=value=>JSON.parse(JSON.stringify(value));
 const sourceId='90a03a25-9dbf-43c2-a0ab-66737e7f4301';
 const remoteId='f1d7e5d2-1e02-4e4c-8d29-11b4f11a0502';
+const remoteRevision='2026-10-26T12:00:00.000Z';
 const config={id:sourceId,kind:'m3u',label:'Fixture',fields:{playlistUrl:'https://fixture.test/list',userAgent:'Keep secret'},settings:{bufferPreset:'normal'}};
 const channels=[{id:'b',name:'Beta',categoryId:'news'},{id:'a',name:'Alpha',categoryId:'news'},{id:'h',name:'Hidden',categoryId:'adult'}];
 const categories=[{id:'news',title:'News'},{id:'adult',title:'Adult'}];
@@ -40,13 +41,13 @@ function harness({cloudProfile=false,cloudRoute}={}){
   let playback={playing:false,buffering:false,position:0,duration:0};
   const cloud={configured:true,hasSession:()=>cloudProfile,status:()=>Promise.resolve({configured:true,paired:cloudProfile,profileId:cloudProfile?remoteId:null}),
     query(action,args){calls.cloud.push({action,args:clone(args)});if(cloudRoute)return cloudRoute(action,args);
-      if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null}]);
+      if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null,updated_at:remoteRevision}]);
       if(action==='supporter.status')return Promise.resolve({supported:true});
       if(action==='push.delta')return Promise.resolve({});
       if(action==='push.playback')return Promise.resolve({available:true,count:args.playbackPositions.length});
       if(action==='pull')return Promise.resolve({profile:{id:remoteId},sources:[clone(config)],managedSourceIds:[sourceId],favorites:[],metadata:{},playbackPositionsAvailable:false});
       throw Error('Unexpected cloud '+action);}};
-  if(cloudProfile)state={cloud_profile_id:remoteId,cloud_profile_snapshots_v1:JSON.stringify({[remoteId]:{sources:[clone(config)],managedIds:[sourceId],activeSourceId:sourceId}})};
+  if(cloudProfile)state={cloud_profile_id:remoteId,cloud_profile_snapshots_v1:JSON.stringify({[remoteId]:{sources:[clone(config)],managedIds:[sourceId],activeSourceId:sourceId,cloudRevision:remoteRevision}})};
   const api=library.create({core,createSource,userState:store,sourceStore:{read:()=>[]},player,cloud,validation:{validateSource:()=>null},transport:{capabilities:()=>({cookies:true,userAgent:true}),abort:()=>{}},
     now:()=>Date.parse('2026-10-26T12:00:00Z'),stop:()=>{playback.playing=false;return Promise.resolve();},getState:()=>({...playback}),
     openStream:(stream,rect,preferences)=>{calls.open.push(preferences);playback.playing=true;return Promise.resolve();},onError:()=>{}});
@@ -99,7 +100,7 @@ test('automatic sync is opt-in and sends durable favorite/path deltas without re
 test('a toggle made during a delta upload stays durable for the next upload',async()=>{
   const started=deferred(),complete=deferred();let blocked=true;
   const h=harness({cloudProfile:true,cloudRoute(action,args){
-    if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null}]);
+    if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null,updated_at:remoteRevision}]);
     if(action==='push.delta'){if(blocked){blocked=false;started.resolve();return complete.promise;}return Promise.resolve({});}
     throw Error('Unexpected '+action);
   }});await h.setup();
@@ -143,7 +144,7 @@ test('invalid manual EPG bindings reject before changing persisted overrides',as
 });
 test('a cloud source removal preserves current native playback without causing mirror retries',async()=>{
   const h=harness({cloudProfile:true,cloudRoute(action){
-    if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null}]);
+    if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null,updated_at:remoteRevision}]);
     if(action==='pull')return Promise.resolve({profile:{id:remoteId},sources:[],managedSourceIds:[],favorites:[],playbackPositionsAvailable:false});
     throw Error('Unexpected '+action);
   }});await h.setup();await h.api.query('playback.play',{sourceId,channel:channels[0]});
@@ -153,7 +154,7 @@ test('a cloud source removal preserves current native playback without causing m
 test('manual full pushes acknowledge exact represented deltas and preserve toggles made during upload',async()=>{
   const started=deferred(),complete=deferred();let calls=0;
   const h=harness({cloudProfile:true,cloudRoute(action){
-    if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null}]);
+    if(action==='profiles.list')return Promise.resolve([{id:remoteId,name:'Remote',pin:null,updated_at:remoteRevision}]);
     if(action==='supporter.status')return Promise.resolve({supported:false});
     if(action==='push'){calls++;if(calls===1){started.resolve();return complete.promise;}return Promise.resolve({favoritesSynced:true});}
     throw Error('Unexpected '+action);

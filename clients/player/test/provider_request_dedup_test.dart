@@ -78,6 +78,18 @@ void main() {
     expect(source.details, 2);
   });
 
+  test('prepared and enriched details share the same provider request', () async {
+    source.hold();
+    final prepared = repo.prepareMediaDetails(movie);
+    final enriched = repo.mediaDetails(movie);
+    await source.started!.future;
+    source.release();
+
+    expect((await prepared).item.extra['details'], isA<Map>());
+    expect((await enriched).extra['details'], isA<Map>());
+    expect(source.details, 1);
+  });
+
   test('concurrent season and pagination reads fetch each page once', () async {
     source.hold();
     final opens = [

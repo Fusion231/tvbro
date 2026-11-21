@@ -8,6 +8,21 @@ import 'package:iptvs/sources/xtream_source.dart';
 import 'support/workload_fixtures.dart';
 
 void main() {
+  test('catalog covers take precedence over generic stream icons', () {
+    for (final kind in [ContentKind.movie, ContentKind.series]) {
+      final item = mapMediaItemsFromDecoded([
+        {
+          'stream_id': 1,
+          'series_id': 1,
+          'name': 'PL - VisionQuest',
+          'stream_icon': 'https://images.test/character.jpg',
+          'cover': 'https://images.test/series-poster.jpg',
+        },
+      ], kind).single;
+      expect(item.poster, 'https://images.test/series-poster.jpg');
+    }
+  });
+
   test('normalizes legacy and JSON artwork arrays without splitting URLs', () {
     const url = 'https://images.test/backdrop.jpg?token=a,b&size=1280';
 

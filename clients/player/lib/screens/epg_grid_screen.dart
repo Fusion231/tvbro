@@ -39,6 +39,7 @@ class EpgGridScreen extends StatefulWidget {
 
   /// Channels to list (the caller's filtered/visible set), in display order.
   final List<Channel> channels;
+  final bool channelsLoading;
 
   /// Plays [Channel] live (the caller owns resolution + the player route).
   final void Function(Channel channel) onPlayChannel;
@@ -71,6 +72,7 @@ class EpgGridScreen extends StatefulWidget {
     super.key,
     required this.repo,
     required this.channels,
+    this.channelsLoading = false,
     required this.onPlayChannel,
     this.isPlayingChannel,
     required this.onPlayArchive,
@@ -883,7 +885,11 @@ class _EpgGridScreenState extends State<EpgGridScreen>
                             child: widget.channels.isEmpty
                                 ? Center(
                                     child: Text(
-                                      tr('No channels'),
+                                      tr(
+                                        widget.channelsLoading
+                                            ? 'Loading channels and categories…'
+                                            : 'No channels',
+                                      ),
                                       style: TextStyle(color: AppColors.textLo),
                                     ),
                                   )

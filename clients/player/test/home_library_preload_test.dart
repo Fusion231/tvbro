@@ -194,13 +194,13 @@ void main() {
               tester.widget<LibraryPreloadProgress>(progress).stages[kind] !=
                   null;
         }
+
         await _pumpUntil(
           tester,
           () =>
               fixture.liveStarted.isCompleted &&
               (failLive || liveReady.isCompleted) &&
-              (!movieReleasedEarly ||
-                  preloadStageFinished(ContentKind.movie)),
+              (!movieReleasedEarly || preloadStageFinished(ContentKind.movie)),
         );
         if (transientConnectFailures > 0) {
           _expectRetryPauses(fixture.requestTimes['connect']!);
@@ -524,9 +524,7 @@ void main() {
         'password': 'fixture',
       },
     );
-    await read(
-      () => store.save(config),
-    );
+    await read(() => store.save(config));
     await read(() => migrateSourceIdentity(db, config));
     await read(
       () => db.replaceLibrary(
@@ -573,23 +571,40 @@ void main() {
         expect(fixture.requests['get_live_streams'], isNull);
         expect(fixture.requests['get_vod_streams'], isNull);
         expect(fixture.requests['get_series'], isNull);
-        fixture.rejectAuthentication = failConnection;
-        await tester.tap(find.byTooltip('Menu'));
-        await _pumpUntil(
-          tester,
-          () => find.text('Refresh').hitTestable().evaluate().isNotEmpty,
+        Future<void> refresh() async {
+          await tester.tap(find.byTooltip('Menu'));
+          await _pumpUntil(
+            tester,
+            () => find.text('Refresh').hitTestable().evaluate().isNotEmpty,
+          );
+          await tester.tap(find.text('Refresh'));
+          await tester.pump();
+        }
+
+        final refreshCompleted = _nextLog(
+          (entry) => entry.message == 'manual catalog refresh completed',
         );
-        await tester.tap(find.text('Refresh'));
-        await tester.pump();
-        expect(find.byType(LibraryPreloadProgress), findsOneWidget);
-        expect(find.text('Preparing your library'), findsOneWidget);
+        fixture.offline = failConnection;
+        await refresh();
+        expect(find.byType(ChannelListScreen), findsOneWidget);
+        expect(find.byType(LibraryPreloadProgress), findsNothing);
 
         if (failConnection) {
           await _pumpUntil(
             tester,
-            () => find.text('Try again').evaluate().isNotEmpty,
+            () => find
+                .textContaining('Saved content is still available.')
+                .evaluate()
+                .isNotEmpty,
           );
-          expect(find.text('Could not connect to the source'), findsOneWidget);
+          expect(fixture.requests['offline'], isPositive);
+          expect(find.byKey(const ValueKey('home-movie')), findsOneWidget);
+          await tester.ensureVisible(find.byKey(const ValueKey('home-movie')));
+          await tester.tap(find.byKey(const ValueKey('home-movie')));
+          await _pumpUntil(
+            tester,
+            () => find.text('Stale movie').evaluate().isNotEmpty,
+          );
           expect(
             (await read(() => db.readChannels(_sourceId))).single.name,
             'Stale channel',
@@ -605,34 +620,18 @@ void main() {
           expect(fixture.requests['get_live_streams'], isNull);
           expect(fixture.requests['get_vod_streams'], isNull);
           expect(fixture.requests['get_series'], isNull);
-          fixture.rejectAuthentication = false;
-          await tester.ensureVisible(find.text('Try again'));
-          await tester.tap(find.text('Try again'));
-          await tester.pump();
-          expect(find.byType(LibraryPreloadProgress), findsOneWidget);
+          await tester.tap(find.byTooltip('Home'));
           await _pumpUntil(
             tester,
-            () => find.text('Try again').evaluate().isNotEmpty,
+            () =>
+                find.byKey(const ValueKey('home-movie')).evaluate().isNotEmpty,
           );
-          // Manual retry cannot bypass a rejected account's host cooldown.
-          expect(fixture.requests['get_live_streams'], isNull);
-          expect(fixture.requests['get_vod_streams'], isNull);
-          expect(fixture.requests['get_series'], isNull);
-          // Release the simulated refusal so the same explicit retry can
-          // exercise recovery after the pause has elapsed.
-          ProviderRequestGate.instance.debugReset();
-          await tester.ensureVisible(find.text('Try again'));
-          await tester.tap(find.text('Try again'));
-          await tester.pump();
+          fixture.offline = false;
+          await refresh();
         }
 
-        await _pumpUntil(
-          tester,
-          () =>
-              fixture.movieStarted.isCompleted &&
-              fixture.seriesStarted.isCompleted,
-        );
-        expect(find.byType(ChannelListScreen), findsNothing);
+        await _pumpUntil(tester, () => fixture.movieStarted.isCompleted);
+        expect(find.byType(ChannelListScreen), findsOneWidget);
         fixture.movieGate.complete();
         await _pumpUntil(
           tester,
@@ -640,37 +639,37 @@ void main() {
               fixture.movieResponded.isCompleted &&
               fixture.liveStarted.isCompleted,
         );
-        expect(find.byType(LibraryPreloadProgress), findsOneWidget);
-        expect(find.byType(ChannelListScreen), findsNothing);
+        expect(find.byType(LibraryPreloadProgress), findsNothing);
+        await _pumpUntil(tester, () => fixture.seriesStarted.isCompleted);
         fixture.seriesGate.complete();
         if (gateEpg) {
-          await _pumpUntil(
-            tester,
-            () =>
-                fixture.epgStarted.isCompleted &&
-                (find.byType(ChannelListScreen).evaluate().isNotEmpty ||
-                    (find
-                            .byType(LibraryPreloadProgress)
-                            .evaluate()
-                            .isNotEmpty &&
-                        tester
-                            .widget<LibraryPreloadProgress>(
-                              find.byType(LibraryPreloadProgress),
-                            )
-                            .stages
-                            .values
-                            .every((ready) => ready != null))),
-          );
-          expect(find.byType(LibraryPreloadProgress), findsOneWidget);
-          expect(find.byType(ChannelListScreen), findsNothing);
-          expect(find.text('Program guide (EPG)'), findsOneWidget);
+          await _pumpUntil(tester, () => fixture.epgStarted.isCompleted);
+          expect(find.byType(ChannelListScreen), findsOneWidget);
           expect(fixture.epgGate.isCompleted, isFalse);
           fixture.epgGate.complete();
         }
+        await tester.ensureVisible(find.byKey(const ValueKey('home-movie')));
+        await tester.tap(find.byKey(const ValueKey('home-movie')));
         await _pumpUntil(
           tester,
-          () => find.byType(ChannelListScreen).evaluate().isNotEmpty,
+          () => find.text('Fixture movie').evaluate().isNotEmpty,
         );
+        await _pumpUntil(tester, () => refreshCompleted.isCompleted);
+        if (gateEpg) {
+          final channel = (await read(() => db.readChannels(_sourceId))).single;
+          final now = tester.binding.clock.now();
+          expect(
+            (await read(
+              () => db.programmesForChannel(
+                _sourceId,
+                channel.id,
+                from: now.subtract(const Duration(hours: 2)),
+                to: now.add(const Duration(hours: 2)),
+              ),
+            )).map((programme) => programme.title),
+            ['Fixture programme'],
+          );
+        }
         expect(find.byType(LibraryPreloadProgress), findsNothing);
         expect(
           (await read(() => db.readChannels(_sourceId)))
@@ -687,12 +686,6 @@ void main() {
         expect(fixture.requests['get_live_streams'], 1);
         expect(fixture.requests['get_vod_streams'], 1);
         expect(fixture.requests['get_series'], 1);
-        await tester.ensureVisible(find.byKey(const ValueKey('home-movie')));
-        await tester.tap(find.byKey(const ValueKey('home-movie')));
-        await _pumpUntil(
-          tester,
-          () => find.text('Fixture movie').evaluate().isNotEmpty,
-        );
         expect(find.text('Stale movie'), findsNothing);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -708,17 +701,17 @@ void main() {
   }
 
   testWidgets(
-    'manual refresh shows progress and replaces all recently cached catalogs',
+    'manual refresh leaves the library open and replaces recently cached catalogs',
     (tester) => exerciseRefresh(tester),
   );
 
   testWidgets(
-    'failed manual refresh preserves cached content and can be retried',
+    'offline manual refresh keeps cached content browsable and can be retried',
     (tester) => exerciseRefresh(tester, failConnection: true),
   );
 
   testWidgets(
-    'manual refresh keeps progress open until the program guide is saved',
+    'manual refresh updates the program guide while the library remains open',
     (tester) => exerciseRefresh(tester, gateEpg: true),
   );
 
@@ -900,20 +893,14 @@ void main() {
 
   testWidgets(
     'movie catalog recovers within the source transport retry budget',
-    (tester) => exercisePreload(
-      tester,
-      failMovies: false,
-      transientMovieFailures: 1,
-    ),
+    (tester) =>
+        exercisePreload(tester, failMovies: false, transientMovieFailures: 1),
   );
 
   testWidgets(
     'source connection recovers within the source transport retry budget',
-    (tester) => exercisePreload(
-      tester,
-      failMovies: false,
-      transientConnectFailures: 1,
-    ),
+    (tester) =>
+        exercisePreload(tester, failMovies: false, transientConnectFailures: 1),
   );
 
   testWidgets(
@@ -926,13 +913,10 @@ void main() {
 void _expectRetryPauses(List<DateTime> requestTimes) {
   expect(requestTimes.length, greaterThanOrEqualTo(2));
   // Xtream owns one short transport retry. Home does not replay setup.
-  expect(
-    [
-      for (var i = 1; i < requestTimes.length; i++)
-        requestTimes[i].difference(requestTimes[i - 1]),
-    ],
-    contains(greaterThanOrEqualTo(const Duration(milliseconds: 550))),
-  );
+  expect([
+    for (var i = 1; i < requestTimes.length; i++)
+      requestTimes[i].difference(requestTimes[i - 1]),
+  ], contains(greaterThanOrEqualTo(const Duration(milliseconds: 550))));
 }
 
 Future<void> _pumpUntil(WidgetTester tester, bool Function() ready) async {
@@ -989,7 +973,6 @@ class _XtreamFixture {
   final Map<String, List<DateTime>> requestTimes = {};
   bool _closed = false;
   bool offline = false;
-  bool rejectAuthentication = false;
 
   _XtreamFixture._(
     this.server, {
@@ -1084,7 +1067,7 @@ class _XtreamFixture {
           request.response.statusCode = HttpStatus.internalServerError;
         }
         body = {
-          'user_info': {'auth': rejectAuthentication ? 0 : 1},
+          'user_info': {'auth': 1},
         };
       case 'get_live_categories':
         body = [

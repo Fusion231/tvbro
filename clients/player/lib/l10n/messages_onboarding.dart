@@ -19,7 +19,9 @@ const polishOnboardingMessages = <String, String>{
       'Nie udało się zapisać ustawień autostartu. Spróbuj ponownie.',
   'Choose your language': 'Wybierz język',
   'Select the language used throughout the app.':
-      'Wybierz język używany w całej aplikacji.',
+      'Wybierz język aplikacji TVBro.',
+  'Device language': 'Język urządzenia',
+  'Language': 'Język',
   'Could not save the language. Please try again.':
       'Nie udało się zapisać języka. Spróbuj ponownie.',
   'Continue': 'Dalej',
@@ -58,6 +60,36 @@ const polishOnboardingMessages = <String, String>{
   'Subscription options': 'Opcje subskrypcji',
   'Refresh access': 'Odśwież dostęp',
   'Manage existing access': 'Zarządzaj posiadanym dostępem',
+  'Supporter in Google Play': 'Supporter w Google Play',
+  'Buy with Google Play': 'Kup przez Google Play',
+  'Buy Supporter with Google Play or use an existing Supporter place.':
+      'Kup Supportera przez Google Play lub skorzystaj z posiadanego miejsca Supporter.',
+  'Restore purchase': 'Przywróć zakup',
+  'Manage in Google Play': 'Zarządzaj w Google Play',
+  '{count} devices · {price}/year': '{count} urządzeń · {price}/rok',
+  'Choose how many devices to include. The subscription renews annually.':
+      'Wybierz liczbę urządzeń. Abonament odnawia się co rok.',
+  'Pair this device with your TVBro account before buying Supporter.':
+      'Przed zakupem Supportera połącz to urządzenie ze swoim kontem TVBro.',
+  'Your TVBro account already has a subscription or a checkout in progress.':
+      'Twoje konto TVBro ma już abonament lub płatność w toku.',
+  'Google Play plans are currently unavailable.': 'Pakiety Google Play są chwilowo niedostępne.',
+  'Google Play already has a purchase. Restore your purchase below.':
+      'Google Play ma już zapisany zakup. Wybierz „Przywróć zakup”.',
+  'Google Play could not start the purchase. Try again.':
+      'Nie udało się rozpocząć zakupu w Google Play. Spróbuj ponownie.',
+  'Google Play could not finish the purchase. Restore it if you were charged.':
+      'Google Play nie dokończył zakupu. Jeśli pobrano opłatę, wybierz „Przywróć zakup”.',
+  'Google Play could not confirm the purchase. Restore it to try again.':
+      'Nie udało się potwierdzić zakupu w Google Play. Wybierz „Przywróć zakup”, aby spróbować ponownie.',
+  'Google Play is waiting for payment. Access will update after confirmation.':
+      'Google Play oczekuje na płatność. Dostęp zaktualizuje się po jej potwierdzeniu.',
+  'Supporter is active on this device.': 'Supporter jest aktywny na tym urządzeniu.',
+  'The purchase is linked to your account. Assign this device a place in the panel.':
+      'Zakup jest połączony z Twoim kontem. Przypisz miejsce temu urządzeniu w panelu.',
+  'There is no active Google Play subscription for this purchase.':
+      'Ten zakup nie ma aktywnego abonamentu Google Play.',
+  'No Google Play purchase was found on this account.': 'Na tym koncie Google Play nie znaleziono zakupu.',
   'TVBro source code and license': 'Kod źródłowy i licencja TVBro',
   'This feature requires existing Supporter access. Pair your account and assign an existing place to this device, then refresh access.':
       'Ta funkcja wymaga posiadanego dostępu Supporter. Połącz konto i przypisz posiadane miejsce do tego urządzenia, a następnie odśwież dostęp.',

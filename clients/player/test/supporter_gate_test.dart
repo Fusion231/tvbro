@@ -13,6 +13,10 @@ import 'package:iptvs/widgets/supporter_gate.dart';
 
 void main() {
   final consumptionOnly = DistributionConfig.channel.isConsumptionOnly;
+  final googlePlay = DistributionConfig.channel == DistributionChannel.googlePlay && CloudConfig.isConfigured;
+  final storePrompt = googlePlay
+      ? 'Buy Supporter with Google Play or use an existing Supporter place.'
+      : 'This feature requires existing Supporter access. Pair your account and assign an existing place to this device, then refresh access.';
 
   setUpAll(() async {
     final loader = FontLoader('Inter');
@@ -78,11 +82,10 @@ void main() {
         expect(find.text('Plus applicable tax'), findsNothing);
         expect(find.text('Open panel'), findsNothing);
         expect(
-          find.text(
-            'This feature requires existing Supporter access. Pair your account and assign an existing place to this device, then refresh access.',
-          ),
+          find.text(storePrompt),
           findsOneWidget,
         );
+        expect(find.text('Buy with Google Play'), googlePlay ? findsOneWidget : findsNothing);
         expect(find.text('Refresh access'), findsOneWidget);
         expect(find.text('Manage existing access'), findsOneWidget);
         await tester.tap(find.text('Watch from beginning'));
@@ -151,7 +154,7 @@ void main() {
       consumptionOnly ? findsNothing : findsOneWidget,
     );
     expect(
-      find.textContaining('This feature requires existing Supporter access.'),
+      find.text(storePrompt),
       consumptionOnly ? findsOneWidget : findsNothing,
     );
     await tester.tap(
@@ -164,8 +167,8 @@ void main() {
       consumptionOnly ? isNull : 'plans',
     );
     if (consumptionOnly) {
-      expect(opened, Uri.parse(CloudConfig.accountPanelUrl));
-      expect(opened?.queryParameters['channel'], 'googlePlay');
+      expect(opened, Uri.parse(CloudConfig.accountPanelUrl('en')));
+      expect(opened?.queryParameters['channel'], DistributionConfig.channel.name);
     }
   });
 

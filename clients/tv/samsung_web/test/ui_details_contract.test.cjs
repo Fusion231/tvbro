@@ -109,6 +109,17 @@ function harness(options = {}) {
     }};
 }
 
+test('keyless series details identify TVmaze and link its license', async () => {
+  const kit=harness();
+  const record=kit.env.showDetails({id:'series',kind:'series',title:'Series',extra:{metadata:{tvmaze:{id:42}}}},'source');
+  await kit.settle();
+  const attribution=record.node.querySelector('.details-attribution');
+  assert.ok(attribution);
+  assert.match(attribution.textContent,/TVmaze/);
+  assert.deepEqual(attribution.children.filter(node=>node.tagName==='a').map(node=>node.getAttribute('href')),
+    ['https://www.tvmaze.com/shows/42','https://creativecommons.org/licenses/by-sa/4.0/']);
+});
+
 test('returning from playback keeps the freshly watched label when an older progress lookup finishes last', async () => {
   const progress = [];
   const kit = harness({query(action) { if (action === 'media.progress') { const request = deferred(); progress.push(request); return request.promise; } }});

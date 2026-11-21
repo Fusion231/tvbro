@@ -6,6 +6,7 @@ import '../data/distribution_channel.dart';
 import '../data/supporter_access.dart';
 import '../l10n/app_localizations.dart';
 import '../theme.dart';
+import 'google_play_supporter.dart';
 
 enum SupporterGateResult { allowed, free, cancelled }
 
@@ -53,6 +54,7 @@ class _SupporterGate extends StatefulWidget {
 
 class _SupporterGateState extends State<_SupporterGate> {
   bool get _consumptionOnly => DistributionConfig.channel.isConsumptionOnly;
+  bool get _playPurchase => canOpenGooglePlaySupporter && widget.access.isConfigured;
 
   bool _checking = false;
   String? _message;
@@ -77,9 +79,10 @@ class _SupporterGateState extends State<_SupporterGate> {
         uri.userInfo.isNotEmpty) {
       return null;
     }
-    if (_consumptionOnly) return Uri.parse(CloudConfig.accountPanelUrl);
+    final language = AppLanguageController.instance.language.code;
+    if (_consumptionOnly) return Uri.parse(CloudConfig.accountPanelUrl(language));
     return uri.replace(
-      queryParameters: {...uri.queryParameters, 'billing': 'plans'},
+      queryParameters: {...uri.queryParameters, 'billing': 'plans', 'lang': language},
     );
   }
 
@@ -138,7 +141,12 @@ class _SupporterGateState extends State<_SupporterGate> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (_consumptionOnly)
+              if (_playPurchase)
+                Text(
+                  tr('Buy Supporter with Google Play or use an existing Supporter place.'),
+                  style: text.bodyMedium,
+                )
+              else if (_consumptionOnly)
                 Text(
                   tr(
                     'This feature requires existing Supporter access. Pair your account and assign an existing place to this device, then refresh access.',
@@ -225,6 +233,15 @@ class _SupporterGateState extends State<_SupporterGate> {
               child: Text(
                 tr(_consumptionOnly ? 'Manage existing access' : 'Open panel'),
               ),
+            ),
+          if (_playPurchase)
+            OutlinedButton(
+              onPressed: _checking ? null : () async {
+                if (await showGooglePlaySupporter(context) && mounted) {
+                  await _refresh();
+                }
+              },
+              child: Text(tr('Buy with Google Play')),
             ),
           FilledButton.icon(
             autofocus: true,

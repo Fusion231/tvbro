@@ -140,7 +140,7 @@ test('distinguishes an absent alias from SDK errors and rejects malformed stored
   const failingRead = createKeyManagerDouble();
   failingRead.data.set('tvbro_sources_v1', '[]');
   failingRead.setReadFailure(sdkError);
-  assert.throws(() => create({ tizen: failingRead.tizen }).read(), (error) => error === sdkError);
+  assert.throws(() => create({ tizen: failingRead.tizen }).read(), {name:'UnknownError',code:'secure_store_read_failed'});
 
   const malformed = createKeyManagerDouble();
   malformed.data.set('tvbro_sources_v1', '{"password":"provider-secret"');
@@ -255,8 +255,8 @@ test('fails closed on alias-list failure or unavailable package identity instead
   const sdk = createKeyManagerDouble();
   const error = Object.assign(new Error('alias database unavailable'), {name:'UnknownError'});
   sdk.setListFailure(error);
-  assert.throws(() => create({tizen:sdk.tizen}).read(), candidate => candidate === error);
-  await assert.rejects(create({tizen:sdk.tizen}).write([]), candidate => candidate === error);
+  assert.throws(() => create({tizen:sdk.tizen}).read(), {name:'UnknownError',code:'secure_store_list_failed'});
+  await assert.rejects(create({tizen:sdk.tizen}).write([]), {name:'UnknownError',code:'secure_store_list_failed'});
   assert.equal(sdk.saves.length, 0);
 
   const unidentified = createKeyManagerDouble({packageIdentity:false});
@@ -267,6 +267,15 @@ test('fails closed on alias-list failure or unavailable package identity instead
   await assert.rejects(create({tizen:unidentified.tizen}).write([]), {name:'NotSupportedError'});
   assert.equal(unidentified.reads.length, 0, 'unidentified package metadata must not grant ownership');
   assert.equal(unidentified.saves.length, 0);
+});
+
+test('inconsistent native alias metadata reports the storage stage without treating saved profiles as absent', () => {
+  const sdk=createKeyManagerDouble();
+  sdk.tizen.keymanager.getDataAliasList=()=>null;
+  assert.throws(()=>create({tizen:sdk.tizen}).read(),{name:'UnknownError',code:'secure_store_list_failed'});
+  sdk.tizen.keymanager.getDataAliasList=()=>[{name:'tvbro_sources_v1_g1',packageId:'TVBroWebTV'}];
+  assert.throws(()=>create({tizen:sdk.tizen}).read(),{name:'UnknownError',code:'secure_store_read_failed'});
+  assert.equal(sdk.saves.length,0);
 });
 
 test('requires KeyManager and keeps the committed snapshot unchanged when a write fails', async () => {
@@ -288,6 +297,11 @@ test('requires KeyManager and keeps the committed snapshot unchanged when a writ
     kind: 'm3u',
     label: 'Not committed',
     fields: { playlistUrl: 'https://provider.test/list?token=secret' }
-  }]), { name: 'UnknownError' });
+  }]), failure => {
+    assert.equal(failure.name, 'UnknownError');
+    assert.equal(failure.code, 'secure_store_write_failed');
+    assert.doesNotMatch(failure.message, /provider|secret|token=/);
+    return true;
+  });
   assert.deepEqual(store.read(), []);
 });

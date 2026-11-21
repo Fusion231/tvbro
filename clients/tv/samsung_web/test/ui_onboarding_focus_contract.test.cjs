@@ -63,7 +63,7 @@ test('language entry focuses the selected language once after rendering, includi
   for (const fromSettings of [false, true]) {
     kit.focused.length = 0; kit.env.showLanguage(fromSettings);
     assert.equal(kit.focused.length, 1);
-    assert.equal(kit.focused[0].node.textContent, 'Polski');
+    assert.equal(kit.focused[0].node.firstChild.textContent, 'Polski');
     assert.equal(kit.focused[0].languageCount, 2);
     assert.equal(kit.view.languageReturn, fromSettings);
   }
@@ -72,7 +72,7 @@ test('language entry focuses the selected language once after rendering, includi
 test('language entry keeps first-language and empty-list Continue fallbacks', () => {
   const kit = harness(); kit.env.uiLanguage = 'unknown'; kit.env.showLanguage(false);
   assert.equal(kit.focused.length, 1);
-  assert.equal(kit.focused[0].node.textContent, 'English');
+  assert.equal(kit.focused[0].node.firstChild.textContent, 'English');
   kit.view.languages = []; kit.focused.length = 0; kit.env.showLanguage(false);
   assert.equal(kit.focused.length, 1);
   assert.equal(kit.focused[0].node, kit.byId('language-continue'));

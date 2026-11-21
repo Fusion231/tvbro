@@ -6,7 +6,7 @@ import '../sources/source_config.dart'; // newSourceId
 
 /// When the boot-time profile picker should appear.
 enum ProfilePickerStartup {
-  /// Show only when there's actually a choice to make (more than one profile).
+  /// Resume the active profile when one is available and unlocked.
   auto,
 
   /// Show on every launch.
@@ -19,24 +19,13 @@ enum ProfilePickerStartup {
 /// Pure decision for the boot short-circuit — unit-tested directly.
 ///
 /// [activeProfileLocked] overrides every mode: a profile with a PIN must be
-/// re-opened with it on each launch, and the only place that can ask is this
-/// screen. Without the override, `off` (and `auto` with a single profile) would
-/// boot straight into the locked profile's library — the gate would exist only
-/// for accounts that happen to have several profiles *and* have left the picker
-/// on, which is not a gate at all.
+/// re-opened with it on each launch. The picker handles that prompt.
 ///
 /// [hasActiveProfile] false while profiles exist overrides every mode too, for
 /// the mirror-image reason: the device state belongs to *no* profile, and the
 /// picker is the only thing that can restore a snapshot. That state is reached
-/// by deleting the active profile, which drops to the empty baseline and marks
-/// nothing active, deliberately — so booting past the picker here means booting
-/// into an empty library that no restart can fix, because with one profile left
-/// `auto` never shows the picker again. The user had to find the profile
-/// switcher by hand to recover.
-///
-/// It is the caller's [LocalProfileStore.ownerless] mark, not "is some profile
-/// drawn as active": an offline device can't draw its active cloud profile and
-/// still holds that profile's sources.
+/// by deleting the active profile, which drops to the empty baseline. The
+/// caller can still identify a cached active cloud profile while offline.
 bool shouldShowPickerAtStartup(
   ProfilePickerStartup mode,
   int profileCount, {
@@ -47,10 +36,7 @@ bool shouldShowPickerAtStartup(
   if (profileCount > 0 && !hasActiveProfile) return true;
   switch (mode) {
     case ProfilePickerStartup.auto:
-      // Show on first launch (0 profiles) so the user can create one, and
-      // whenever there is a real choice to make (>1 profile).  Skip when
-      // exactly one profile exists — nothing to choose.
-      return profileCount != 1;
+      return profileCount == 0;
     case ProfilePickerStartup.always:
       return true;
     case ProfilePickerStartup.off:

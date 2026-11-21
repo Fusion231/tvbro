@@ -374,6 +374,15 @@ void main() {
 
         await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
         await settle(tester);
+        final languageFocus = tester.widget<FocusableActionDetector>(
+          find.descendant(
+            of: find.widgetWithText(FocusableCard, 'Language'),
+            matching: find.byType(FocusableActionDetector),
+          ),
+        ).focusNode!;
+        expect(languageFocus.hasFocus, isTrue);
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await settle(tester);
         final profilesFocus = tester.widget<FocusableActionDetector>(
           find.descendant(
             of: find.widgetWithText(FocusableCard, 'Profiles'),

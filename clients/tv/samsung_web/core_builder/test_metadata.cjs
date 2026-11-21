@@ -116,6 +116,28 @@ async function main() {
     'late metadata from a retired configuration must not enter the cache');
   await stale.dispose();
 
+  const publicCalls = [];
+  const publicShow = {id:64950,name:'VisionQuest',summary:'<p>Series synopsis</p>',
+    image:{medium:'https://images.test/show-poster.jpg'},genres:['Drama'],averageRuntime:45,
+    _embedded:{cast:[{person:{name:'Actor',image:{medium:'https://images.test/actor.jpg'}},character:{name:'Lead'}}]}};
+  const publicSource = core.createSource(sourceConfig, async raw => {
+    const request=JSON.parse(raw), url=new URL(request.url);publicCalls.push(request);
+    assert.equal(url.hostname,'api.tvmaze.com');
+    return response(request,url.pathname==='/search/shows'?[{show:publicShow}]:publicShow);
+  });
+  const defaults=await invoke(publicSource,'metadata.configure',{config:{},language:'pl'});
+  assert.deepEqual(defaults.providers,['tvmaze']);
+  const publicItem={id:'public-series',kind:'series',title:'PL - VisionQuest',extra:{}};
+  const enriched=await invoke(publicSource,'metadata.enrich',{items:[publicItem]});
+  assert.equal(enriched[0].poster,'https://images.test/show-poster.jpg');
+  assert.equal(enriched[0].description,'Series synopsis');
+  const publicDetails=await invoke(publicSource,'metadata.details',{item:enriched[0],sourceDetailsLoaded:true});
+  assert.equal(publicDetails.info.cast[0].name,'Actor');
+  assert.equal(publicDetails.info.durationSeconds,2700);
+  assert.equal(publicCalls.length,2,'details reuse the automatically enriched public metadata');
+  assert.ok(publicCalls.every(request=>!Object.keys(request.headers || {}).some(name=>name.toLowerCase()==='authorization')));
+  await publicSource.dispose();
+
   const redirects = [];
   const redirectSource = core.createSource(sourceConfig, async raw => {
     const request = JSON.parse(raw), url = new URL(request.url);

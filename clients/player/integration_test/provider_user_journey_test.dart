@@ -47,6 +47,8 @@ import 'package:iptvs/widgets/tv_text_field.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:sqflite/sqflite.dart' as native_sqlite;
 
+import 'support/journey_http.dart';
+
 const _channelCount = int.fromEnvironment(
   'JOURNEY_CHANNELS',
   defaultValue: 1000,
@@ -92,7 +94,10 @@ void main() {
     final oldDatabasePath = await native_sqlite.getDatabasesPath();
     final directory = await Directory.systemTemp.createTemp('tvbro_journey_');
     final fixture = await _XtreamFixture.start();
-    final network = _LoopbackOnlyHttp();
+    final network = await JourneyHttp.start(
+      RegExp(r'^Fixture Series \d{5,}$').hasMatch,
+      acceptsMovie: RegExp(r'^Fixture Movie \d{5,}$').hasMatch,
+    );
     final rendered = _RenderedState(binding);
     final input = _NativeTextInput(binding.defaultBinaryMessenger);
     final phases = <Map<String, Object?>>[];
@@ -397,6 +402,8 @@ void main() {
         reason: 'Warm browsing, searches and reopened details must use the local caches.',
       );
       expect(network.deniedHosts, isEmpty);
+      expect(network.tvmazeSearches, isPositive);
+      expect(network.wikimediaSearches, isPositive);
       expect(fixture.unexpectedRequests, isEmpty);
       expect(tester.takeException(), isNull);
       metrics['status'] = 'succeeded';
@@ -426,10 +433,11 @@ void main() {
         metrics['requestCounts'] = Map<String, int>.from(fixture.counts);
         metrics['requests'] = fixture.requests;
         metrics['deniedOutboundHosts'] = network.deniedHosts.toList();
+        metrics['localTvmazeSearches'] = network.tvmazeSearches;
         metrics['unexpectedRequests'] = fixture.unexpectedRequests;
         metrics['processLifetimeMaxRssBytes'] = ProcessInfo.maxRss;
         await fixture.close();
-        network.close();
+        await network.close();
         input.close();
         HttpOverrides.global = oldHttp;
         PathProviderPlatform.instance = oldPaths;
@@ -862,6 +870,7 @@ class _XtreamFixture {
         'plot': 'Synthetic movie details $itemId',
         'movie_image': artwork,
         'duration_secs': 20,
+        'year': '2025',
       },
       'movie_data': {
         'stream_id': int.parse(itemId!),
@@ -983,31 +992,4 @@ class _MemorySecureStorage extends FlutterSecureStoragePlatform {
   @override
   Future<void> deleteAll({required Map<String, String> options}) async =>
       _values.clear();
-}
-
-class _LoopbackOnlyHttp extends HttpOverrides {
-  final deniedHosts = <String>{};
-  final _clients = <HttpClient>[];
-  @override
-  HttpClient createHttpClient(SecurityContext? context) {
-    final client = super.createHttpClient(context);
-    client.findProxy = (_) => 'DIRECT';
-    client.connectionFactory = (uri, proxyHost, proxyPort) {
-      if (uri.host != '127.0.0.1' &&
-          uri.host != 'localhost' &&
-          uri.host != '::1') {
-        deniedHosts.add(uri.host);
-        throw StateError('Only synthetic device-loopback HTTP is allowed.');
-      }
-      return Socket.startConnect(uri.host, uri.port);
-    };
-    _clients.add(client);
-    return client;
-  }
-
-  void close() {
-    for (final client in _clients) {
-      client.close(force: true);
-    }
-  }
 }

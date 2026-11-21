@@ -151,6 +151,65 @@ void main() {
     await finish(tester);
   });
 
+  testWidgets(
+    'startup recovers a missing active profile from the device account',
+    (tester) async {
+      const storage = FlutterSecureStorage();
+      await storage.delete(key: 'cloud_profile_id');
+      await const LocalProfileStore().setPickerStartup(
+        ProfilePickerStartup.auto,
+      );
+      final lookup = Completer<String?>();
+      sync.pendingActiveId = lookup.future;
+
+      await show(tester);
+      expect(find.text('Skip'), findsNothing);
+      expect(completed, isFalse);
+
+      lookup.complete('cloud');
+      await settle(tester);
+      expect(completed, isTrue);
+      expect(await sync.cachedProfileId(), 'cloud');
+      expect(await store.activeId(), _source.id);
+      expect(sync.sourcePulls, 0);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'an offline device with saved sources can boot without a profile list',
+    (tester) async {
+      await const FlutterSecureStorage().delete(key: 'cloud_profile_id');
+      await const LocalProfileStore().setPickerStartup(
+        ProfilePickerStartup.auto,
+      );
+      sync.pairingError = const SocketException('Offline');
+
+      await show(tester);
+      expect(completed, isTrue);
+      expect(await store.activeId(), _source.id);
+      expect(sync.sourcePulls, 0);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'offline startup with an unknown cloud profile preserves its PIN gate',
+    (tester) async {
+      await const FlutterSecureStorage().delete(key: 'cloud_profile_id');
+      await const LocalProfileStore().setPickerStartup(
+        ProfilePickerStartup.auto,
+      );
+      await cacheLockedProfile();
+      sync.pairingError = const SocketException('Offline');
+
+      await show(tester);
+      expect(completed, isFalse);
+      expect(find.text('Skip'), findsNothing);
+      await finish(tester);
+    },
+  );
+
   testWidgets('a background refresh updates the grid without navigating', (
     tester,
   ) async {
@@ -496,10 +555,79 @@ void main() {
 
     await resume(tester);
     await settle(tester);
-    expect(sync.listCalls, 2, reason: 'a successful read needs no recovery');
-    expect(sync.pairingCalls, 2);
+    expect(
+      sync.listCalls,
+      3,
+      reason: 'resume also refreshes a successful read',
+    );
+    expect(sync.pairingCalls, 3);
     await finish(tester);
   });
+
+  testWidgets(
+    'resume shows added, renamed and removed cloud profiles after a successful read',
+    (tester) async {
+      await show(tester);
+      expect(find.text('Family'), findsOneWidget);
+      expect(find.text('Kids'), findsOneWidget);
+      final sources = [
+        for (final source in await store.list()) source.toJson(),
+      ];
+
+      sync.pendingProfiles = Future.value(const [
+        CloudProfile(id: 'cloud', name: 'Renamed family', position: 0),
+        CloudProfile(id: 'new', name: 'New account profile', position: 1),
+      ]);
+      await resume(tester);
+      await settle(tester);
+
+      expect(find.text('Renamed family'), findsOneWidget);
+      expect(find.text('New account profile'), findsOneWidget);
+      expect(find.text('Family'), findsNothing);
+      expect(find.text('Kids'), findsNothing);
+      expect(sync.listCalls, 2);
+      expect(sync.profileSelections, 0);
+      expect(sync.sourcePulls, 0);
+      expect(await store.activeId(), _source.id);
+      expect([
+        for (final source in await store.list()) source.toJson(),
+      ], sources);
+      expect(await sync.cachedProfileId(), 'cloud');
+      expect(completed, isFalse);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'resume keeps a successful grid visible and shares a pending refresh',
+    (tester) async {
+      await show(tester);
+      final pending = Completer<List<CloudProfile>>();
+      sync.pendingProfiles = pending.future;
+
+      await resume(tester);
+      await settle(tester);
+      expect(sync.listCalls, 2);
+      expect(find.text('Family'), findsOneWidget);
+      expect(find.text('Kids'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      await resume(tester);
+      await settle(tester);
+      expect(sync.listCalls, 2);
+      expect(sync.pairingCalls, 2);
+      expect(find.text('Family'), findsOneWidget);
+
+      pending.complete(const [
+        CloudProfile(id: 'cloud', name: 'Updated family', position: 0),
+      ]);
+      await settle(tester);
+      expect(find.text('Updated family'), findsOneWidget);
+      expect(find.text('Kids'), findsNothing);
+      expect(completed, isFalse);
+      await finish(tester);
+    },
+  );
 
   testWidgets('Retry keeps the cached grid usable and coalesces resume reads', (
     tester,

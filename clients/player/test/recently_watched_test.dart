@@ -23,6 +23,8 @@ class _HistoryDatabase implements AppDatabase {
     title: 'Series · S01E02',
     kind: ContentKind.episode,
   );
+  final episodes = <MediaItem>[];
+  final parents = <MediaItem>[];
 
   @override
   Future<Channel?> readChannel(String sourceId, String channelId) async =>
@@ -34,7 +36,7 @@ class _HistoryDatabase implements AppDatabase {
     ContentKind kind,
     List<String> ids,
   ) async => [
-    for (final item in [movie, episode])
+    for (final item in [movie, episode, ...episodes, ...parents])
       if (item.kind == kind && ids.contains(item.id)) item,
   ];
 
@@ -99,6 +101,70 @@ void main() {
     first.dispose();
     second.dispose();
     restored.dispose();
+  });
+
+  testWidgets('history shows one series card and plays its latest episode', (
+    tester,
+  ) async {
+    final store = RecentlyWatchedStore();
+    final db = _HistoryDatabase();
+    final repo = LibraryRepository(source: DemoSource(), db: db);
+    const earlier = MediaItem(
+      id: 'old',
+      title: 'Old episode',
+      kind: ContentKind.episode,
+      parentId: 's1',
+    );
+    const latest = MediaItem(
+      id: 'new',
+      title: 'Latest episode',
+      kind: ContentKind.episode,
+      parentId: 's2',
+    );
+    db.episodes.addAll([earlier, latest]);
+    db.parents.addAll(const [
+      MediaItem(
+        id: 's1',
+        title: 'Season 1',
+        kind: ContentKind.season,
+        parentId: 'series',
+      ),
+      MediaItem(
+        id: 's2',
+        title: 'Season 2',
+        kind: ContentKind.season,
+        parentId: 'series',
+      ),
+      MediaItem(id: 'series', title: 'Family series', kind: ContentKind.series),
+    ]);
+    await store.record(repo.source.id, ContentKind.episode, earlier.id);
+    await store.record(repo.source.id, ContentKind.movie, db.movie.id);
+    await store.record(repo.source.id, ContentKind.episode, latest.id);
+    final selected = <MediaItem>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RecentlyWatchedView(
+            repo: repo,
+            store: store,
+            channelAllowed: (_) => true,
+            mediaAllowed: (_) => true,
+            onPlayChannel: (_) {},
+            onPlayMedia: selected.add,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Old episode'), findsNothing);
+    expect(find.text('Family series'), findsOneWidget);
+    expect(find.text('Movie'), findsOneWidget);
+    await tester.tap(find.text('Family series'));
+    expect(selected, [latest]);
+    await tester.pumpWidget(const SizedBox.shrink());
+    store.dispose();
+    await repo.source.dispose();
   });
 
   for (final size in [

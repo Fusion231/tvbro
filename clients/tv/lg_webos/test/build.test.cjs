@@ -32,7 +32,7 @@ test('LG build uses current shared UI/core/protocol sources and LG platform bind
   assert.equal(fs.existsSync(path.join(result.payload, 'platform/avplay.js')), false);
   const info = JSON.parse(fs.readFileSync(path.join(result.payload, 'appinfo.json'), 'utf8'));
   assert.equal(info.id, 'online.tvbro.webos');
-  assert.equal(info.version, '1.0.0');
+  assert.equal(info.version, '1.0.1');
   assert.equal(info.icon, 'icon.png');
   assert.equal(info.largeIcon, 'largeIcon.png');
   for (const [file, size] of [['icon.png', 80], ['largeIcon.png', 130]]) {

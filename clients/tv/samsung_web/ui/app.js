@@ -301,6 +301,7 @@
   var childrenStart = null, guideStart = null;
   var suspendedDetails = null;
   var seriesList = null, seriesScrollScheduled = false;
+  var mediaMetadataRequest = null, mediaMetadata = Object.create(null);
   var artworkScheduled = false;
   var artworkFlights = Object.create(null), artworkInFlight = 0;
   var artworkHosts = Object.create(null), artworkFailures = Object.create(null);
@@ -332,6 +333,7 @@
   }
   function applyUiLanguage(code) {
     uiLanguage = code; document.documentElement.lang = code;
+    document.documentElement.dir = code === 'ar' ? 'rtl' : 'ltr';
     staticUi.forEach(function (entry) {
       if (entry.attribute) entry.node.setAttribute(entry.attribute, t(entry.key));
       else entry.node.nodeValue = entry.before + t(entry.key) + entry.after;
@@ -356,15 +358,41 @@
     view.languageReturn = fromSettings === true; view.languagePrevious = view.languageCode;
     showScreen('language', false); renderLanguages();
   }
-  function renderLanguages() {
-    var parent = byId('language-list'); clear(parent);
-    (view.languages.length ? view.languages : JSON.parse(core.appLanguages())).forEach(function (language) {
+  function deviceLanguage(languages) {
+    var browser = typeof navigator === 'undefined' ? {} : navigator;
+    var preferences = (browser.languages || []).concat(browser.language || []);
+    for (var i = 0; i < preferences.length; i++) {
+      var base = preferences[i].toLowerCase().split(/[-_]/)[0];
+      if (base === 'in') base = 'id';
+      var match = languages.filter(function (language) { return language.code.split('-')[0] === base; })[0];
+      if (match) return match.code;
+    }
+    return null;
+  }
+  function renderLanguages(focusContinue) {
+    var parent = byId('language-list'), previousScroll = parent.scrollTop; clear(parent);
+    var languages = view.languages.length ? view.languages : JSON.parse(core.appLanguages());
+    var suggested = view.deviceLanguage;
+    if (suggested) languages = languages.filter(function (language) { return language.code === suggested; })
+      .concat(languages.filter(function (language) { return language.code !== suggested; }));
+    languages.forEach(function (language) {
       var selected = language.code === uiLanguage;
-      var node = button(language.name, 'button language-choice' + (selected ? ' selected-option' : ''), function () { saveLanguage(language.code); });
+      var node = button(null, 'button language-choice', function () {
+        applyUiLanguage(language.code); renderLanguages(true); text(byId('language-error'), '');
+      });
+      var name = element('span', 'language-choice-name', language.name);
+      name.setAttribute('lang', language.code); name.setAttribute('dir', 'auto');
+      node.appendChild(name);
+      if (language.code === suggested) {
+        var hint = element('span', 'language-device', t('Device language'));
+        hint.setAttribute('aria-hidden', 'true'); node.appendChild(hint);
+      }
       node.setAttribute('aria-pressed', selected ? 'true' : 'false'); node.disabled = view.languageSaving; parent.appendChild(node);
     });
     byId('language-continue').disabled = view.languageSaving; byId('language-back').hidden = !view.languageReturn;
-    byId('language-back').disabled = view.languageSaving; focus(parent.querySelector('[aria-pressed="true"]') || parent.firstChild || byId('language-continue'));
+    byId('language-back').disabled = view.languageSaving;
+    parent.scrollTop = previousScroll;
+    focus(focusContinue ? byId('language-continue') : parent.querySelector('[aria-pressed="true"]') || parent.firstChild || byId('language-continue'));
   }
   function saveLanguage(code) {
     if (view.languageSaving) return;
@@ -665,6 +693,15 @@
     byId('show-guide').hidden = !cap('guide'); byId('preview-panel').hidden = !cap('preview'); renderFields(); renderSources();
   }
   function refreshBootstrap() { return query('bootstrap').then(function (data) { applyBootstrap(data); return data; }); }
+  function refreshProfileListing() {
+    if (!view.languageSelected || view.busy || view.profileSelecting || dialogs.length || view.screen === 'pairing') return Promise.resolve();
+    var request = view.request;
+    return query('profiles.list', {preserveSelection:true}).then(function (data) {
+      if (request !== view.request) return;
+      view.profiles = array(data.profiles);
+      if (view.screen === 'profiles') renderProfiles();
+    }).catch(function () {});
+  }
   function afterProfile(data) {
     ++view.request; ++view.mediaRequest; ++view.guideRequest;
     ++view.pairingRequest; view.pairingOnboarding = false; view.pairingReady = false;
@@ -1704,10 +1741,48 @@
   function renderHistory(parent, entries) { clear(parent); entries.slice(0, 12).forEach(function (entry) { parent.appendChild(mediaCard(entry)); }); }
   function mediaCard(entry) {
     var args = contentArgs(entry), item = args.item || args.channel, node = button('', 'media-card', function () { openEntry(entry); });
-    if (item.poster || item.logo) image(item.poster || item.logo, 'media-poster', node); else node.appendChild(element('span', 'poster-placeholder', args.channel ? 'TV' : '▶'));
+    renderMediaCard(node, item);
+    return node;
+  }
+  function renderMediaCard(node, item) {
+    clear(node);
+    if (item.poster || item.logo) image(item.poster || item.logo, 'media-poster', node); else node.appendChild(element('span', 'poster-placeholder', item.kind && item.kind !== 'live' ? '▶' : 'TV'));
     node.appendChild(element('span', 'media-card-title', item.title || item.name));
     if (item.year || item.rating) node.appendChild(element('span', 'media-card-meta', [item.year, item.rating].filter(function (value) { return value != null && value !== ''; }).join(' · ')));
-    return node;
+  }
+  function enrichMediaCards(cards) {
+    var request = view.mediaRequest, source = view.source, profile = view.profile;
+    if (view.screen !== 'media' || !source) return;
+    if (mediaMetadataRequest !== request) { mediaMetadataRequest = request; mediaMetadata = Object.create(null); }
+    var targets = cards.filter(function (card) {
+      var item = card.item, key = JSON.stringify([item.kind,item.id]);
+      if (item.kind !== 'movie' && item.kind !== 'series') return false;
+      if (mediaMetadata[key]) { if (mediaMetadata[key] !== true) mediaMetadata[key] = card; return false; }
+      mediaMetadata[key] = card; return true;
+    });
+    if (!targets.length) return;
+    function current() { return request === view.mediaRequest && source === view.source && profile === view.profile && view.screen === 'media'; }
+    function nextBatch() {
+      // Small batches repaint early even with the public API's request pacing.
+      var batch = targets.splice(0,4);
+      query('media.enrich', {items:batch.map(function (card) { return card.item; })}).then(function (items) {
+        if (!current()) return;
+        var updated = Object.create(null);
+        array(items).forEach(function (item) { updated[JSON.stringify([item.kind,item.id])] = item; });
+        batch.forEach(function (card) {
+          var key = JSON.stringify([card.item.kind,card.item.id]), mounted = mediaMetadata[key], value = updated[key]; mediaMetadata[key] = true;
+          if (!value) return;
+          var repaint = ['poster','title','year','rating'].some(function (field) { return value[field] !== mounted.item[field]; });
+          Object.keys(value).forEach(function (field) { card.item[field] = value[field]; mounted.item[field] = value[field]; });
+          if (repaint && mounted.node.parentNode) renderMediaCard(mounted.node, mounted.item);
+        });
+        if (seriesList && seriesList.layout) { seriesList.layout.count = 0; seriesList.window = null; scheduleSeriesScroll(); }
+        if (targets.length) nextBatch();
+      }).catch(function () {
+        if (current()) batch.concat(targets).forEach(function (card) { mediaMetadata[JSON.stringify([card.item.kind,card.item.id])] = true; });
+      });
+    }
+    nextBatch();
   }
   function showMedia(kind) {
     if (!view.source && kind !== 'favorites' || view.screen === 'media' && view.mediaKind === kind) return;
@@ -1760,8 +1835,9 @@
     return start.promise;
   }
   function renderMediaItems(items) {
-    var parent = byId('media-items'); clear(parent); items.forEach(function (entry) { parent.appendChild(mediaCard(entry)); });
+    var parent = byId('media-items'), cards = []; clear(parent); items.forEach(function (entry) { var node = mediaCard(entry); parent.appendChild(node); cards.push({item:entry,node:node}); });
     byId('media-empty').hidden = !!items.length; byId('clear-media-search').hidden = !byId('media-search').value;
+    enrichMediaCards(cards);
   }
   function renderMediaBuffer() {
     if (view.mediaKind === 'series') { appendSeriesItems(); scheduleSeriesScroll(); return; }
@@ -1830,13 +1906,13 @@
     var pinnedRow = pinned >= 0 ? Math.floor(pinned / layout.columns) : -1;
     var pin = pinnedRow < start || pinnedRow >= end ? pinnedRow : -1, cached = list.window;
     if (cached && cached.layout === layout && cached.start === start && cached.end === end && cached.pin === pin && cached.count === list.items.length) return;
-    var desired = [], retained = Object.create(null), previous = 0;
+    var desired = [], cards = [], retained = Object.create(null), previous = 0;
     for (var nextRow = 0; nextRow < rows;) {
       if (nextRow < start && nextRow !== pinnedRow) { nextRow = pinnedRow >= nextRow && pinnedRow < start ? pinnedRow : start; continue; }
       if (nextRow >= end && nextRow !== pinnedRow) { if (pinnedRow >= nextRow) { nextRow = pinnedRow; continue; } break; }
       if (nextRow > previous) { var gap = element('div', 'series-spacer'); gap.setAttribute('aria-hidden', 'true'); gap.style.height = (offsets[nextRow] - offsets[previous]) + 'px'; desired.push(gap); }
       for (var index = nextRow * layout.columns; index < Math.min(list.items.length, (nextRow + 1) * layout.columns); index++) {
-        var node = seriesNode(index) || mediaCard(list.items[index]); node.setAttribute('data-series-index', String(index)); retained[index] = true; desired.push(node);
+        var node = seriesNode(index) || mediaCard(list.items[index]); node.setAttribute('data-series-index', String(index)); retained[index] = true; desired.push(node); cards.push({item:list.items[index],node:node});
       }
       previous = ++nextRow;
     }
@@ -1851,6 +1927,7 @@
     for (var position = desired.length - 1; position >= 0; position--) { if (desired[position].parentNode !== parent) parent.insertBefore(desired[position], before); before = desired[position]; }
     parent.setAttribute('data-series-count', String(list.items.length)); panel.scrollTop = scroll;
     list.window = {layout:layout,start:start,end:end,pin:pin,count:list.items.length};
+    enrichMediaCards(cards);
   }
   function loadSeriesMore() {
     var list = seriesList;
@@ -2022,7 +2099,7 @@
     query('media.metadataStatus').then(function (data) {
       if (!detailsCurrent(record)) return;
       var savedMetadata = item.extra && item.extra.metadata;
-      text(metadataStatus, t(savedMetadata && (savedMetadata.tmdb || savedMetadata.tvdb) ? 'Details from your provider and saved metadata.' : 'Details from your provider.'));
+      text(metadataStatus, t(savedMetadata && (savedMetadata.tmdb || savedMetadata.tvdb || savedMetadata.tvmaze) ? 'Details from your provider and saved metadata.' : 'Details from your provider.'));
     }).catch(function () { if (detailsCurrent(record)) text(metadataStatus, t('Details from your provider.')); });
     focus(primary); return record;
   }
@@ -2075,6 +2152,15 @@
         if (person.photoUrl) image(person.photoUrl, 'details-person-photo', node);
         node.appendChild(element('span', 'details-person-name', person.name)); if (person.role) node.appendChild(element('span', 'details-person-role', person.role)); cast.appendChild(node);
       }); castSection.appendChild(cast); parent.appendChild(castSection);
+    }
+    var metadata = item.extra && item.extra.metadata, tvmaze = metadata && metadata.tvmaze;
+    if (tvmaze) {
+      var attribution = element('p', 'muted details-attribution'), credit = element('a', '', t('TVmaze metadata (formatting adapted)')), license = element('a', '', 'CC BY-SA 4.0');
+      var id = Number(tvmaze.id);
+      credit.setAttribute('href', 'https://www.tvmaze.com' + (id > 0 && Math.floor(id) === id ? '/shows/' + id : ''));
+      license.setAttribute('href', 'https://creativecommons.org/licenses/by-sa/4.0/');
+      [credit,license].forEach(function (link, index) { if (index) attribution.appendChild(element('span', '', ' · ')); link.setAttribute('target', '_blank'); link.setAttribute('rel', 'noopener noreferrer'); attribution.appendChild(link); });
+      parent.appendChild(attribution);
     }
   }
   function loadDetailsSeasons(record) {
@@ -2807,7 +2893,11 @@
         } else if (key === 37 || key === 39) { if (!event.repeat) startSeekHold(key, key === 37 ? -10 : 10); }
         else { showChrome(true); focus(byId('play-pause')); }
       }
-      else { if (view.player && !dialogs.length) showChrome(true); move(key); }
+      else {
+        if (view.screen === 'language' && !dialogs.length && key === 38 && active === byId('language-continue')) {
+          var choices = byId('language-list'); focus(choices.querySelector('[aria-pressed="true"]') || choices.firstChild);
+        } else { if (view.player && !dialogs.length) showChrome(true); move(key); }
+      }
     }
     if (key === 9 && dialogs.length) {
       var nodes = dialogs[dialogs.length - 1].node.querySelectorAll('[data-nav]'), candidates = [];
@@ -2831,7 +2921,9 @@
     resetPreviewIdleTimer();
     if (!document.hidden) scheduleArtwork();
     if (!document.hidden && view.screen === 'pairing' && !view.pairingBusy && !dialogs.length) pairingAction('get');
+    if (!document.hidden) refreshProfileListing();
   });
+  window.addEventListener('online', refreshProfileListing);
   window.addEventListener('pagehide', function () { stopPairingWatch(); cancelPreviewIdleTimer(); cancelPlayerZap(); window.clearTimeout(channelNowNextTimer); channelNowNextTimer = null; });
   document.addEventListener('blur', function (event) { if (event.target.hasAttribute && event.target.hasAttribute('data-editable')) { event.target.readOnly = true; event.target.classList.remove('is-editing'); } }, true);
   bind('show-home', showHome); bind('show-sources', showSources); bind('show-settings', showSettings);
@@ -2886,5 +2978,10 @@
   window.addEventListener('resize', function () { scheduleArtwork(); if (seriesList) seriesList.layout = null; scheduleSeriesScroll(); var rect = view.player && view.playerReady ? fullRect() : view.preview ? previewRect() : null; if (rect) { nativeRect(rect); query('player.rect', { rect: rect }).catch(report); } });
   if (!platform || typeof platform.query !== 'function' || !validation || !validation.KIND_FIELDS) { busy(true); status(t("Could not start the app."), true); return; }
   busy(true); status(t("Starting TVBro…")); platform.onState(updatePlayer); updatePlayer(platform.getState());
-  refreshBootstrap().then(function () { busy(false); if (!view.languageSelected) showLanguage(false); else routeAfterLanguage(); }).catch(function (error) { busy(false); status(bootFailureMessage(error), true); });
+  refreshBootstrap().then(function () {
+    busy(false); view.deviceLanguage = deviceLanguage(view.languages);
+    if (!view.languageSelected) {
+      applyUiLanguage(view.deviceLanguage || 'en'); showLanguage(false);
+    } else routeAfterLanguage();
+  }).catch(function (error) { busy(false); status(bootFailureMessage(error), true); });
 }());

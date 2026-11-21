@@ -1,3 +1,4 @@
+import '../l10n/app_language.dart';
 import 'cloud_config.dart';
 import 'distribution_channel.dart';
 
@@ -25,7 +26,7 @@ class AppLinks {
     final panel = CloudConfig.panelUrl.trim();
     final base = Uri.parse(panel.endsWith('/') ? panel : '$panel/');
     final target = Uri.parse(page);
-    return panelAccountLink(
+    final url = panelAccountLink(
       base
           .resolve(
             DistributionConfig.channel.allowsExternalPurchases
@@ -34,6 +35,11 @@ class AppLinks {
           )
           .toString(),
       DistributionConfig.channel,
+    );
+    return pairingPanelLink(
+      url,
+      '',
+      language: AppLanguageController.instance.language.code,
     );
   }
 }

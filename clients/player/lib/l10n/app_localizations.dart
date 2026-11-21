@@ -1,4 +1,5 @@
 import 'app_language.dart';
+import 'international_messages.dart';
 import 'messages_browsing.dart';
 import 'messages_onboarding.dart';
 import 'messages_player.dart';
@@ -21,9 +22,11 @@ String translate(
   AppLanguage language, [
   Map<String, Object> parameters = const {},
 ]) {
-  final message = language == AppLanguage.polish
-      ? polishMessages[english] ?? english
-      : english;
+  final polish = language == AppLanguage.polish
+      ? polishMessages[english]
+      : null;
+  final message =
+      polish ?? internationalMessages[language.code]?[english] ?? english;
   return message.replaceAllMapped(RegExp(r'\{(\w+)\}'), (match) {
     final value = parameters[match[1]];
     return value?.toString() ?? match[0]!;

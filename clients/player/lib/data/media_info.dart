@@ -32,10 +32,14 @@ class MediaInfo {
 
   factory MediaInfo.fromItem(MediaItem item) {
     final fields = _fields(item.extra).toList();
+    final metadata = item.extra['metadata'];
+    final wikimedia = metadata is Map ? metadata['wikimedia'] : null;
+    final wikiPhotos = wikimedia is Map ? wikimedia['cast_photos'] : null;
     final cast = <String, String>{};
     final roles = <String, List<String>>{};
     final photos = <String, String>{};
     for (final map in fields) {
+      if (identical(map, wikimedia) && cast.isNotEmpty) continue;
       final credits = map['credits'];
       for (final value in [
         map['cast'],
@@ -66,7 +70,11 @@ class MediaInfo {
             role: roles[entry.key]!.isEmpty
                 ? null
                 : roles[entry.key]!.join(', '),
-            photoUrl: photos[entry.key],
+            photoUrl:
+                photos[entry.key] ??
+                _commonsPortrait(
+                  wikiPhotos is Map ? wikiPhotos[entry.key] : null,
+                ),
           ),
       ],
       directors: _firstList(fields, (map) sync* {
@@ -129,7 +137,7 @@ Iterable<Map> _fields(Map<String, dynamic> extra) sync* {
   yield extra;
   final metadata = extra['metadata'];
   if (metadata is Map) {
-    for (final provider in const ['tmdb', 'tvdb', 'tvmaze']) {
+    for (final provider in const ['tmdb', 'tvdb', 'tvmaze', 'wikimedia']) {
       final payload = metadata[provider];
       if (payload is Map) yield payload;
     }
@@ -211,6 +219,19 @@ String? _castPhoto(Map member) {
     }
   }
   return null;
+}
+
+String? _commonsPortrait(Object? credit) {
+  if (credit is! Map) return null;
+  final photo = _text(credit['photo_url']);
+  final uri = Uri.tryParse(photo ?? '');
+  return uri?.scheme == 'https' &&
+          const {
+            'thumb.wikimedia.org',
+            'upload.wikimedia.org',
+          }.contains(uri?.host)
+      ? photo
+      : null;
 }
 
 List<String> _firstList(List<Map> fields, Iterable<String> Function(Map) read) {

@@ -9,6 +9,7 @@ import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/player/player_screen.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
+import 'package:iptvs/screens/epg_grid_screen.dart';
 import 'package:iptvs/screens/live_preview_controller.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
 import 'package:iptvs/sources/demo_source.dart';
@@ -20,6 +21,27 @@ typedef _NowNext = ({Map<String, Programme> now, Map<String, Programme> next});
 class _StartupDatabase implements AppDatabase {
   @override
   Stream<String> get epgChanged => const Stream.empty();
+
+  @override
+  Future<Map<String, List<Programme>>> programmesForChannels(
+    String sourceId,
+    List<String> channelIds, {
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final now = DateTime.now();
+    return {
+      if (channelIds.contains('replacement'))
+        'replacement': [
+          Programme(
+            channelId: 'replacement',
+            start: now.subtract(const Duration(minutes: 10)),
+            stop: now.add(const Duration(minutes: 20)),
+            title: 'Replacement programme',
+          ),
+        ],
+    };
+  }
 
   @override
   Stream<void> get favoritesReplaced => const Stream.empty();
@@ -54,6 +76,7 @@ class _StartupRepository extends LibraryRepository {
       Channel(id: 'ch$i', name: 'Channel $i', number: i + 1),
   ];
   final guide = Completer<_NowNext>();
+  Completer<LibrarySnapshot>? pendingCatalog;
   final resolved = <String>[];
   final guideReads = <List<String>>[];
   final blockedIds = <String>{};
@@ -61,6 +84,7 @@ class _StartupRepository extends LibraryRepository {
 
   @override
   Future<LibrarySnapshot> load({bool forceRefresh = false}) async =>
+      pendingCatalog?.future ??
       LibrarySnapshot(
         categories: const [],
         channels: channels,
@@ -193,6 +217,97 @@ void main() {
       await tester.idle();
     }
     await tester.pumpWidget(const SizedBox.shrink());
+  }
+
+  for (final hasChannels in [true, false]) {
+    testWidgets('guide opened while a replacement source loads '
+        'shows ${hasChannels ? 'its programmes' : 'a settled empty state'}', (
+      tester,
+    ) async {
+      final observer = _PlayerObserver();
+      await openList(tester, _StartupRepository(), observer);
+      final repo = _StartupRepository()
+        ..pendingCatalog = Completer<LibrarySnapshot>();
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [observer],
+          home: ChannelListScreen(
+            repo: repo,
+            config: config,
+            store: SourceStore(),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('TV guide'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('No channels'), findsNothing);
+
+      repo.pendingCatalog!.complete(
+        LibrarySnapshot(
+          categories: const [],
+          channels: [
+            if (hasChannels)
+              const Channel(id: 'replacement', name: 'Replacement channel'),
+          ],
+          fromCache: false,
+          syncedAt: DateTime.now(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      if (hasChannels) {
+        expect(find.text('Replacement channel'), findsOneWidget);
+        expect(find.text('Replacement programme'), findsWidgets);
+      } else {
+        expect(find.text('No channels'), findsOneWidget);
+      }
+      await closeList(tester, repo, observer);
+    });
+  }
+
+  for (final replaceOwner in [false, true]) {
+    testWidgets(
+      'an open guide closes when its ${replaceOwner ? 'owner' : 'repository'} changes',
+      (tester) async {
+        final observer = _PlayerObserver();
+        await openList(tester, _StartupRepository(), observer);
+        await tester.tap(find.byTooltip('TV guide'));
+        await tester.pumpAndSettle();
+        expect(find.byType(EpgGridScreen), findsOneWidget);
+        if (replaceOwner) {
+          unawaited(
+            showDialog<void>(
+              context: tester.element(find.byType(EpgGridScreen)),
+              builder: (_) => const AlertDialog(title: Text('Other dialog')),
+            ),
+          );
+          await tester.pumpAndSettle();
+        }
+
+        final repo = _StartupRepository();
+        await tester.pumpWidget(
+          MaterialApp(
+            navigatorObservers: [observer],
+            home: ChannelListScreen(
+              key: replaceOwner ? const ValueKey('new-library') : null,
+              repo: repo,
+              config: config,
+              store: SourceStore(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (replaceOwner) {
+          expect(find.text('Other dialog'), findsOneWidget);
+          observer.navigator!.pop();
+          await tester.pumpAndSettle();
+        }
+        expect(find.byType(EpgGridScreen), findsNothing);
+        expect(tester.takeException(), isNull);
+        await closeList(tester, repo, observer);
+      },
+    );
   }
 
   for (final destination in [

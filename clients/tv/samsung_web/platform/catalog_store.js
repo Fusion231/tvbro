@@ -10,6 +10,8 @@
   var directoryName = 'tvbro_catalog_v1';
   var maximumFileBytes = 32 * 1024 * 1024;
   var maximumStoreBytes = 64 * 1024 * 1024;
+  var maximumPartBytes = 1024 * 1024, maximumParts = 128, maximumManifestBytes = 256 * 1024;
+  var partPattern = /^([0-9a-f]{64})\.([0-9]+-[0-9]+)\.part-(0|[1-9][0-9]*)\.json$/;
   var writeTail = Promise.resolve();
   var directoryFlight = null;
   var activeProtectedKeys = Object.create(null), activeProtectionLeases = 0;
@@ -151,21 +153,35 @@
   }
 
   function allGenerations(files) {
-    var generations = [], names = Object.create(null);
+    var generations = [], names = Object.create(null), byName = Object.create(null);
     (files || []).forEach(function (file) {
       if (!file || file.isDirectory || typeof file.name !== 'string') return;
       names[file.name] = file;
       var generation = parseGeneration(file.name);
-      if (generation) {
-        generation.dataFile = file;
-        generation.size = sizeOf(file);
-        generations.push(generation);
-      }
+      var part = partPattern.exec(file.name);
+      if (!generation && part) generation = parseGeneration(part[1] + '.' + part[2] + '.json');
+      if (!generation) return;
+      var entry = byName[generation.name];
+      if (!entry) { entry = byName[generation.name] = generation; entry.parts = []; generations.push(entry); }
+      if (part) entry.parts.push(file); else entry.dataFile = file;
     });
     generations.forEach(function (generation) {
       generation.markerFile = names[generation.marker] || null;
+      generation.dataSize = sizeOf(generation.dataFile);
+      generation.size = generation.parts.reduce(function (total, file) {
+        var size = sizeOf(file); return total === null || size === null ? null : total + size;
+      }, generation.dataSize);
     });
     return { generations: generations, names: names };
+  }
+
+  function generationNames(generation) {
+    return [generation.name, generation.marker].concat(generation.parts.map(function (file) { return file.name; }));
+  }
+
+  function validGenerationSize(generation) {
+    return generation.dataSize !== null && generation.dataSize <= maximumFileBytes && generation.size !== null &&
+      generation.size <= (generation.parts.length ? maximumStoreBytes : maximumFileBytes);
   }
 
   function fullPath(directory, name) {
@@ -197,7 +213,7 @@
   }
 
   function removeGeneration(directory, generation) {
-    return removeNames(directory, [generation.name, generation.marker]);
+    return removeNames(directory, generationNames(generation));
   }
 
   function parseMarker(marker) {
@@ -233,7 +249,7 @@
             return removeGeneration(directory, candidate).then(next);
           }
           attempts += 1;
-          var dataSize = candidate.size, markerSize = sizeOf(candidate.markerFile);
+          var dataSize = candidate.dataSize, markerSize = sizeOf(candidate.markerFile);
           if (dataSize === null || dataSize > maximumFileBytes || markerSize === null || markerSize > 64) {
             return removeGeneration(directory, candidate).then(next);
           }
@@ -326,6 +342,9 @@
         return new environment.Blob([raw]).size;
       }
     } catch (_) {}
+    if (environment && typeof environment.TextEncoder === 'function') {
+      return new environment.TextEncoder().encode(raw).length;
+    }
     // Without Blob support, use a conservative bound so the global budget is
     // never exceeded by a Unicode catalog.
     return raw.length <= Math.floor(maximumFileBytes / 3) ? raw.length * 3 : maximumFileBytes + 1;
@@ -373,17 +392,17 @@
       var generation = entry.generation;
       dataNames[generation.name] = true;
       if (!byKey[generation.key]) byKey[generation.key] = [];
-      if (entry.complete && generation.size !== null && generation.size <= maximumFileBytes) {
+      if (entry.complete && validGenerationSize(generation)) {
         byKey[generation.key].push(generation);
       } else {
-        remove.push(generation.name, generation.marker);
+        remove = remove.concat(generationNames(generation));
       }
     });
     Object.keys(byKey).forEach(function (cacheKey) {
       byKey[cacheKey].sort(generationOrder);
       if (isProtected(cacheKey, preserveKeys)) return;
       var keep = cacheKey === key ? 1 : 2;
-      byKey[cacheKey].slice(keep).forEach(function (generation) { remove.push(generation.name, generation.marker); });
+      byKey[cacheKey].slice(keep).forEach(function (generation) { remove = remove.concat(generationNames(generation)); });
     });
     Object.keys(indexMarkerNames(files)).forEach(function (name) {
       var dataName = name.slice(0, -3);
@@ -392,7 +411,7 @@
     return removeNames(directory, remove).then(function () {
       return listFiles(directory).then(function (currentFiles) {
         var live = generationFiles(currentFiles).filter(function (entry) {
-          return entry.complete && entry.generation.size !== null && entry.generation.size <= maximumFileBytes;
+          return entry.complete && validGenerationSize(entry.generation);
         });
         var total = live.reduce(function (sum, entry) { return sum + entry.generation.size; }, 0);
         if (total + nextBytes <= maximumStoreBytes) return true;
@@ -413,7 +432,7 @@
           chain = chain.then(function () {
             if (total + nextBytes <= maximumStoreBytes) return;
             return removeNames(directory, victim.files.reduce(function (names, generation) {
-              names.push(generation.name, generation.marker); return names;
+              return names.concat(generationNames(generation));
             }, [])).then(function (ok) {
               if (ok) total -= victim.files.reduce(function (sum, generation) { return sum + generation.size; }, 0);
             });
@@ -436,9 +455,9 @@
 
   function pruneAfterWrite(directory, files, key) {
     var generations = orderedForKey(files, key), remove = [];
-    generations.slice(2).forEach(function (generation) { remove.push(generation.name, generation.marker); });
+    generations.slice(2).forEach(function (generation) { remove = remove.concat(generationNames(generation)); });
     generations.forEach(function (generation) {
-      if (!generation.markerFile) remove.push(generation.name);
+      if (!generation.markerFile) remove = remove.concat(generationNames(generation));
     });
     return removeNames(directory, remove).then(function () {});
   }
@@ -488,7 +507,10 @@
   function discardNow(key, token) {
     var dataName = key + '.' + token + '.json';
     return getDirectory().then(function (directory) {
-      return removeNames(directory, [dataName, dataName + '.ok']);
+      return listFiles(directory).then(function (files) {
+        var generation = orderedForKey(files, key).filter(function (row) { return row.token === token; })[0];
+        return removeNames(directory, generation ? generationNames(generation) : [dataName, dataName + '.ok']);
+      });
     }).catch(function () { return false; });
   }
 
@@ -500,6 +522,7 @@
           if (!file || file.isDirectory || typeof file.name !== 'string') return;
           var generation = parseGeneration(file.name);
           if (generation && generation.key === key) remove.push(file.name, generation.marker);
+          else if (partPattern.test(file.name) && file.name.slice(0, key.length + 1) === key + '.') remove.push(file.name);
           else if (file.name.slice(0, key.length + 1) === key + '.' && /\.json\.ok$/.test(file.name)) remove.push(file.name);
         });
         return removeNames(directory, remove);
@@ -539,8 +562,120 @@
     };
   }
 
+  function partName(key, token, index) { return key + '.' + token + '.part-' + index + '.json'; }
+  function validManifest(manifest, key, saved) {
+    return manifest && manifest.schema === 1 && manifest.key === key && Array.isArray(manifest.parts) &&
+      manifest.parts.length <= maximumParts && manifest.parts.every(function (part, index) {
+        return part && part.index === index && (!saved || typeof part.checksum === 'string' && /^[a-f0-9]{64}$/.test(part.checksum) &&
+          typeof part.bytes === 'number' && part.bytes > 0 && part.bytes <= maximumPartBytes && Math.floor(part.bytes) === part.bytes);
+      });
+  }
+  function readBatchNow(key, remaining) {
+    if (!remaining) return Promise.resolve(null);
+    return readNow(key).then(function (saved) {
+      if (!saved) return null;
+      var envelope;
+      function previous() {
+        return discardNow(key, saved.token).then(function () { return readBatchNow(key, remaining - 1); });
+      }
+      try { envelope = JSON.parse(saved.raw); } catch (_) { return previous(); }
+      if (!envelope || envelope.format !== 'tvbro-catalog-batch-v1') {
+        // A legacy canonical snapshot is restored by importCatalog instead.
+        // An unreadable batch must not hide the previous committed generation.
+        return envelope && envelope.schema === 1 && typeof envelope.payload === 'string' ? null : previous();
+      }
+      return getDirectory().then(function (directory) {
+        var manifest = envelope.manifest;
+        if (!validManifest(manifest, key, true) || measureBytes(saved.raw) > maximumManifestBytes || !manifest.parts.every(function (part) {
+          try { return sizeOf(directory.resolve(partName(key, saved.token, part.index))) === part.bytes; }
+          catch (_) { return false; }
+        })) {
+          return previous();
+        }
+        return {manifest: manifest, token: saved.token, count: manifest.parts.length};
+      });
+    });
+  }
+  function writeBatchNow(key, input, readPart, preserveKeys) {
+    var manifest, directory, token, written = [], pending = Object.create(null), bytes = 0;
+    try { manifest = JSON.parse(JSON.stringify(input)); } catch (_) { return Promise.resolve(false); }
+    if (!validManifest(manifest, key, false) || typeof readPart !== 'function') return Promise.resolve(false);
+    function room(nextBytes) {
+      return listFiles(directory).then(function (files) {
+        // The new generation is unpublished. Count its bytes in the reservation
+        // while keeping its parts out of orphan cleanup until the commit marker.
+        return pruneBeforeWrite(directory, files.filter(function (file) { return !pending[file.name]; }), key, nextBytes, preserveKeys);
+      }).then(function (ok) { if (!ok) throw makeError('QuotaExceededError', 'Catalog cache is full.'); });
+    }
+    function write(name, raw) {
+      written.push(name); pending[name] = true;
+      return writeFile(directory, name, raw);
+    }
+    function part(position) {
+      if (position >= manifest.parts.length) return Promise.resolve();
+      var descriptor = manifest.parts[position];
+      return Promise.resolve().then(function () { return readPart(descriptor); }).then(function (value) {
+        if (!value || typeof value.raw !== 'string' || !value.raw.length || typeof value.checksum !== 'string' || !/^[a-f0-9]{64}$/.test(value.checksum)) {
+          throw makeError('TypeError', 'Invalid catalog cache part.');
+        }
+        var size = measureBytes(value.raw);
+        if (size > maximumPartBytes || value.bytes != null && value.bytes !== size) throw makeError('RangeError', 'Catalog part exceeded its size limit.');
+        descriptor.bytes = size; descriptor.checksum = value.checksum;
+        if (value.decodedBytes != null) descriptor.decodedBytes = value.decodedBytes;
+        return room(bytes + size + maximumManifestBytes).then(function () {
+          return write(partName(key, token, position), value.raw);
+        }).then(function (file) {
+          if (sizeOf(file) !== size) throw makeError('IOError', 'Catalog part write was incomplete.');
+          bytes += size; return part(position + 1);
+        });
+      });
+    }
+    return getDirectory().then(function (value) { directory = value; return listFiles(directory); }).then(function (files) {
+      token = nextToken(files, key); return part(0);
+    }).then(function () {
+      var raw = JSON.stringify({format:'tvbro-catalog-batch-v1',manifest:manifest}), size = measureBytes(raw);
+      if (size > maximumManifestBytes) throw makeError('RangeError', 'Catalog manifest exceeded its size limit.');
+      return room(bytes + size).then(function () { return write(key + '.' + token + '.json', raw); }).then(function () {
+        return write(key + '.' + token + '.json.ok', 'v1\n' + raw.length);
+      });
+    }).then(function () {
+      return listFiles(directory).then(function (files) { return pruneAfterWrite(directory, files, key); }).catch(function () {});
+    }).then(function () { return true; }).catch(function () {
+      return (directory ? removeNames(directory, written) : Promise.resolve()).then(function () { return false; });
+    });
+  }
+
   return {
     protectKeys: protectKeys,
+    readBatch: function (key) {
+      try { validateKey(key); } catch (error) { return Promise.reject(error); }
+      return serialize(function () { return readBatchNow(key, 2).catch(function () { return null; }); });
+    },
+    readBatchPart: function (key, token, index) {
+      try {
+        validateKey(key);
+        if (typeof token !== 'string' || !tokenPattern.test(token) || typeof index !== 'number' || index < 0 || index >= maximumParts || Math.floor(index) !== index) {
+          throw makeError('TypeError', 'Invalid catalog cache part identity.');
+        }
+      } catch (error) { return Promise.reject(error); }
+      return serialize(function () { return getDirectory().then(function (directory) {
+        var file = directory.resolve(partName(key, token, index)), size = sizeOf(file);
+        if (size === null || size > maximumPartBytes) throw makeError('IOError', 'Catalog part exceeded its size limit.');
+        return readText(file);
+      }); });
+    },
+    writeBatch: function (key, manifest, readPart, writeOptions) {
+      var preserveKeys;
+      try { validateKey(key); preserveKeys = protectedKeySet(writeOptions); } catch (error) { return Promise.reject(error); }
+      return serialize(function () { return writeBatchNow(key, manifest, readPart, preserveKeys); });
+    },
+    discardBatch: function (key, token) {
+      try {
+        validateKey(key);
+        if (typeof token !== 'string' || !tokenPattern.test(token)) throw makeError('TypeError', 'Invalid catalog cache generation.');
+      } catch (error) { return Promise.reject(error); }
+      return serialize(function () { return discardNow(key, token); });
+    },
     read: function (key) {
       try { validateKey(key); } catch (error) { return Promise.reject(error); }
       return serialize(function () { return readNow(key).catch(function () { return null; }); });

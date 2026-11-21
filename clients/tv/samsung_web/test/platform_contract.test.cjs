@@ -15,6 +15,19 @@ const output = path.resolve(project, '../output/samsung-web');
 const build = JSON.parse(fs.readFileSync(path.join(output, 'latest-build.json'), 'utf8'));
 const payload = process.env.TVBRO_SAMSUNG_TEST_PAYLOAD || build.payload;
 
+async function waitForGuidePreparation(api) {
+  let unsubscribe, timer;
+  try {
+    await new Promise((resolve,reject)=>{
+      timer=setTimeout(()=>reject(Error('Background EPG preparation did not settle')),5000);
+      unsubscribe=api.onState(state=>{
+        const row=state.catalogPreparation&&state.catalogPreparation.sections.epg;
+        if(row&&row.status!=='pending')resolve();
+      });
+    });
+  } finally {clearTimeout(timer);if(unsubscribe)unsubscribe();}
+}
+
 function loadModules() {
   const sandbox = {
     console,
@@ -354,7 +367,9 @@ test('EPG failures cross the canonical binding and facade with safe causes inste
     if (!fixture.inferred) config.fields.epgUrl = 'https://guide.invalid/private-provider-token.xml';
     const saved = (await kit.api.query('sources.add',{config}))[0];
     const catalog = await kit.api.query('sources.load',{id:saved.id});
-    assert.equal(catalog.preparation.sections.epg.status,'failed','onboarding records the first guide failure without blocking channels');
+    assert.equal(catalog.preparation.sections.epg.status,'pending','catalogs open before the background guide attempt');
+    await waitForGuidePreparation(kit.api);
+    assert.equal(kit.api.getState().catalogPreparation.sections.epg.status,'failed','the background guide failure does not block channels');
     const from = new Date().toISOString(), to = new Date(Date.now()+7200000).toISOString();
     let retryAt;
     await assert.rejects(kit.api.query('guide',{channels:catalog.channels,from,to}), error => {
@@ -426,7 +441,9 @@ test('a guide HTTP 403 permits the next request for the same source and channels
   config.fields.epgUrl = 'https://guide.invalid/guide.xml';
   const saved = (await kit.api.query('sources.add',{config}))[0];
   const catalog = await kit.api.query('sources.load',{id:saved.id});
-  assert.equal(catalog.preparation.sections.epg.status,'failed');
+  assert.equal(catalog.preparation.sections.epg.status,'pending');
+  await waitForGuidePreparation(kit.api);
+  assert.equal(kit.api.getState().catalogPreparation.sections.epg.status,'failed');
   assert.equal(guideRequests,1,'onboarding makes the first guide attempt');
   const request = {channels:catalog.channels};
   assert.deepEqual((await kit.api.query('guide',request)).programmes,[]);

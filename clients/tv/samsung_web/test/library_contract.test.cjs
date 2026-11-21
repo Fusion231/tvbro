@@ -160,6 +160,7 @@ test('language selection uses the global app_language key without a session and 
   const cloud=await attachCloud(kit,{authenticated:false});
   const initial=await kit.api.query('language.get');
   assert.equal(initial.languageCode,'en');assert.equal(initial.languageSelected,false);
+  assert.equal(initial.languages.length,18);
   assert.ok(initial.languages.some(language=>language.code==='pl'));
   const before=localProfileState(kit),selected=await kit.api.query('language.set',{code:'pl'});
   assert.equal(selected.languageCode,'pl');assert.equal(selected.languageSelected,true);
@@ -174,6 +175,9 @@ test('language selection uses the global app_language key without a session and 
   kit.device.failNext();await assert.rejects(cold.query('language.set',{code:'en'}),{name:'UnknownError'});
   assert.deepEqual(kit.userState.read(),committed);
   assert.equal(persistedUserState(kit).app_language,'pl');
+  const arabic = await cold.query('language.set',{code:'ar'});
+  assert.equal(arabic.languageCode,'ar');
+  assert.equal((await cold.query('bootstrap')).languageCode,'ar');
   assert.deepEqual(cloud.calls,[]);assert.equal(kit.calls.requests.length,0);
 });
 
@@ -202,7 +206,7 @@ test('profiles use real PIN functions and persisted KeyManager state without cro
 test('startup picker migrates the active legacy preference atomically and applies one global mode across profiles and reloads',async()=>{
   const kit=harness(()=>{throw Error('Startup settings must not contact a provider');});
   const first=await profile(kit,'Locked startup','1234'),second=(await kit.api.query('profiles.create',{name:'Second startup'})).profile;
-  assert.equal((await kit.api.query('bootstrap')).showProfilePicker,true);
+  assert.equal((await kit.api.query('bootstrap')).showProfilePicker,false);
   await kit.userState.update(state=>{
     delete state.profile_picker_startup;
     state.samsung_settings_v1=JSON.stringify({[first.id]:{profilePickerStartup:'always'},[second.id]:{profilePickerStartup:'off'}});
@@ -225,7 +229,7 @@ test('startup picker migrates the active legacy preference atomically and applie
   await cold.query('settings.set',{settings:{profilePickerStartup:'auto'}});
   assert.equal(kit.userState.get('profile_picker_startup'),'auto');
   const automatic=await createLibrary(kit.options).query('bootstrap');
-  assert.equal(automatic.showProfilePicker,true);assert.equal(automatic.settings.profilePickerStartup,'auto');
+  assert.equal(automatic.showProfilePicker,false);assert.equal(automatic.settings.profilePickerStartup,'auto');
   const committed=kit.userState.read();kit.device.failNext();
   await assert.rejects(cold.query('settings.set',{settings:{profilePickerStartup:'always',
     parental:{version:1,verifier:null,lockSettings:false,channels:[],categories:[]}}}),{name:'UnknownError'});
@@ -428,6 +432,7 @@ test('EPG deferred reads preserve the original safe cause and deadline across wi
   await source(kit,{id:'retry-deadline',kind:'xtream',label:'Retry',fields:{host:'https://retry-deadline.fixture',username:'user',password:'pass'},settings:{}});
   const loaded=await kit.api.query('sources.load',{id:'retry-deadline'});
   const window={channels:loaded.channels,from:new Date(base).toISOString(),to:new Date(base+7200000).toISOString()};
+  await assert.rejects(kit.api.query('guide',window),error=>error.code==='epg_invalid_data');
   let deadline;
   await assert.rejects(kit.api.query('guide',window),error=>{
     assert.equal(error.code,'epg_retry_deferred');assert.equal(error.causeCode,'epg_invalid_data');
@@ -503,8 +508,10 @@ test('cold Samsung runtimes restore metadata and EPG offline, including differen
   await kit.api.query('profiles.create',{name:'Other profile'});
   await source(kit,config);
   const beforeOther=kit.calls.requests.length;
-  assert.equal((await kit.api.query('sources.load',{id:'persist'})).channels.length,1);
+  const otherLoaded=await kit.api.query('sources.load',{id:'persist'});
+  assert.equal(otherLoaded.channels.length,1);
   assert.ok(kit.calls.requests.length>beforeOther,'a second profile must not reuse the first profile cache');
+  await kit.api.query('guide',{channels:otherLoaded.channels});
   await kit.api.query('cache.flush');
   const catalogKeys=[...new Set(writes.filter(write=>write.kind==='catalog').map(write=>write.key))];
   assert.equal(catalogKeys.length,2,'the same provider config gets separate scoped catalog keys');
@@ -728,6 +735,7 @@ test('warm Samsung navigation reuses provider metadata across sequential and con
   const categories={kind:'movie'},details={item:kit.movie};
   await kit.api.query('catalog.categories',categories);
   await kit.api.query('media.details',details);
+  await kit.api.query('guide',{channels:kit.loaded.channels});
   const before=kit.calls.requests.length;
   for(let i=0;i<20;i++) {
     await kit.api.query('catalog.categories',categories);
@@ -802,7 +810,9 @@ test('10k-channel Samsung catalog stays warm through repeated navigation and gui
   const coldMs=performance.now()-start;
   assert.equal(loaded.channels.length,10000);
   const guideReads=()=>kit.calls.requests.filter(request=>new URL(request.url).pathname==='/epg.xml').length;
-  assert.equal(guideReads(),1,'cold preparation attempts EPG once before returning');
+  assert.equal(guideReads(),0,'cold catalogs open before the background EPG request');
+  await kit.api.query('guide',{channels:loaded.channels.slice(0,20)});
+  assert.equal(guideReads(),1,'the guide can be requested after opening the catalog');
   const before=kit.calls.requests.length,warmStart=performance.now();
   for(let i=0;i<30;i++) assert.equal((await kit.api.query('sources.load',{id:'large'})).channels.length,10000);
   assert.equal(kit.calls.requests.length,before);
@@ -813,6 +823,54 @@ test('10k-channel Samsung catalog stays warm through repeated navigation and gui
   assert.equal(afterGuide,before);assert.equal(kit.calls.requests.length,afterGuide);
   t.diagnostic(JSON.stringify({channels:10000,coldMs,warm30Ms:warmMs,warmProviderRequests:0,coldGuideRequests:guideReads()}));
   await kit.api.dispose();
+});
+
+test('real Samsung batch cache opens M3U playback before EPG and restores all lists offline after restart',async()=>{
+  const disk=catalogFileSystem(),guide=deferred(),guideStarted=deferred(),timers=new Map();
+  let offline=false,nextTimer=0;
+  const kit=harness(async url=>{
+    if(offline)throw Error('Provider offline after restart');
+    if(url.pathname==='/guide.xml'){guideStarted.resolve();return guide.promise;}
+    return '#EXTM3U\n#EXTINF:-1 tvg-id="live" group-title="TV",Live channel\nhttps://streams.fixture/live.ts\n'+
+      '#EXTINF:-1 group-title="Films",Film\nhttps://streams.fixture/movie/1.mp4\n'+
+      '#EXTINF:-1 group-title="Shows",Show S01E01\nhttps://streams.fixture/series/1.mp4\n';
+  });
+  await kit.api.dispose();
+  Object.assign(kit.options,{catalogStore:disk.restart(),
+    setTimeout(callback,delay){const id=++nextTimer;timers.set(id,{callback,delay});return id;},
+    clearTimeout(id){timers.delete(id);}});
+  kit.api=createLibrary(kit.options);
+  await profile(kit,'Real disk cache');
+  const config=m3uConfig('real-disk','real-disk-'+kit.suffix+'.fixture');
+  config.fields.epgUrl='https://real-disk-'+kit.suffix+'.fixture/guide.xml';
+  await source(kit,config);
+  try {
+    const loaded=await kit.api.query('sources.load',{id:config.id});
+    assert.equal(loaded.cachePersisted,true);
+    assert.equal(loaded.channels.length,1);
+    const movies=await kit.api.query('catalog.items',{kind:'movie',page:1});
+    const series=await kit.api.query('catalog.items',{kind:'series',page:1});
+    assert.equal(movies.items.length,1);assert.equal(series.items.length,1);
+    assert.equal(kit.calls.requests.filter(row=>new URL(row.url).pathname==='/guide.xml').length,0,
+      'the initial lists are committed and returned before background EPG starts');
+    const jobs=[...timers.entries()].filter(([,job])=>job.delay===0);
+    for(const [id,job] of jobs){timers.delete(id);job.callback();}
+    await guideStarted.promise;
+    await kit.api.query('playback.play',{channel:loaded.channels[0]});
+    assert.equal(kit.calls.open.length,1,'playback is usable while EPG is pending');
+    guide.reject(Error('Guide unavailable'));
+    await new Promise(resolve=>setImmediate(resolve));
+    await kit.api.dispose();
+    offline=true;
+    Object.assign(kit.options,modules(),{catalogStore:disk.restart()});
+    kit.api=createLibrary(kit.options);
+    const before=kit.calls.requests.length;
+    const restored=await kit.api.query('sources.load',{id:config.id});
+    assert.equal(restored.cachePersisted,true);assert.equal(restored.channels.length,1);
+    assert.equal((await kit.api.query('catalog.items',{kind:'movie',page:1})).items[0].id,movies.items[0].id);
+    assert.equal((await kit.api.query('catalog.items',{kind:'series',page:1})).items[0].id,series.items[0].id);
+    assert.equal(kit.calls.requests.length,before,'fresh lists restore from disk without provider requests');
+  } finally {guide.resolve('<tv></tv>');await kit.api.dispose();}
 });
 
 test('object-returning worker bridge reuses metadata without sharing mutable results',async()=>{
@@ -1060,7 +1118,7 @@ const staleSource='90a03a25-9dbf-43c2-a0ab-66737e7f4302';
 const extraSource='90a03a25-9dbf-43c2-a0ab-66737e7f4303';
 function cloudSource(id=remoteSource) {return {id,kind:'xtream',label:'Cloud fixture',fields:{host:'https://cloud-provider.fixture',username:'local-user',password:'local-pass',epgUrl:'https://private-guide.fixture/xml',epgUrls:'https://private-guide2.fixture/xml'},settings:{streamExtension:'m3u8'}};}
 async function attachCloud(kit,options={}) {
-  const model={profile:{id:remoteProfile,name:'Remote',position:0,pin:null,favorites:[]},sources:[],metadata:[],
+  const model={profile:{id:remoteProfile,name:'Remote',position:0,pin:null,favorites:[],updated_at:'2026-11-01T00:00:00Z'},sources:[],metadata:[],
     secrets:{sources:{},metadata:null},positions:[],supported:false,calls:[],profiles:null,now:Date.now(),
     paired:options.paired==null?options.authenticated!==false:options.paired,crypto:{enabled:false,ck_version:0},networkFailure:null,
     activeProfileId:Object.hasOwn(options,'activeProfileId')?options.activeProfileId:remoteProfile,rejectProfileId:null};
@@ -1440,15 +1498,16 @@ test('fresh Demo setup loads live, movies and series from the actual canonical S
 
 test('actual cloud profiles are sanitized and profile PIN is verified locally before select RPC',async()=>{
   const kit=harness(xtreamRoute), cloud=await attachCloud(kit);await profile(kit,'Cloud PIN');
+  const selectionStart=cloud.calls.length;
   cloud.profile.pin=await kit.core.hashPin('1234');
   const list=await kit.api.query('pairing.profiles');
   assert.deepEqual(list,[{id:remoteProfile,name:'Remote',pinSet:true}]);
   assert.equal(JSON.stringify(list).includes(cloud.profile.pin),false);
   await rejectsCode(kit.api.query('pairing.selectProfile',{profileId:remoteProfile}),'pin_required');
   await rejectsCode(kit.api.query('pairing.selectProfile',{profileId:remoteProfile,pin:'4321'}),'pin_invalid');
-  assert.equal(cloud.calls.filter(call=>call.url.endsWith('/set_device_profile')).length,0);
+  assert.equal(cloud.calls.slice(selectionStart).filter(call=>call.url.endsWith('/set_device_profile')).length,0);
   await kit.api.query('pairing.selectProfile',{profileId:remoteProfile,pin:'1234'});
-  const rpc=cloud.calls.find(call=>call.url.endsWith('/set_device_profile'));
+  const rpc=cloud.calls.slice(selectionStart).find(call=>call.url.endsWith('/set_device_profile'));
   assert.deepEqual(rpc.body,{p_profile_id:remoteProfile});
   assert.equal(JSON.stringify(cloud.calls).includes('"pin":"1234"'),false);
   assert.equal(kit.userState.get('cloud_profile_id'),remoteProfile);

@@ -368,9 +368,9 @@ async function main() {
   });
   await check('original startup picker decisions include PIN and ownerless overrides',async()=>{
     for(const [mode,count,locked,active,expected] of [
-      ['auto',0,false,false,true],['auto',1,false,true,false],['auto',2,false,true,true],
+      ['auto',0,false,false,true],['auto',1,false,true,false],['auto',2,false,true,false],
       ['always',1,false,true,true],['off',2,false,true,false],['off',1,true,true,true],
-      ['off',1,false,false,true],['unknown',2,false,true,true]
+      ['off',1,false,false,true],['unknown',2,false,true,false]
     ]) assert.equal(core.showProfilePicker(mode,count,locked,active),expected,JSON.stringify({mode,count,locked,active}));
   });
   const report={schemaVersion:1,status:'compiled_original_sources_fixture_checks_passed',tests:checks,

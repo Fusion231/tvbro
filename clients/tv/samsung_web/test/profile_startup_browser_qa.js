@@ -58,7 +58,7 @@ async (page) => {
       await page.setViewportSize(size);
       await page.evaluate(key => sessionStorage.removeItem(key), snapshotKey); await page.goto(origin);
       await shown('#language-view');
-      await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await shown('#profiles-view');
+      await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate(page.locator('#language-continue')); await shown('#profiles-view');
       const identities = await page.evaluate(async origin => {
         const query = (action,args) => window.TVBroSamsungPlatform.query(action,args);
         const first = (await query('profiles.create',{name:'Open startup QA'})).profile;

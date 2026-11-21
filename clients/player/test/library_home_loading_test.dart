@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/app_database.dart';
+import 'package:iptvs/data/device_class.dart';
 import 'package:iptvs/data/epg_ingest.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/source_store.dart';
@@ -16,6 +17,7 @@ import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/screens/epg_mapping_screen.dart';
 import 'package:iptvs/screens/favorites_tab_view.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
+import 'package:iptvs/screens/sources_screen.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/epg_mapping.dart';
 import 'package:iptvs/sources/source.dart';
@@ -509,6 +511,52 @@ void main() {
       }
       await tester.pumpWidget(const SizedBox.shrink());
     }
+  });
+
+  testWidgets('D-pad scrolls to advanced settings on a short TV viewport', (
+    tester,
+  ) async {
+    debugIsTelevision = true;
+    addTearDown(() => debugIsTelevision = false);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('iptvs/device'),
+      (_) async => {'enabled': false, 'permissionRequired': false},
+    );
+    tester.view.physicalSize = const Size(640, 280);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () =>
+                showAppSettingsPanel(context: context, store: store, db: db),
+            child: const Text('Open settings'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open settings'));
+    await tester.pumpAndSettle();
+
+    final advanced = find.byType(ExpansionTile);
+    for (var i = 0; i < 12; i++) {
+      final focus = FocusManager.instance.primaryFocus?.context;
+      if (focus != null &&
+          find
+              .ancestor(of: find.byWidget(focus.widget), matching: advanced)
+              .evaluate()
+              .isNotEmpty) {
+        break;
+      }
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+    }
+    expect(advanced.hitTestable(), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.text('Profile picker at startup'), findsOneWidget);
   });
 
   testWidgets('Home settings keeps EPG mapping lazy until explicitly opened', (

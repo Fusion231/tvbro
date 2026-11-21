@@ -1,5 +1,6 @@
 package com.gchofficial.iptvs
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
@@ -20,8 +21,10 @@ import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.PlayerStrings
 import com.gchofficial.iptvs.player.ProviderRejection
 import com.gchofficial.iptvs.player.SharedEngine
+import com.gchofficial.iptvs.player.applyFlutterRendererCompatibility
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterShellArgs
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.lang.ref.WeakReference
@@ -36,8 +39,9 @@ class MainActivity : FlutterActivity() {
     private lateinit var updatesChannel: MethodChannel
     private lateinit var deviceChannel: MethodChannel
     private lateinit var keyboardChannel: MethodChannel
+    private var supporterBilling: SupporterBilling? = null
+    private var networkStatusChannel: NetworkStatusChannel? = null
     private var keyboardVisible = false
-    private var pendingInstallPermissionResult: MethodChannel.Result? = null
 
     /**
      * Answers the `iptvs/device` channel's `isTelevision`, which two Dart
@@ -50,6 +54,12 @@ class MainActivity : FlutterActivity() {
      * what kind of device this is.
      */
     private fun isTelevision(): Boolean = isTelevisionDevice(this)
+
+    @Suppress("DEPRECATION")
+    override fun getFlutterShellArgs(): FlutterShellArgs = super.getFlutterShellArgs().apply {
+        val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else null
+        applyFlutterRendererCompatibility(Build.MANUFACTURER, Build.MODEL, socModel)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,8 +119,6 @@ class MainActivity : FlutterActivity() {
             null,
         )
         if (instance?.get() === this) instance = null
-        pendingInstallPermissionResult?.success(false)
-        pendingInstallPermissionResult = null
         super.onDestroy()
     }
 
@@ -125,6 +133,8 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        supporterBilling = SupporterBilling(this, flutterEngine.dartExecutor.binaryMessenger)
+        networkStatusChannel = NetworkStatusChannel(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "iptvs/app_session")
             .setMethodCallHandler { call, result ->
                 if (call.method == "consumeInactivityReset") {
@@ -517,6 +527,7 @@ class MainActivity : FlutterActivity() {
         deviceChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "isTelevision" -> result.success(isTelevision())
+                "openNetworkSettings" -> result.success(openNetworkSettings())
                 "stableIdentity" -> {
                     // This app/signing-key/user-scoped ID stays inside the app.
                     // Dart hashes the scope before account-approved pairing.
@@ -625,25 +636,21 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
-                "requestInstallPermission" -> {
-                    if (pendingInstallPermissionResult != null) {
-                        result.error("settings_active", "Install settings are already open", null)
-                        return@setMethodCallHandler
-                    }
+                "openInstallPermissionSettings" -> {
                     try {
-                        pendingInstallPermissionResult = result
-                        startActivityForResult(
+                        startActivity(
                             Intent(
                                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                                 Uri.parse("package:$packageName"),
                             ),
-                            REQUEST_INSTALL_PERMISSION,
                         )
+                        result.success(null)
                     } catch (e: Exception) {
-                        pendingInstallPermissionResult = null
                         result.error("settings_failed", e.message, null)
                     }
                 }
+
+                "canInstallApks" -> result.success(packageManager.canRequestPackageInstalls())
 
                 else -> result.notImplemented()
             }
@@ -651,8 +658,27 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        supporterBilling?.dispose()
+        supporterBilling = null
+        networkStatusChannel?.dispose()
+        networkStatusChannel = null
         DvrCaptureBridge.unregister(flutterEngine)
         super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    private fun openNetworkSettings(): Boolean {
+        val actions = listOf(Settings.ACTION_WIFI_SETTINGS, Settings.ACTION_WIRELESS_SETTINGS, Settings.ACTION_SETTINGS)
+        for (action in actions) {
+            try {
+                startActivity(Intent(action))
+                return true
+            } catch (_: ActivityNotFoundException) {
+                continue
+            } catch (_: SecurityException) {
+                continue
+            }
+        }
+        return false
     }
 
     /**
@@ -836,11 +862,6 @@ class MainActivity : FlutterActivity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_INSTALL_PERMISSION) {
-            pendingInstallPermissionResult?.success(packageManager.canRequestPackageInstalls())
-            pendingInstallPermissionResult = null
-            return
-        }
         if (requestCode == REQUEST_NATIVE_PLAYER && ::nativeHdrChannel.isInitialized) {
             // Relay the final VOD position (see HdrPlayerActivity.finish) so the
             // Dart side can persist the resume point, plus the final favorite
@@ -907,6 +928,5 @@ class MainActivity : FlutterActivity() {
         }
 
         private const val REQUEST_NATIVE_PLAYER = 4120
-        private const val REQUEST_INSTALL_PERMISSION = 4121
     }
 }

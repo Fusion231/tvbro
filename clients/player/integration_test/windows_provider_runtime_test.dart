@@ -136,7 +136,11 @@ void main() {
       await closePlayer();
     }
     for (final live in [true, false]) {
-      for (final status in [401, 403, 429]) {
+      for (final (status, blocksHost) in [
+        (401, true),
+        (403, false),
+        (429, true),
+      ]) {
         ProviderRequestGate.instance.debugReset();
         final path = '/refuse/${live ? 'live' : 'vod'}/$status';
         unawaited(
@@ -164,7 +168,8 @@ void main() {
           () => ProviderRequestGate.instance.check(
             Uri.parse('http://127.0.0.1:${server.port}/next'),
           ),
-          throwsA(isA<ProviderRequestBlocked>()),
+          blocksHost ? throwsA(isA<ProviderRequestBlocked>()) : returnsNormally,
+          reason: 'HTTP $status host cooldown for ${live ? 'Live' : 'VOD'}',
         );
         await closePlayer();
       }

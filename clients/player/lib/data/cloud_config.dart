@@ -1,3 +1,4 @@
+import '../l10n/app_language.dart';
 import 'distribution_channel.dart';
 
 /// Configuration for TVBro's optional account and source synchronization.
@@ -46,8 +47,11 @@ class CloudConfig {
   /// Existing Supporter access uses this build's account connection.
   static String get supporterPanelUrl => panelUrl;
 
-  static String get accountPanelUrl =>
-      panelAccountLink(panelUrl, DistributionConfig.channel);
+  static String accountPanelUrl([String? language]) => pairingPanelLink(
+    panelAccountLink(panelUrl, DistributionConfig.channel),
+    '',
+    language: language,
+  );
 
   static bool get hasPanel => isConfiguredPanelUrl(panelUrl);
 
@@ -146,7 +150,9 @@ String pairingPanelLink(String panelUrl, String code, {String? language}) {
   final trimmed = code.trim();
   final uri = Uri.tryParse(panelUrl);
   if (uri == null || !uri.hasScheme) return panelUrl;
-  final supportedLanguage = language == 'en' || language == 'pl';
+  final supportedLanguage = AppLanguage.values.any(
+    (value) => value.code == language,
+  );
   if (trimmed.isEmpty && !supportedLanguage) return panelUrl;
   return uri
       .replace(

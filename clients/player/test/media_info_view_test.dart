@@ -418,6 +418,70 @@ void main() {
     );
   });
 
+  testWidgets('free movie metadata displays Wikipedia and poster attribution', (
+    tester,
+  ) async {
+    await openDetails(
+      tester,
+      _providerMovie.copyWith(
+        extra: {
+          'metadata': {
+            'wikimedia': {
+              'id': 'Q42',
+              'cast': ['Anna Kowalska'],
+              'cast_photos': {
+                'anna kowalska': {
+                  'photo_url': 'https://thumb.wikimedia.org/anna.jpg',
+                  'commons_url':
+                      'https://commons.wikimedia.org/wiki/File:Anna.jpg',
+                  'commons_artist': 'Portrait Artist',
+                  'commons_license': 'CC BY 3.0',
+                  'commons_license_url':
+                      'https://creativecommons.org/licenses/by/3.0/',
+                },
+              },
+              'wikipedia_url': 'https://pl.wikipedia.org/wiki/Film',
+              'commons_url':
+                  'https://commons.wikimedia.org/wiki/File:Poster.jpg',
+              'commons_artist': 'Poster Artist',
+              'commons_license': 'CC BY 4.0',
+              'commons_license_url':
+                  'https://creativecommons.org/licenses/by/4.0/',
+            },
+          },
+        },
+      ),
+      repo: _InfoRepository(
+        metadataProviders: const [_InfoMetadataProvider('wikimedia')],
+      ),
+    );
+    expect(
+      find.widgetWithText(TextButton, 'Wikipedia (excerpt)'),
+      findsOneWidget,
+    );
+    expect(find.widgetWithText(TextButton, 'CC BY-SA 4.0'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Wikidata'), findsOneWidget);
+    expect(
+      find.widgetWithText(TextButton, 'Wikimedia Commons · Poster Artist'),
+      findsOneWidget,
+    );
+    expect(find.widgetWithText(TextButton, 'CC BY 4.0'), findsOneWidget);
+    expect(
+      find.widgetWithText(TextButton, 'Anna Kowalska · Portrait Artist'),
+      findsOneWidget,
+    );
+    expect(find.widgetWithText(TextButton, 'CC BY 3.0'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is CachedNetworkImage &&
+            widget.imageUrl == 'https://thumb.wikimedia.org/anna.jpg',
+      ),
+      findsOneWidget,
+    );
+    expect(find.byTooltip('Refresh metadata'), findsNothing);
+  });
+
   testWidgets(
     'TVmaze series show source and license links without credentials',
     (tester) async {
