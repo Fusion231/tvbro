@@ -10,7 +10,7 @@ const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
 const names = ['pagedEditor','organizationCopy','editOrganizedChannel','saveOrganization','sourceSettings',
   'epgMapping','searchProgrammes','playerSettings','editorContext','openCategoryVisibility',
   'chooseBackupPath','backupFlow','confirmBackupImport','renderSettings','settingRow','settingsGroup',
-  'focusSetting','connectionHelp','loadSource','hostedHttpSource'];
+  'focusSetting','move','connectionHelp','loadSource','hostedHttpSource'];
 const handlers = acorn.parse(source, {ecmaVersion:2022}).body[0].expression.callee.body.body
   .filter(node => node.type === 'FunctionDeclaration' && names.includes(node.id.name))
   .map(node => source.slice(node.start,node.end)).join('\n');
@@ -121,6 +121,25 @@ test('Settings exposes only supported actions and keeps the selected advanced ro
   assert.equal(kit.env.focused.getAttribute('data-setting-key'),'profilePickerStartup');
   assert.equal(kit.env.focused.children.find(child=>child.className==='setting-value').textContent,'Always');
   assert.deepEqual(kit.calls.find(call=>call[0]==='settings.set')[1].settings.profilePickerStartup,'always');
+});
+
+test('Settings returns from the Back button to the same row on LTR and RTL remotes',()=>{
+  const kit=harness(), env=kit.env;
+  const root=env.byId('settings-view'), back=env.byId('settings-back');
+  back.tagName='button';
+  const settings=env.byId('settings-list');
+  root.appendChild(back); root.appendChild(settings);
+  env.document={activeElement:null};
+  env.moveSeries=env.moveDetails=env.moveGuideRow=()=>false;
+  env.renderSettings({fields:[]});
+  const language=settings.querySelectorAll('[data-setting-key]').find(node=>node.getAttribute('data-setting-key')==='language');
+  for (const [lang, toHeader, toRows] of [['en',37,39],['ar',39,37]]) {
+    env.uiLanguage=lang;
+    env.document.activeElement=language; env.move(toHeader);
+    assert.equal(env.focused,back);
+    env.document.activeElement=back; env.move(toRows);
+    assert.equal(env.focused,language);
+  }
 });
 
 test('Titan source form gives a local HTTP warning before sending the source-load query',async()=>{

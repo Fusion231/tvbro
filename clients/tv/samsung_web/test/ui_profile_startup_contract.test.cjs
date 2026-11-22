@@ -48,9 +48,9 @@ test('startup off opens the remembered unlocked profile without opening the choo
   assert.equal(kit.view.screen,'home');
 });
 
-for (const source of ['local','cloud']) {
-  test('startup off selects only the remembered locked '+source+' profile through the normal authorization path', async () => {
-    const kit = harness({profile:{id:'saved-'+source,source,locked:true},picker:true});
+for (const [mode,source] of [['auto','local'],['auto','cloud'],['off','local']]) {
+  test(mode+' startup selects only the remembered locked '+source+' profile through the normal authorization path', async () => {
+    const kit = harness({mode,profile:{id:'saved-'+source,source,locked:true},picker:true});
     kit.env.routeAfterLanguage(); await kit.settle();
     assert.deepEqual(kit.calls,[['picker'],['profiles.select','saved-'+source,source]]);
     assert.equal(kit.view.screen,'profiles'); assert.equal(kit.view.profileSelecting,true);
@@ -60,12 +60,10 @@ for (const source of ['local','cloud']) {
   });
 }
 
-for (const mode of ['auto','always']) {
-  test(mode+' startup preserves the requested chooser instead of auto-selecting a locked profile', async () => {
-    const kit = harness({mode,profile:{locked:true},picker:true}); kit.env.routeAfterLanguage(); await kit.settle();
-    assert.deepEqual(kit.calls,[['picker']]); assert.equal(kit.view.profileSelecting,false);
-  });
-}
+test('always startup preserves the requested chooser for a locked profile', async () => {
+  const kit = harness({mode:'always',profile:{locked:true},picker:true}); kit.env.routeAfterLanguage(); await kit.settle();
+  assert.deepEqual(kit.calls,[['picker']]); assert.equal(kit.view.profileSelecting,false);
+});
 
 test('startup without an active profile keeps the chooser even when the mode is off', async () => {
   const kit = harness({profile:null,picker:false}); kit.env.routeAfterLanguage(); await kit.settle();

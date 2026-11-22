@@ -688,6 +688,7 @@ void main() {
   testWidgets('an offline cached locked profile still requires its PIN', (
     tester,
   ) async {
+    await const LocalProfileStore().setPickerStartup(ProfilePickerStartup.auto);
     sync.pairingError = const SocketException('Offline');
     await const LocalProfileStore().saveCloudPins({
       'cloud': CloudProfileLock(
@@ -697,14 +698,13 @@ void main() {
     });
 
     await show(tester);
-    expect(find.text('Locked family'), findsOneWidget);
     expect(find.text('Skip'), findsNothing);
-    await tester.tap(find.text('Locked family'));
-    await settle(tester);
     expect(find.byType(AlertDialog), findsOneWidget);
     expect(completed, isFalse);
     await tester.tap(find.text('Cancel'));
     await settle(tester);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Locked family'), findsOneWidget);
     expect(completed, isFalse);
     expect(find.text('Skip'), findsNothing);
     expect(sync.profileSelections, 0);

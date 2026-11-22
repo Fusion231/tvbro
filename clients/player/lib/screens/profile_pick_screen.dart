@@ -420,6 +420,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
                 cachedLocks.isNotEmpty &&
                 !(pairingKnown && !isPaired)));
 
+    _ProfileEntry? startupPinEntry;
     if (widget.bootMode && checkStartup) {
       final mode = await _localStore.pickerStartup();
       if (!isCurrent()) return;
@@ -456,6 +457,9 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
         _goHome();
         return;
       }
+      if (mode != ProfilePickerStartup.always && activeEntry?.locked == true) {
+        startupPinEntry = activeEntry;
+      }
     }
 
     setState(() {
@@ -475,6 +479,11 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
       _manageMode = entries.isEmpty ? false : _manageMode;
       _checking = false;
     });
+    if (startupPinEntry != null) {
+      final startupGeneration = _refreshGeneration;
+      await WidgetsBinding.instance.endOfFrame;
+      if (_canRefresh(startupGeneration)) await _selectProfile(startupPinEntry);
+    }
   }
 
   void _goHome() {

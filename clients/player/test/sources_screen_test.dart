@@ -26,6 +26,7 @@ import 'package:iptvs/data/diagnostics_log.dart';
 import 'package:iptvs/data/device_class.dart';
 import 'package:iptvs/data/expiry_cache.dart';
 import 'package:iptvs/data/source_store.dart';
+import 'package:iptvs/screens/diagnostics_screen.dart';
 import 'package:iptvs/screens/sources_screen.dart';
 import 'package:iptvs/sources/source_config.dart';
 import 'package:iptvs/sources/source.dart';
@@ -366,7 +367,7 @@ void main() {
           find.ancestor(of: autostart, matching: find.byType(Scaffold)),
         );
         expect(panelBounds.right, 1280);
-        expect(panelBounds.left, greaterThan(0));
+        expect(panelBounds.width, closeTo(589, 1));
 
         await tester.sendKeyEvent(LogicalKeyboardKey.enter);
         await settle(tester);
@@ -390,6 +391,41 @@ void main() {
           ),
         );
         expect(profilesFocus.focusNode!.hasFocus, isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+        await settle(tester);
+        final backButton = tester.widget<OutlinedButton>(
+          find.descendant(
+            of: find.byTooltip('Back'),
+            matching: find.byType(OutlinedButton),
+          ),
+        );
+        expect(backButton.focusNode!.hasFocus, isTrue);
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await settle(tester);
+        expect(profilesFocus.focusNode!.hasFocus, isTrue);
+
+        final diagnostics = tester.widget<FocusableActionDetector>(
+          find.descendant(
+            of: find.widgetWithText(FocusableCard, 'Diagnostics'),
+            matching: find.byType(FocusableActionDetector),
+          ),
+        );
+        for (
+          var press = 0;
+          press < 6 && !diagnostics.focusNode!.hasFocus;
+          press++
+        ) {
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+          await settle(tester);
+        }
+        expect(diagnostics.focusNode!.hasFocus, isTrue);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await settle(tester);
+        expect(find.byType(DiagnosticsScreen), findsOneWidget);
+        await tester.binding.handlePopRoute();
+        await settle(tester);
+        expect(diagnostics.focusNode!.hasFocus, isTrue);
 
         await tester.binding.handlePopRoute();
         await settle(tester);

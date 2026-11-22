@@ -254,10 +254,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     return ids[_selectedCategoryIndex.clamp(0, ids.length - 1)];
   }
 
-  bool get onFirstChannel => _selectedChannelIndex == 0;
-  bool get onFirstCategory => _selectedCategoryIndex == 0;
-
-  /// Which region owns the D-pad right now (drives the Back ladder).
+  /// Which region owns the D-pad right now.
   LiveFocusRegion get region {
     if (channelsFocusNode.hasFocus) return LiveFocusRegion.channels;
     if (categoriesFocusNode.hasFocus) return LiveFocusRegion.categories;

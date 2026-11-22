@@ -10,9 +10,7 @@
 //     preview controls, or the search box on a phone; categories → the search
 //     box). The old per-row-focus design wrapped Up in the sidebar, which is
 //     what left users "stuck in the categories".
-//   * The Back ladder peels exactly one rung per press:
-//     channel list → first channel → categories → first category → search →
-//     Home button → exit confirmation → exit.
+//   * Back returns to the Home tiles from any browsing pane.
 //
 // Focus is asserted via RoutedFocusNode.routeKey (through focusRouteKey), the
 // release-safe signal the screen routes off — debugLabel is null in release.
@@ -406,7 +404,7 @@ void main() {
     expect(find.byType(PlayerScreen), findsOneWidget);
   });
 
-  idleTestWidgets('TV idle preview timer restarts on system Back', (
+  idleTestWidgets('system Back to Home stops the TV idle preview timer', (
     tester,
   ) async {
     final preview = await pumpIdleScreen(tester);
@@ -419,11 +417,9 @@ void main() {
 
     await tester.binding.handlePopRoute();
     await tester.pump();
-    expect(focusLabel(), 'live.channels');
-    await tester.pump(const Duration(seconds: 29));
+    expect(focusLabel(), 'content.tab.live');
+    await tester.pump(const Duration(seconds: 31));
     expect(find.byType(PlayerScreen), findsNothing);
-    await tester.pump(const Duration(seconds: 1));
-    expect(find.byType(PlayerScreen), findsOneWidget);
   });
 
   idleTestWidgets('TV idle preview timer restarts on pointer activity', (
@@ -532,7 +528,7 @@ void main() {
   // ── Entry ──────────────────────────────────────────────────────────────────
 
   focusTestWidgets(
-    'wide entry embeds the guide and keeps selection, OK, Back and categories in sync',
+    'wide entry embeds the guide and keeps selection, OK and categories in sync',
     (tester) async {
       final source = _GuideSelectionSource();
       await pumpWideScreenWith(
@@ -563,12 +559,12 @@ void main() {
         reason: 'OK resolves the channel selected in the embedded guide',
       );
 
-      await back(tester);
+      await press(tester, LogicalKeyboardKey.arrowLeft);
       expect(focusLabel(), 'live.categories');
       expect(
         guide().selectedChannelIndex,
         1,
-        reason: 'Back leaves the guide while keeping its channel selection',
+        reason: 'Left leaves the guide while keeping its channel selection',
       );
       await press(tester, LogicalKeyboardKey.arrowDown);
       await press(tester, LogicalKeyboardKey.select);
@@ -606,12 +602,10 @@ void main() {
               size: const Size(960, 540),
               rowMode: rowMode,
             );
+            await settle(tester);
             final categoryPane = find.byKey(
               const ValueKey('live.categoryPane'),
             );
-            await pumpUntil(tester, categoryPane);
-            await settle(tester);
-            expect(categoryPane, findsOneWidget);
             final paneElement = categoryPane.evaluate().single;
             final guideState = rowMode
                 ? null
@@ -624,6 +618,7 @@ void main() {
                   );
             final preview = find.byKey(const ValueKey('live.previewThumbnail'));
             final initialPreviewLeft = tester.getTopLeft(preview).dx;
+            expect(categoryPane, findsOneWidget);
             expect(focusLabel(), 'live.channels');
 
             if (tapToPreview) {
@@ -678,12 +673,7 @@ void main() {
             expect(categoryPane, findsOneWidget);
             expect(focusLabel(), 'live.channels');
 
-            if (rowMode) {
-              await back(tester);
-              expect(categoryPane, findsOneWidget);
-              expect(focusLabel(), 'live.channels');
-            }
-            await back(tester);
+            await press(tester, LogicalKeyboardKey.arrowLeft);
             expect(categoryPane, findsOneWidget);
             expect(focusLabel(), 'live.categories');
             expect(categoryPane.evaluate().single, same(paneElement));
@@ -873,6 +863,28 @@ void main() {
     },
   );
 
+  focusTestWidgets('narrow Home opens Settings from the toolbar', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 740);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChannelListScreen(
+          repo: LibraryRepository(source: _FocusDemoSource(), db: db),
+          config: config,
+          store: store,
+        ),
+      ),
+    );
+    await pumpUntil(tester, find.byKey(const ValueKey('home-live')));
+    await tester.tap(find.byTooltip('Settings'));
+    await settle(tester);
+    expect(find.byKey(const ValueKey('app-settings-panel')), findsOneWidget);
+  });
+
   // ── Cross-pane ─────────────────────────────────────────────────────────────
 
   focusTestWidgets('Left crosses to the categories and Right crosses back', (
@@ -929,11 +941,8 @@ void main() {
       );
       await settle(tester);
       expect(find.byType(LiveTabView), findsNothing);
-      // This fixture has no movies; Back still reaches the section's Home control.
-      await tester.binding.handlePopRoute();
-      await tester.pump();
-      expect(focusLabel(), 'library.home');
-      await press(tester, LogicalKeyboardKey.select);
+      await back(tester);
+      expect(focusLabel(), 'content.tab.movie');
       await press(tester, LogicalKeyboardKey.arrowLeft);
       await press(tester, LogicalKeyboardKey.select);
       await settle(tester);
@@ -1158,10 +1167,9 @@ void main() {
     },
   );
 
-  // ── The Back ladder ────────────────────────────────────────────────────────
-
-  focusTestWidgets('Back peels: channel -> first channel -> categories -> first category -> '
-      'search -> Home -> landing -> exit', (tester) async {
+  focusTestWidgets('Back from deep in the Live list returns to Home, then exits', (
+    tester,
+  ) async {
     final popMethods = <String>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       SystemChannels.platform,
@@ -1189,41 +1197,8 @@ void main() {
     await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
     expect(channelText('Channel 1').hitTestable(), findsNothing);
 
-    // Rung 1: Back returns the cursor to the first channel (still in the list).
     await back(tester);
-    expect(focusLabel(), 'live.channels');
-    expect(
-      channelText('Channel 1'),
-      findsOneWidget,
-      reason: 'the first Back resets the cursor to the first channel',
-    );
-
-    // Rung 2: from the first channel, Back leaves the list for the sidebar.
-    await back(tester);
-    expect(focusLabel(), 'live.categories');
-
-    // Walk the category cursor down, then Rung 3: Back returns it to the first
-    // category ("All channels") without leaving the sidebar.
-    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 20);
-    expect(categoryText('All channels'), findsNothing);
-    await back(tester);
-    expect(focusLabel(), 'live.categories');
-    expect(
-      categoryText('All channels'),
-      findsOneWidget,
-      reason: 'Back resets the category cursor to the first row',
-    );
-
-    // Rung 4: from the first category, Back peels to the search box.
-    await back(tester);
-    expect(focusLabel(), 'live.search.cell');
-
-    // Rung 5: search → the Home button.
-    await back(tester);
-    expect(focusLabel(), 'library.home');
-
-    // The section's ceiling returns to the landing page.
-    await back(tester);
+    expect(focusLabel(), 'content.tab.live');
     expect(find.byKey(const ValueKey('home-live')), findsOneWidget);
     expect(find.byType(AppBar), findsOneWidget);
 
@@ -1330,9 +1305,6 @@ void main() {
   focusTestWidgets(
     'Back recovers to Home from unlabeled focus instead of exiting',
     (tester) async {
-      // Arrowing onto an un-routed node (toolbar / AppBar action) leaves
-      // focusRouteKey == '', which the ladder must treat as "recover to Home",
-      // not "top of the ladder → exit".
       final popMethods = <String>[];
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         SystemChannels.platform,
@@ -1356,7 +1328,7 @@ void main() {
       await back(tester);
       expect(
         focusLabel(),
-        'library.home',
+        'content.tab.live',
         reason: 'Back from unlabeled focus should recover to Home',
       );
       expect(popMethods, isNot(contains('SystemNavigator.pop')));
@@ -1511,7 +1483,7 @@ void main() {
   );
 
   focusTestWidgets(
-    'Back mirrors Left: it peels the favorite column before the first-row rung',
+    'Left returns from the favorite star to its row and Back returns to Home',
     (tester) async {
       await pumpWideScreenWith(
         tester,
@@ -1521,27 +1493,23 @@ void main() {
       await settle(tester);
       expect(focusLabel(), 'live.channels');
 
-      // Walk the cursor down the list, then onto row 11's star, so both peels
-      // are observable (the row cursor must survive the first Back).
+      // Walk the cursor down the list before moving onto the row's star.
       await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
       expect(channelText('Channel 1').hitTestable(), findsNothing);
       await press(tester, LogicalKeyboardKey.arrowRight);
       await settle(tester);
 
-      // Back #1: off the star, back onto the row body — the row cursor (and the
-      // scroll position) must not move.
-      await back(tester);
+      await press(tester, LogicalKeyboardKey.arrowLeft);
       expect(focusLabel(), 'live.channels');
       expect(
         channelText('Channel 1').hitTestable(),
         findsNothing,
-        reason: 'peeling the star column must not reset the row cursor',
+        reason: 'Left from the star must keep the selected row',
       );
 
-      // Back #2: now the normal first-channel rung runs.
+      await press(tester, LogicalKeyboardKey.arrowRight);
       await back(tester);
-      expect(focusLabel(), 'live.channels');
-      expect(channelText('Channel 1'), findsOneWidget);
+      expect(focusLabel(), 'content.tab.live');
     },
   );
 
@@ -1608,7 +1576,14 @@ void main() {
                 !widget.loading,
           ),
         );
-        await tester.binding.handlePopRoute();
+        tester
+            .widget<IconButton>(
+              find.byWidgetPredicate(
+                (widget) => widget is IconButton && widget.tooltip == 'Home',
+              ),
+            )
+            .focusNode!
+            .requestFocus();
         await tester.pump();
         expect(focusLabel(), 'library.home');
         await press(tester, LogicalKeyboardKey.arrowDown);
@@ -1617,6 +1592,9 @@ void main() {
         expect(focusLabel(), 'media.category.all');
         await press(tester, LogicalKeyboardKey.arrowUp);
         expect(focusLabel(), 'library.home');
+        await press(tester, LogicalKeyboardKey.arrowDown);
+        await back(tester);
+        expect(focusLabel(), 'content.tab.${kind.name}');
       },
     );
 

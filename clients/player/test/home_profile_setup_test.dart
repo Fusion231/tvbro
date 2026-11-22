@@ -95,12 +95,17 @@ void main() {
     await pumpUntil(tester, find.text('Set up Kids'));
   }
 
+  final welcomeSizes = ValueVariant<Size>({
+    const Size(640, 360),
+    const Size(960, 540),
+  });
   testWidgets('TV welcome shows demo before autostart permission', (
     tester,
   ) async {
     const device = MethodChannel('iptvs/device');
     debugIsTelevision = true;
-    tester.view.physicalSize = const Size(960, 540);
+    final size = welcomeSizes.currentValue!;
+    tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     final messenger = tester.binding.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(device, (call) async {
@@ -122,13 +127,52 @@ void main() {
     await pumpUntil(tester, find.text('Allow autostart'));
     await tester.pumpAndSettle();
 
+    expect(find.byTooltip('Settings').hitTestable(), findsOneWidget);
+    expect(find.text('Welcome to tvbro').hitTestable(), findsOneWidget);
     expect(find.text('Add a source').hitTestable(), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
     expect(find.text('Use demo streams').hitTestable(), findsOneWidget);
     expect(
       find.widgetWithText(OutlinedButton, 'Use demo streams'),
       findsOneWidget,
     );
-  });
+
+    final permission = find.text('Allow autostart');
+    for (
+      var press = 0;
+      press < 8 && !Focus.of(tester.element(permission)).hasFocus;
+      press++
+    ) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+    }
+    expect(Focus.of(tester.element(permission)).hasFocus, isTrue);
+    expect(permission.hitTestable(), findsOneWidget);
+    expect(tester.getBottomRight(permission).dy, lessThan(size.height));
+
+    final gear = find.descendant(
+      of: find.byTooltip('Settings'),
+      matching: find.byIcon(Icons.settings_outlined),
+    );
+    for (
+      var press = 0;
+      press < 10 && !Focus.of(tester.element(gear)).hasFocus;
+      press++
+    ) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pumpAndSettle();
+    }
+    expect(Focus.of(tester.element(gear)).hasFocus, isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('app-settings-panel')), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await pumpUntil(tester, gear.hitTestable());
+    await tester.pumpAndSettle();
+    expect(Focus.of(tester.element(gear)).hasFocus, isTrue);
+    expect(tester.takeException(), isNull);
+  }, variant: welcomeSizes);
 
   testWidgets(
     'canceled setup resumes in Home and Demo is saved only to that profile',

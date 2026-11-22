@@ -429,7 +429,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  navigationTest('Favorites Back and search return focus to Home', (
+  navigationTest('Favorites Back returns to its Home tile and clears active search', (
     tester,
   ) async {
     await pumpScreen(tester);
@@ -449,9 +449,15 @@ void main() {
     await tester.pump();
     expect(
       focusRouteKey(FocusManager.instance.primaryFocus),
-      'library.home',
+      'content.tab.favorites',
     );
 
+    await tester.sendKeyEvent(LogicalKeyboardKey.select);
+    await until(tester, favoriteText(_foreignMovie.title));
+    FocusManager.instance.rootScope.descendants
+        .firstWhere((node) => focusRouteKey(node) == 'library.home')
+        .requestFocus();
+    await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
     await tester.pump();
     expect(

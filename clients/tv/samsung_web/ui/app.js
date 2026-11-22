@@ -349,7 +349,7 @@
     });
   }
   function routeAfterLanguage() {
-    if (view.profile && view.profile.locked && view.settings.profilePickerStartup === 'off') {
+    if (view.profile && view.profile.locked && view.settings.profilePickerStartup !== 'always') {
       showProfiles(); selectExistingProfile(view.profile); return;
     }
     if (!view.profile || view.showProfilePicker) showProfiles();
@@ -2610,6 +2610,7 @@
   function openSettings() {
     view.settingsOrigin = {screen:view.screen, trigger:byId('show-settings')};
     view.settingsAdvanced = false;
+    view.settingsLastRow = null;
     showSettings();
   }
   function leaveSettings() {
@@ -2928,8 +2929,10 @@
       if (key === 38 || key === 40) focus(rows[index < 0 ? 0 : index + (key === 38 ? -1 : 1)]);
       else {
         var towardBack = key === (uiLanguage === 'ar' ? 39 : 37);
-        if (towardBack) focus(rows[0]);
-        else if (index <= 0) focus(rows[1]);
+        if (towardBack) {
+          if (index > 0) view.settingsLastRow = active.getAttribute('data-setting-key');
+          focus(rows[0]);
+        } else if (index <= 0) focusSetting(view.settingsLastRow);
       }
       return;
     }
@@ -3017,6 +3020,9 @@
     if (typeof window !== 'undefined' && window.TVBroPlatformAdapters && typeof window.TVBroPlatformAdapters.normalizeKey === 'function') key = window.TVBroPlatformAdapters.normalizeKey(key);
     if (seekHold && seekHold.key !== key) stopSeekHold();
     var editable = active && active.hasAttribute && active.hasAttribute('data-editable'), isBack = key === 10009 || key === 27 || key === 8;
+    if (view.screen === 'settings' && event.repeat && (key === 13 || key === 65376 || isBack && !(key === 8 && editable && !active.readOnly))) {
+      event.preventDefault(); return;
+    }
     if (editable && !active.readOnly && !(view.screen === 'settings' && key === 9)) { if (key === 13 || key === 65376 || isBack && key !== 8) { event.preventDefault(); endEditing(active); } return; }
     if (isBack) {
       event.preventDefault();

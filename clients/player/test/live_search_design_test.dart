@@ -182,7 +182,7 @@ void main() {
       await _pumpUntil(tester, find.text('Bunny Series'));
       expect(tester.widget<TextField>(searchField).controller!.text, 'Bunny');
 
-      // Remote Down reaches results; Back returns to search, then closes it.
+      // Remote Down reaches results; Back closes the search.
       tester
           .widget<TvTextField>(find.byType(TvTextField))
           .cellFocusNode!
@@ -196,12 +196,7 @@ void main() {
       );
       await tester.binding.handlePopRoute();
       await tester.pump();
-      expect(
-        focusRouteKey(FocusManager.instance.primaryFocus),
-        'live.search.cell',
-      );
-      await tester.binding.handlePopRoute();
-      await tester.pump();
+      expect(focusRouteKey(FocusManager.instance.primaryFocus), 'library.home');
       expect(find.byType(GlobalSearchView), findsNothing);
       expect(
         tester.widget<TvTextField>(find.byType(TvTextField)).controller.text,

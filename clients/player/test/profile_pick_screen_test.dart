@@ -735,13 +735,11 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a locked active profile holds the boot, Skip included', (
+    testWidgets('default startup asks for the active PIN immediately', (
       tester,
     ) async {
-      // `off` would normally boot straight past this screen. A locked profile
-      // overrides that — and Skip, the other way past it, is withdrawn.
-      await localStore.setPickerStartup(ProfilePickerStartup.off);
       final store = SourceStore();
+      await localStore.createProfile('Other profile', 1);
       final a = await localStore.createProfile(
         'Alice',
         0,
@@ -750,19 +748,22 @@ void main() {
       await localStore.setPin(a.id, hashProfilePin('4821'));
       await localStore.setActive(a.id);
 
+      await store.setAll([cfg('src-a')]);
+      await store.setActive('src-a');
       await pumpPicker(tester, store: store, bootMode: true);
 
-      expect(_doneFlags[tester]!(), isFalse, reason: 'the picker must show');
+      expect(_doneFlags[tester]!(), isFalse);
       expect(find.text('Skip'), findsNothing);
+      expect(find.text('Cancel'), findsOneWidget);
 
-      // Even the *active* profile has to be unlocked here: it is the one the
-      // app would otherwise have booted straight into.
-      await tester.tap(find.text('Alice'));
-      await pumpFor(tester);
-      expect(find.text('Cancel'), findsOneWidget, reason: 'the PIN was asked');
+      await typePin(tester, '1111');
+      expect(find.text('Wrong PIN. Try again.'), findsOneWidget);
+      expect(_doneFlags[tester]!(), isFalse);
       await typePin(tester, '4821');
 
       expect(_doneFlags[tester]!(), isTrue);
+      expect(await localStore.activeId(), a.id);
+      expect(await store.activeId(), 'src-a');
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -793,6 +794,9 @@ void main() {
       await store.setActive('src-a');
 
       await pumpPicker(tester, store: store, bootMode: true);
+      await tester.tap(find.text('Cancel'));
+      await pumpFor(tester);
+      expect(find.text('Cancel'), findsNothing);
       expect(find.text('Skip'), findsNothing);
 
       await tester.tap(find.text('Bravo'));

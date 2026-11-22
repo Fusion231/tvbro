@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app_brand.dart';
 import '../data/cloud_config.dart';
+import '../data/device_class.dart';
 import '../l10n/app_localizations.dart';
 import '../theme.dart';
 import '../widgets/app_appearance.dart';
@@ -170,36 +171,51 @@ class SetupContent extends StatelessWidget {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 800;
+          final short = constraints.maxHeight < 500;
           final artwork = ClipRRect(
             borderRadius: BorderRadius.circular(AppAppearance.radius),
             child: Image.asset(
               'assets/home/live.jpg',
               width: wide ? double.infinity : 220,
+              height: short ? constraints.maxHeight * .6 : null,
               fit: BoxFit.contain,
               excludeFromSemantics: true,
             ),
           );
-          return Center(
-            child: SingleChildScrollView(
-              padding: EdgeInsets.all(wide ? 36 : 20),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: wide ? 1120 : 480),
-                child: wide
-                    ? Row(
-                        children: [
-                          Expanded(child: child),
-                          const SizedBox(width: 40),
-                          Expanded(child: artwork),
-                        ],
-                      )
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Center(child: artwork),
-                          const SizedBox(height: 24),
-                          child,
-                        ],
-                      ),
+          return Align(
+            alignment: short ? Alignment.topCenter : Alignment.center,
+            child: Scrollbar(
+              thumbVisibility: isTelevision,
+              child: SingleChildScrollView(
+                primary: true,
+                padding: EdgeInsets.all(
+                  short
+                      ? 16
+                      : wide
+                      ? 36
+                      : 20,
+                ),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: wide ? 1120 : 480),
+                  child: wide
+                      ? Row(
+                          children: [
+                            Expanded(child: child),
+                            const SizedBox(width: 40),
+                            Expanded(child: artwork),
+                          ],
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (!(short && isTelevision)) ...[
+                              Center(child: artwork),
+                              const SizedBox(height: 24),
+                            ],
+                            child,
+                          ],
+                        ),
+                ),
               ),
             ),
           );

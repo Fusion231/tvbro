@@ -31,6 +31,7 @@ import '../l10n/app_localizations.dart';
 import '../theme.dart';
 import '../widgets/app_bar_action.dart';
 import '../widgets/app_logo.dart';
+import '../widgets/app_appearance.dart';
 import '../widgets/supporter_gate.dart';
 import '../widgets/provider_stream_warning.dart';
 import '../widgets/profile_avatar.dart';
@@ -3781,7 +3782,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     DiagnosticsLog.instance.addAndPrint('library', line);
   }
 
-  /// The section's Home control is the top of the browsing Back ladder.
+  /// Focus the section's Home button or its tile on the Home screen.
   void _focusTabs() {
     if (!_showHome) {
       _sectionHomeFocusNode.requestFocus();
@@ -3967,164 +3968,24 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   DateTime? _exitArmedAt;
   static const _exitConfirmWindow = Duration(seconds: 2);
 
-  /// Peels exactly one rung per Back press. The live ladder, in order:
-  ///
-  ///   channel list (cursor not on the first row) → **first channel**
-  ///     → **categories** (wide) → **first category** ("All channels")
-  ///     → **search box** → **Home control** → **home** → exit (double-Back).
-  ///
-  /// Because the live lists are a selection model, each rung is a plain check on
-  /// the coordinator's region + selected index — no focus-label archaeology.
-  /// Media: deep grid → top of the grid → Home control → home. The app exits
-  /// from home only, on a second Back within [_exitConfirmWindow].
   void _handleRootBack(bool didPop, Object? result) {
     if (didPop) return;
     _resetTvIdleTimer();
-    final label = focusRouteKey(FocusManager.instance.primaryFocus);
-    // Flutter invokes every registered PopScope when a pop is blocked, so defer
-    // entirely to TvTextField's own PopScope while its inner field is actually
-    // being edited — it already exits edit mode on Back.
-    if (label == 'TvTextField.field') return;
+    // TvTextField handles Back while its editor has focus.
+    if (focusRouteKey(FocusManager.instance.primaryFocus) ==
+        'TvTextField.field') {
+      return;
+    }
 
     if (_showHome) {
       _handleHomeBack();
-      return;
-    }
-    if (_sectionHomeFocusNode.hasFocus) {
+    } else if (_searchActive) {
+      _searchController.clear();
+      _setQuery('');
+      _focusTabs();
+    } else {
       _returnHome();
-      return;
     }
-
-    if (_searchActive) {
-      if (_focus.searchCellFocusNode.hasFocus ||
-          _sectionHomeFocusNode.hasFocus) {
-        _searchController.clear();
-        _setQuery('');
-        _focusTabs();
-      } else {
-        _focus.focusSearch();
-      }
-      return;
-    }
-
-    if (_showFavorites) {
-      if (_favoritesScrollController.hasClients &&
-          _favoritesScrollController.offset >
-              _favoritesScrollController.position.viewportDimension) {
-        _favoritesScrollController.jumpTo(0);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _favoritesFirstFocusNode.requestFocus();
-        });
-      } else {
-        _focusTabs();
-      }
-      return;
-    }
-
-    final wideLive = _tab == ContentKind.live && _isWide();
-
-    if (!_showFavorites && _tab == ContentKind.live) {
-      switch (_focus.region) {
-        case LiveFocusRegion.channels:
-          if (_usesIntegratedGuide) {
-            _focus.focusCategories();
-            return;
-          }
-          // Rung 0: with the intra-row cursor on the favorite star, Back
-          // mirrors Left — it peels the cursor back onto the row body.
-          if (_focus.channelColumn == ChannelRowColumn.favorite) {
-            _focus.resetChannelColumn();
-            return;
-          }
-          // Rung 1: climbing out of the list starts from its top.
-          if (!_focus.onFirstChannel) {
-            _focus.selectChannel(0);
-            return;
-          }
-          // Rung 2: out of the list into the sidebar (wide) — phones have no
-          // sidebar, so they peel straight to the search box.
-          if (wideLive) {
-            _focus.focusCategories();
-          } else {
-            _focus.focusSearch();
-          }
-          return;
-        case LiveFocusRegion.previewControls:
-          // The preview controls sit between the search box and the list.
-          if (wideLive) {
-            _focus.focusCategories();
-          } else {
-            _focus.focusSearch();
-          }
-          return;
-        case LiveFocusRegion.categories:
-          // Rung 3: move the *highlight* to "All channels" — this deliberately
-          // does not change the active filter (OK does that).
-          if (!_focus.onFirstCategory) {
-            _focus.selectCategory(0);
-            return;
-          }
-          // Rung 4: out of the sidebar into the search box.
-          _focus.focusSearch();
-          return;
-        case LiveFocusRegion.search:
-          // Rung 5: search → the section tabs.
-          _focusTabs();
-          return;
-        case LiveFocusRegion.none:
-          break; // fall through to the shared handling below
-      }
-    }
-
-    // Movies/series grid — same top-of-list rung as the channel list, then
-    // the tabs.
-    if (label.startsWith('media.category.')) {
-      _focusTabs();
-      return;
-    }
-    if (label.startsWith('media.')) {
-      final controller = _media(_tab);
-      final scroll = controller.scrollController;
-      if (scroll.hasClients &&
-          scroll.position.pixels > scroll.position.viewportDimension) {
-        scroll.jumpTo(0);
-        // The first tile may not be built until the frame after the jump —
-        // focus post-frame with one retry (same pattern as the coordinator's
-        // focusFirstChannel).
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          if (controller.firstFocusNode.context != null) {
-            controller.firstFocusNode.requestFocus();
-            return;
-          }
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) controller.firstFocusNode.requestFocus();
-          });
-        });
-      } else {
-        _focusTabs();
-      }
-      return;
-    }
-    // The media tabs' own search cell peels to the tabs (live's search box is
-    // handled by the region ladder above).
-    if (label == 'TvTextField.cell' || _focus.searchCellFocusNode.hasFocus) {
-      _focusTabs();
-      return;
-    }
-    // The search field's clear (Ă—) button is its own focusable stop beside the
-    // cell (see TvTextField); Back peels it to the search cell (live) / the
-    // tabs (media) instead of falling through to the exit prompt.
-    if (label == 'TvTextField.clear') {
-      if (_tab == ContentKind.live) {
-        _focus.focusSearch();
-      } else {
-        _focusTabs();
-      }
-      return;
-    }
-    // Other section actions and transient route focus recover to Home.
-    _focusTabs();
   }
 
   void _handleHomeBack() {
@@ -4178,6 +4039,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           appBar: _showHome
               ? AppBar(
                   toolbarHeight: isTelevision ? 48 : null,
+                  backgroundColor: AppAppearance.background,
                   title: const AppLogo(height: 30),
                   leading:
                       (widget.onChangeProfile != null ||
@@ -4209,12 +4071,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                                     tooltip: tr('TVBro account'),
                                     icon: const Icon(Icons.cloud_sync_outlined),
                                   ),
-                          if (_isWide())
-                            _headerAction(
-                              label: tr('Settings'),
-                              icon: Icons.settings_outlined,
-                              onPressed: _openAppSettings,
-                            ),
+                          _headerAction(
+                            label: tr('Settings'),
+                            icon: Icons.settings_outlined,
+                            onPressed: _openAppSettings,
+                          ),
                           if (!_isWide() ||
                               _parental.rules.enabled ||
                               (!_showFavorites &&
@@ -4441,10 +4302,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         ? CallbackShortcuts(
             bindings: {
               // Tizen reports the Samsung remote's Back button as goBack.
-              // Reuse PopScope's existing Back ladder without changing Linux
-              // desktop, Android, or Windows key handling.
-              const SingleActivator(LogicalKeyboardKey.goBack): () =>
-                  _handleRootBack(false, null),
+              // Dispatch through PopScope so an active search editor also sees Back.
+              const SingleActivator(LogicalKeyboardKey.goBack):
+                  Navigator.of(context).maybePop,
             },
             child: screen,
           )

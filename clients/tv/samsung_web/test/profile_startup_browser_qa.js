@@ -99,14 +99,15 @@ async (page) => {
       phases.push('unprotected last-selected profile and global startup mode survive cold reload at '+size.width);
 
       await page.evaluate(() => window.TVBroSamsungPlatform.query('settings.set',{settings:{profilePickerStartup:'auto'}}));
-      await reloadAliases(); await shown('#profiles-view'); await settlePaint();
-      check(await page.locator('#modal-layer').isHidden(),'Auto mode with multiple profiles must retain the chooser');
-      await activate(page.locator('#profile-list .profile-card').filter({has:page.getByText('Locked startup QA',{exact:true})}));
+      await reloadAliases(); await homeReady();
+      check((await read()).profile.id===identities.first,'Auto mode must reopen the last unlocked profile');
+      await profileCard('Locked startup QA');
       await modal().locator('input').first().waitFor(); await enterPin('2468'); await homeReady();
+      await reloadAliases(); await modal().locator('input').first().waitFor(); await enterPin('2468'); await homeReady();
       await page.evaluate(() => window.TVBroSamsungPlatform.query('settings.set',{settings:{profilePickerStartup:'always'}}));
       await reloadAliases(); await shown('#profiles-view'); await settlePaint();
       check(await page.locator('#modal-layer').isHidden(),'Always mode must not automatically open a remembered PIN profile');
-      phases.push('auto and always startup modes retain the normal chooser at '+size.width);
+      phases.push('auto resumes the last profile and always keeps the chooser at '+size.width);
     }
     check(errors.length===0,'Browser runtime errors: '+errors.join('; '));
     check(blocked.length===0,'Unexpected external requests were blocked: '+blocked.join('; '));

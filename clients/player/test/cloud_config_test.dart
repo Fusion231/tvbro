@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_links.dart';
 import 'package:iptvs/data/cloud_config.dart';
 import 'package:iptvs/data/distribution_channel.dart';
+import 'package:iptvs/l10n/app_language.dart';
 
 void main() {
   test('cloud API requires an HTTPS origin without userinfo', () {
@@ -48,32 +49,13 @@ void main() {
       final base = CloudConfig.hasPanel
           ? Uri.parse(CloudConfig.panelUrl)
           : null;
+      final channel = DistributionConfig.channel.name;
+      final support = base?.resolve('support.html?channel=$channel&lang=en');
       expect(
         AppLinks.repository,
-        base == null
-            ? null
-            : pairingPanelLink(
-                panelAccountLink(
-                  base.resolve('support.html#source-code').toString(),
-                  DistributionConfig.channel,
-                ),
-                '',
-                language: 'en',
-              ),
+        support?.replace(fragment: 'source-code').toString(),
       );
-      expect(
-        AppLinks.support,
-        base == null
-            ? null
-            : pairingPanelLink(
-                panelAccountLink(
-                  base.resolve('support.html').toString(),
-                  DistributionConfig.channel,
-                ),
-                '',
-                language: 'en',
-              ),
-      );
+      expect(AppLinks.support, support?.toString());
       expect(AppLinks.website, AppLinks.support);
     } else {
       expect(AppLinks.repository, 'https://github.com/Fusion231/tvbro');
@@ -128,22 +110,26 @@ void main() {
     },
   );
 
-  test('panel pages preserve the configured deployment path', () {
+  test('panel links preserve the deployment path and selected language', () {
+    final controller = AppLanguageController.instance;
+    final previousLanguage = controller.language;
+    addTearDown(() => controller.preview(previousLanguage));
+    controller.preview(AppLanguage.polish);
     if (CloudConfig.hasPanel) {
       final base = CloudConfig.panelUrl.trim().replaceFirst(RegExp(r'/+$'), '');
       if (DistributionConfig.channel.isConsumptionOnly) {
         final channelName = DistributionConfig.channel.name;
         expect(
           AppLinks.privacyPolicy,
-          '$base/privacy.html?channel=$channelName&lang=en',
+          '$base/privacy.html?channel=$channelName&lang=pl',
         );
         expect(
           AppLinks.deleteCloudAccount,
-          '$base/delete-account.html?channel=$channelName&lang=en',
+          '$base/delete-account.html?channel=$channelName&lang=pl',
         );
       } else {
-        expect(AppLinks.privacyPolicy, '$base/privacy?lang=en');
-        expect(AppLinks.deleteCloudAccount, '$base/delete-account?lang=en');
+        expect(AppLinks.privacyPolicy, '$base/privacy?lang=pl');
+        expect(AppLinks.deleteCloudAccount, '$base/delete-account?lang=pl');
       }
     } else {
       expect(AppLinks.privacyPolicy, isNull);

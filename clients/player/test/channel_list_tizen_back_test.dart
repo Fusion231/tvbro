@@ -12,6 +12,8 @@ import 'package:iptvs/player/playback_backend.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source_config.dart';
+import 'package:iptvs/widgets/routed_focus_node.dart';
+import 'package:iptvs/widgets/tv_text_field.dart';
 
 void main() {
   late Directory tempDir;
@@ -28,11 +30,9 @@ void main() {
     if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
-  testWidgets('TV goBack key invokes the existing home Back ladder', (
+  testWidgets('TV goBack closes editing, search and Favorites in order', (
     tester,
   ) async {
-    // Keep this focused on the key-to-Back route. No player or native plugin
-    // should be constructed by the home screen.
     PlaybackBackend.register(
       initialize: () {},
       createPlayer: (_) => throw StateError('Unexpected player creation'),
@@ -47,6 +47,15 @@ void main() {
       fields: {},
     );
     final repo = LibraryRepository(source: DemoSource(), db: db);
+    Future<void> pressBack() async {
+      await tester.sendKeyEvent(
+        LogicalKeyboardKey.goBack,
+        // Flutter has no physical test key for Tizen's logical goBack.
+        physicalKey: PhysicalKeyboardKey.escape,
+      );
+      await tester.pump();
+    }
+
     try {
       await tester.pumpWidget(
         MaterialApp(
@@ -58,18 +67,44 @@ void main() {
         ),
       );
       await tester.pump();
-      await tester.sendKeyEvent(
-        LogicalKeyboardKey.goBack,
-        // Flutter's test key table has no physical key for goBack. Keep the
-        // logical Tizen key while using a known physical key for simulation.
-        physicalKey: PhysicalKeyboardKey.escape,
-      );
+      await tester.tap(find.byKey(const ValueKey('home-favorites')));
       await tester.pump();
+      await tester.tap(find.byType(TvTextField));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'example');
+      await tester.pump();
+      expect(
+        focusRouteKey(FocusManager.instance.primaryFocus),
+        'TvTextField.field',
+      );
 
+      await pressBack();
+      expect(
+        focusRouteKey(FocusManager.instance.primaryFocus),
+        'live.search.cell',
+      );
+      expect(
+        tester.widget<TvTextField>(find.byType(TvTextField)).controller.text,
+        'example',
+      );
+      await pressBack();
+      expect(focusRouteKey(FocusManager.instance.primaryFocus), 'library.home');
+      expect(
+        tester.widget<TvTextField>(find.byType(TvTextField)).controller.text,
+        isEmpty,
+      );
+      await pressBack();
+      expect(
+        focusRouteKey(FocusManager.instance.primaryFocus),
+        'content.tab.favorites',
+      );
+      await pressBack();
       expect(find.text('Press Back again to exit'), findsOneWidget);
       expect(tester.takeException(), isNull);
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() => db.epgIngest.cancelAndWait());
+      await tester.pump(const Duration(seconds: 11));
     }
   });
 }

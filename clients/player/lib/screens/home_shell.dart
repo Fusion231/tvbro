@@ -33,6 +33,7 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/app_appearance.dart';
+import '../data/device_class.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/boot_autostart_setting.dart';
 import '../widgets/library_preload_progress.dart';
@@ -910,17 +911,24 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _manageSources() async {
+  Future<void> _manageSources({bool openSettings = false}) async {
     if (!await authorizeParentalSettings(context) || !mounted) return;
+    final previousFocus = FocusManager.instance.primaryFocus;
     // A restore replaces favorites as well as source/profile ownership. Wait
     // for existing work before opening the route, including a startup pull.
     await _pauseCloudAutoSync();
     if (!mounted) return;
-    final restored = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (_) => SourcesScreen(store: widget.store, db: widget.db),
-      ),
-    );
+    final restored = openSettings
+        ? await showAppSettingsPanel(
+            context: context,
+            store: widget.store,
+            db: widget.db,
+          )
+        : await Navigator.of(context).push<bool>(
+            MaterialPageRoute(
+              builder: (_) => SourcesScreen(store: widget.store, db: widget.db),
+            ),
+          );
     if (!mounted) return;
     if (restored == true) {
       Navigator.of(context).pushAndRemoveUntil(
@@ -938,6 +946,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _editingSources = false;
     await _persistPendingLocalProfileSetup();
     await _loadActive();
+    if (openSettings && mounted && previousFocus?.context != null) {
+      previousFocus!.requestFocus();
+    }
   }
 
   Future<void> _addFirstSource() async {
@@ -1117,10 +1128,19 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
     final repo = _repo;
     if (repo == null) {
+      final compact = isTelevision && MediaQuery.sizeOf(context).height < 600;
       return Scaffold(
         appBar: AppBar(
           title: const AppLogo(),
+          actionsPadding: isTelevision
+              ? const EdgeInsetsDirectional.only(end: 12)
+              : null,
           actions: [
+            IconButton(
+              tooltip: tr('Settings'),
+              icon: const Icon(Icons.settings_outlined),
+              onPressed: () => _manageSources(openSettings: true),
+            ),
             IconButton(
               tooltip: tr('Help & about'),
               icon: const Icon(Icons.help_outline),
@@ -1153,8 +1173,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                     children: [
                       Text(
                         tr('Welcome to {app}', {'app': AppBrand.name}),
-                        style: const TextStyle(
-                          fontSize: 30,
+                        style: TextStyle(
+                          fontSize: compact ? 26 : 30,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -1166,7 +1186,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                         ),
                         style: const TextStyle(color: AppColors.textLo),
                       ),
-                      const SizedBox(height: 12),
+                      SizedBox(height: compact ? 6 : 12),
                       Text(
                         tr(
                           'M3U playlists  ·  Xtream Codes  ·  Stalker portals',
@@ -1176,7 +1196,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                           fontSize: 12,
                         ),
                       ),
-                      const SizedBox(height: 28),
+                      SizedBox(height: compact ? 12 : 28),
                       SetupAction(
                         primary: true,
                         autofocus: true,
