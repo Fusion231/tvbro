@@ -32,6 +32,7 @@ import '../dvr/dvr_scheduler.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
+import '../widgets/app_appearance.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/boot_autostart_setting.dart';
 import '../widgets/library_preload_progress.dart';
@@ -1082,7 +1083,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final child = _buildContent(context);
+    final content = _buildContent(context);
+    final child = _loading || _repo == null
+        ? AppAppearance(child: content)
+        : content;
     final config = _config;
     return config == null
         ? child
@@ -1142,85 +1146,66 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                     }
                   },
                 )
-              : Center(
-                  child: SingleChildScrollView(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 560),
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(20),
-                              decoration: BoxDecoration(
-                                color: AppColors.panel,
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(color: AppColors.line),
-                              ),
-                              child: const Icon(
-                                Icons.live_tv_rounded,
-                                size: 48,
-                                color: AppColors.accent,
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            Text(
-                              tr('Welcome to {app}', {'app': AppBrand.name}),
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                fontSize: 30,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              tr(
-                                'Live television, your guide, movies and series — together '
-                                'on your device. Connect your own IPTV provider to get started.',
-                              ),
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(color: AppColors.textLo),
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              tr(
-                                'M3U playlists  ·  Xtream Codes  ·  Stalker portals',
-                              ),
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: AppColors.textLo,
-                                fontSize: 12,
-                              ),
-                            ),
-                            const SizedBox(height: 28),
-                            FilledButton.icon(
-                              autofocus: true,
-                              onPressed: _manageSources,
-                              icon: const Icon(Icons.add),
-                              label: Text(tr('Add a source')),
-                            ),
-                            TextButton(
-                              onPressed: _useDemo,
-                              child: Text(tr('Use demo streams')),
-                            ),
-                            const SizedBox(height: 8),
-                            if (CloudConfig.isConfigured)
-                              OutlinedButton.icon(
-                                onPressed: _addUsingPhone,
-                                icon: const Icon(Icons.qr_code_rounded),
-                                label: Text(tr('Add using your phone')),
-                              ),
-                            TextButton.icon(
-                              onPressed: _openRecordings,
-                              icon: const Icon(Icons.video_library_outlined),
-                              label: Text(tr('Recordings on this device')),
-                            ),
-                            const BootAutostartSetting(),
-                          ],
+              : SetupContent(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        tr('Welcome to {app}', {'app': AppBrand.name}),
+                        style: const TextStyle(
+                          fontSize: 30,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                    ),
+                      const SizedBox(height: 8),
+                      Text(
+                        tr(
+                          'Live television, your guide, movies and series — together '
+                          'on your device. Connect your own IPTV provider to get started.',
+                        ),
+                        style: const TextStyle(color: AppColors.textLo),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        tr(
+                          'M3U playlists  ·  Xtream Codes  ·  Stalker portals',
+                        ),
+                        style: const TextStyle(
+                          color: AppColors.textLo,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 28),
+                      SetupAction(
+                        primary: true,
+                        autofocus: true,
+                        onPressed: _manageSources,
+                        icon: Icons.add_link_rounded,
+                        title: tr('Add a source'),
+                      ),
+                      const SizedBox(height: 8),
+                      SetupAction(
+                        onPressed: _useDemo,
+                        icon: Icons.play_circle_outline_rounded,
+                        title: tr('Use demo streams'),
+                      ),
+                      const SizedBox(height: 8),
+                      if (CloudConfig.isConfigured) ...[
+                        SetupAction(
+                          onPressed: _addUsingPhone,
+                          icon: Icons.qr_code_rounded,
+                          title: tr('Add using your phone'),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                      SetupAction(
+                        onPressed: _openRecordings,
+                        icon: Icons.video_library_outlined,
+                        title: tr('Recordings on this device'),
+                      ),
+                      const BootAutostartSetting(),
+                    ],
                   ),
                 ),
         ),

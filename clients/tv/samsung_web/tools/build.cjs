@@ -185,6 +185,10 @@ transform(path.join(project, 'ui/viewport.js'), 'viewport.js');
 transform(path.join(project, 'ui/app.js'), 'app.js');
 copy(path.join(playerRoot, 'assets/brand/tvbro-logo.png'), 'assets/logo.png');
 copy(path.join(playerRoot, 'assets/brand/tvbro-icon.png'), 'icon.png');
+for (const tile of ['live', 'movie', 'series', 'favorites']) {
+  const relative = 'assets/home/' + tile + '.jpg';
+  copy(path.join(playerRoot, relative), relative);
+}
 for (const face of ['regular', 'semibold', 'bold']) {
   copy(path.join(playerRoot, 'android/app/src/main/res/font/inter_' + face + '.ttf'), 'assets/fonts/inter_' + face + '.ttf');
 }

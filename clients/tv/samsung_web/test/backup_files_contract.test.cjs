@@ -3,19 +3,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {create} = require('../platform/backup_files.js');
 
-function fixture() {
+function fixture(root = 'removable_sda1', nativeRoot = root) {
   const files = new Map(), calls = [], streams = [];
-  const root = 'removable_sda1';
   let failWrite = false;
   function missing() { const error = Error('Missing file'); error.name = 'NotFoundError'; throw error; }
-  const directory = {fullPath:root,isDirectory:true,readOnly:false,
+  const directory = {fullPath:nativeRoot,isDirectory:true,readOnly:false,
     resolve(name) { return files.get(root+'/'+name) || missing(); },
     listFiles(ok) { queueMicrotask(()=>ok([...files.values()])); },
     createFile(name) { return file(root+'/'+name,Buffer.alloc(0)); },
-    deleteFile(path,ok) { calls.push(['delete',path]); files.delete(path); queueMicrotask(ok); }
+    deleteFile(path,ok) { calls.push(['delete',path]); files.delete(root + path.slice(nativeRoot.length)); queueMicrotask(ok); }
   };
   function file(path,bytes) {
-    const value={fullPath:path,name:path.split('/').at(-1),isDirectory:false,isFile:true,bytes:Buffer.from(bytes),
+    const value={fullPath:nativeRoot + path.slice(root.length),name:path.split('/').at(-1),isDirectory:false,isFile:true,bytes:Buffer.from(bytes),
       get fileSize() { return this.sizeOverride==null?this.bytes.length:this.sizeOverride; },
       openStream(mode,ok) {
         calls.push(['open',path,mode]); let position=0;
@@ -51,10 +50,21 @@ test('backup files are transferred as exact binary chunks and written only to th
   assert.equal(kit.calls.filter(call=>call[0]==='delete').length,0,'existing user files are never removed');
 });
 
+test('Tizen 3 absolute file metadata keeps the backup picker on the mounted storage label',async()=>{
+  const kit=fixture('documents','/opt/usr/home/owner/content/Documents');
+  const bytes=new Uint8Array([1,2,250]);
+  const folder=await kit.api.listDirectory('documents');
+  const saved=await kit.api.saveExport(bytes,'TVBro.tvbro',folder.path);
+  const result=await kit.api.listDirectory('documents');
+  assert.equal(saved.path,'documents/TVBro.tvbro');
+  assert.equal(result.entries[0].path,saved.path);
+  assert.deepEqual(await kit.api.chooseImport(result.entries[0].path),bytes);
+});
+
 test('backup file access rejects oversized input, remote paths, traversal, unsafe names and non-byte values',async()=>{
   const kit=fixture();
   for(const location of ['https://example.test/backup.tvbro','data:application/octet-stream,hello','content://external/backup.tvbro',
-    'file://remote/path.tvbro','removable_sda1/../backup.tvbro','removable_sda1/%2e%2e/backup.tvbro','removable_sda1/%252e%252e/backup.tvbro']) {
+    'file://remote/path.tvbro','/opt/usr/home/owner/content/Documents/backup.tvbro','removable_sda1/../backup.tvbro','removable_sda1/%2e%2e/backup.tvbro','removable_sda1/%252e%252e/backup.tvbro']) {
     await assert.rejects(kit.api.chooseImport(location),{code:'backup_path_invalid'});
   }
   assert.equal(kit.calls.length,0);
@@ -67,13 +77,13 @@ test('backup file access rejects oversized input, remote paths, traversal, unsaf
 });
 
 test('failed native writes remove only their newly created incomplete file and reads detect growth',async()=>{
-  const kit=fixture();kit.file('removable_sda1/keep.tvbro',[4,5]);kit.failWrite();
+  const kit=fixture('removable_sda1','/opt/storage/usb');kit.file('removable_sda1/keep.tvbro',[4,5]);kit.failWrite();
   await assert.rejects(kit.api.saveExport([1,2,3],'failed.tvbro','removable_sda1'),/Disk full/);
   assert.equal(kit.files.has('removable_sda1/failed.tvbro'),false);
   assert.equal(kit.files.has('removable_sda1/keep.tvbro'),true);
   assert.equal(kit.streams.at(-1).closed,true);
   const growing=kit.file('removable_sda1/growing.tvbro',[1,2,3]);growing.sizeOverride=2;
-  await assert.rejects(kit.api.chooseImport(growing.fullPath),{code:'backup_size_limit'});
+  await assert.rejects(kit.api.chooseImport('removable_sda1/growing.tvbro'),{code:'backup_size_limit'});
   assert.equal(kit.streams.at(-1).closed,true);
 });
 

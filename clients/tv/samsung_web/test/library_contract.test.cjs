@@ -206,7 +206,7 @@ test('profiles use real PIN functions and persisted KeyManager state without cro
 test('startup picker migrates the active legacy preference atomically and applies one global mode across profiles and reloads',async()=>{
   const kit=harness(()=>{throw Error('Startup settings must not contact a provider');});
   const first=await profile(kit,'Locked startup','1234'),second=(await kit.api.query('profiles.create',{name:'Second startup'})).profile;
-  assert.equal((await kit.api.query('bootstrap')).showProfilePicker,false);
+  assert.equal((await kit.api.query('bootstrap')).showProfilePicker,false,'auto resumes the last unlocked profile');
   await kit.userState.update(state=>{
     delete state.profile_picker_startup;
     state.samsung_settings_v1=JSON.stringify({[first.id]:{profilePickerStartup:'always'},[second.id]:{profilePickerStartup:'off'}});
@@ -735,7 +735,6 @@ test('warm Samsung navigation reuses provider metadata across sequential and con
   const categories={kind:'movie'},details={item:kit.movie};
   await kit.api.query('catalog.categories',categories);
   await kit.api.query('media.details',details);
-  await kit.api.query('guide',{channels:kit.loaded.channels});
   const before=kit.calls.requests.length;
   for(let i=0;i<20;i++) {
     await kit.api.query('catalog.categories',categories);
@@ -743,7 +742,12 @@ test('warm Samsung navigation reuses provider metadata across sequential and con
     await kit.api.query('catalog.items',{kind:'movie',categoryId:'movies',page:1});
   }
   await Promise.all(Array.from({length:40},()=>kit.api.query('media.details',details)));
-  assert.equal(kit.calls.requests.length,before,'warm navigation must make zero provider requests');
+  // Loading the source also warms the TV guide in the background.
+  const extraRequests=kit.calls.requests.slice(before).map(request=>{
+    const url=new URL(request.url);
+    return url.searchParams.get('action')||url.pathname;
+  }).filter(action=>action!=='/xmltv.php');
+  assert.deepEqual(extraRequests,[],'warm VOD navigation must not repeat catalogue or metadata requests');
   await kit.api.dispose();
 });
 

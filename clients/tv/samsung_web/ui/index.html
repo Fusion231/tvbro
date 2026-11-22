@@ -36,7 +36,7 @@
         <h1>Who is watching?</h1>
         <p id="profiles-message" class="muted">Choose a profile to continue</p>
         <div id="profile-list" class="profile-list"></div>
-        <div class="profile-actions"><button id="add-profile" class="button" data-nav type="button">Add profile</button><button id="manage-profiles" class="button" data-nav type="button">Manage profiles</button><button id="skip-profile" class="button" data-nav type="button" hidden>Continue without a profile</button></div>
+        <div class="profile-actions"><button id="add-profile" class="button" data-nav type="button"><span class="profile-add-symbol" aria-hidden="true">+</span><span>Add profile</span></button><button id="manage-profiles" class="button" data-nav type="button">Manage profiles</button><button id="skip-profile" class="button" data-nav type="button" hidden>Continue without a profile</button></div>
         <button id="download-cloud" class="button button-primary profile-cloud" data-nav type="button" hidden><span class="setup-choice-title">Download from cloud</span><span class="setup-choice-description">Sign in and restore your saved profile, playlists, and settings.</span></button>
       </section>
       <section id="setup-view" class="setup-view" data-screen="setup" hidden>
@@ -116,9 +116,33 @@
         <section class="media-panel"><section id="media-history" class="continue-section" hidden><h2>Continue watching</h2><div id="media-history-list" class="poster-rail"></div></section><div id="media-items" class="media-grid"></div><p id="media-empty" class="empty-state" hidden>No items match</p><p id="media-loading" class="muted media-loading" role="status" aria-live="polite" hidden>Loading…</p><button id="media-retry" class="button" type="button" data-nav hidden>Retry</button><div id="media-pagination" class="pagination"><button id="media-previous" class="button" type="button" data-nav>Previous</button><span id="media-page" class="muted"></span><button id="media-next" class="button" type="button" data-nav>Next</button></div></section></div></div>
       </section>
 
-      <section id="settings-view" class="settings-view" data-screen="settings" hidden><h1>Settings</h1><p id="settings-profile" class="muted"></p><div id="settings-list" class="settings-list"></div><button id="settings-pairing" class="button" type="button" data-nav hidden>Link to cloud account</button></section>
-      <section id="pairing-view" class="pairing-view" data-screen="pairing" hidden><h1 id="pairing-title">TVBro account</h1><p id="pairing-intro" class="muted">Open the panel on your phone or computer, sign in, and enter this code under Devices:</p><p id="pairing-status" class="muted"></p><div id="pairing-code" class="pairing-code"></div><p id="pairing-url"></p><img id="pairing-qr" class="pairing-qr" alt="QR code that opens the panel with this pairing code filled in" hidden><p id="pairing-profile" class="muted"></p><div class="dialog-actions"><button id="pairing-start" class="button button-primary" data-nav type="button">Generate pairing code</button><button id="pairing-check" class="button" data-nav type="button">Check connection</button><button id="pairing-choose-profile" class="button" data-nav type="button" hidden>Choose a profile</button><button id="pairing-pull" class="button" data-nav type="button" hidden>Download from panel</button><button id="pairing-continue" class="button button-primary" data-nav type="button" hidden>Continue</button><button id="pairing-push" class="button" data-nav type="button" hidden>Push to panel</button><button id="pairing-unpair" class="button" data-nav type="button" hidden>Unpair this device</button><button id="pairing-back" class="button" data-nav type="button">Back</button></div></section>
+      <section id="settings-view" class="settings-view" data-screen="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+        <div class="settings-heading">
+          <button id="settings-back" class="button" type="button" aria-label="Back" data-nav><span aria-hidden="true">←</span></button>
+          <div><h1 id="settings-title">Settings</h1><p id="settings-profile" class="muted"></p></div>
+        </div>
+        <div class="settings-body">
+          <p id="settings-status" role="status"></p>
+          <div id="settings-list" class="settings-list"></div>
+        </div>
+        <div class="settings-keys" aria-hidden="true"><span>Arrows — choose</span><span>OK — open</span><span>Back — return</span></div>
+      </section>
+      <section id="pairing-view" class="pairing-view" data-screen="pairing" hidden><h1 id="pairing-title">TVBro account</h1><p id="pairing-intro" class="muted">Open the panel on your phone or computer, sign in, and enter this code under Devices:</p><p id="pairing-status" class="muted"></p><div id="pairing-card" class="pairing-card" hidden><div><div id="pairing-code" class="pairing-code" dir="ltr"></div><p id="pairing-url"></p></div><img id="pairing-qr" class="pairing-qr" alt="QR code that opens the panel with this pairing code filled in" hidden></div><p id="pairing-profile" class="muted"></p><div class="dialog-actions"><button id="pairing-start" class="button button-primary" data-nav type="button">Generate pairing code</button><button id="pairing-check" class="button" data-nav type="button">Check connection</button><button id="pairing-choose-profile" class="button" data-nav type="button" hidden>Choose a profile</button><button id="pairing-pull" class="button" data-nav type="button" hidden>Download from panel</button><button id="pairing-continue" class="button button-primary" data-nav type="button" hidden>Continue</button><button id="pairing-push" class="button" data-nav type="button" hidden>Push to panel</button><button id="pairing-unpair" class="button" data-nav type="button" hidden>Unpair this device</button><button id="pairing-back" class="button" data-nav type="button">Back</button></div></section>
     </main>
+    <aside id="setup-progress" class="setup-progress" aria-labelledby="setup-progress-title" hidden>
+      <h2 id="setup-progress-title">Preparing your library…</h2>
+      <p id="setup-progress-summary" class="muted" role="status"></p>
+      <dl id="setup-progress-stages">
+        <div><dt>Live TV</dt><dd id="setup-progress-live"></dd></div>
+        <div><dt>Movies</dt><dd id="setup-progress-movie"></dd></div>
+        <div><dt>Series</dt><dd id="setup-progress-series"></dd></div>
+        <div><dt>TV guide</dt><dd id="setup-progress-epg"></dd></div>
+      </dl>
+      <div class="dialog-actions">
+        <button id="setup-load-edit" class="button button-primary" data-nav type="button" hidden>Back and edit source</button>
+        <button id="setup-load-retry" class="button" data-nav type="button" hidden>Try again</button>
+      </div>
+    </aside>
     <p id="app-status" class="app-status" role="status" aria-live="polite"></p>
     <footer class="app-footer"><span>Arrows — choose</span><span>OK — open</span><span>Back — return</span></footer>
   </div>

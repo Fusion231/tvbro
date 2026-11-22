@@ -379,8 +379,8 @@ void main() {
             of: find.widgetWithText(FocusableCard, 'Language'),
             matching: find.byType(FocusableActionDetector),
           ),
-        ).focusNode!;
-        expect(languageFocus.hasFocus, isTrue);
+        );
+        expect(languageFocus.focusNode!.hasFocus, isTrue);
         await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
         await settle(tester);
         final profilesFocus = tester.widget<FocusableActionDetector>(

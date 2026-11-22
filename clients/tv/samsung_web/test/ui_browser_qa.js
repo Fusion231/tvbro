@@ -247,7 +247,7 @@ async (page) => {
   await check(await calls('keymanager.duplicate') === 0,'Boot attempted to overwrite a create-only KeyManager alias.');
   const registeredKeys = await page.evaluate(() => window.__samsungFixture.calls.filter(row => row[0] === 'registerKey').map(row => row[1]));
   await check(registeredKeys.includes('ChannelUp') && registeredKeys.includes('ChannelDown'),'The Samsung platform must register dedicated channel keys');
-  await shown('#language-view'); await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true})); await activate(page.locator('#language-continue'));
+  await shown('#language-view'); await activate(page.locator('#language-list').getByRole('button',{name:/^Polski/})); await activate(page.locator('#language-continue'));
   await shown('#profiles-view'); await activate('#add-profile'); await edit(modal().locator('input').first(),'Dom QA'); await action('Zapisz');
   await shown('#setup-view'); await activate('#setup-source');
   await shown('#sources-view');
@@ -360,9 +360,26 @@ async (page) => {
   phases.push('original series details -> season -> episode -> native playback + retained episode selector');
 
   await home(); await activate('#show-settings'); await shown('#settings-view');
+  const setting = key => page.locator('#settings-list [data-setting-key="' + key + '"]');
+  const focused = key => setting(key).evaluate(node => node === document.activeElement);
+  await setting('source').waitFor();
+  await check(await focused('source'),'Opening Settings must focus the first available action');
+  await page.keyboard.press('ArrowDown');
+  await check(await focused('epg'),'D-pad Down must reach EPG mapping directly from Source settings');
+  await page.keyboard.press('Enter'); await modal().waitFor();
+  await page.keyboard.press('Escape');
+  await check(await focused('epg'),'Closing the EPG mapping dialog must restore its trigger');
+  await activate(setting('profiles')); await shown('#profiles-view');
+  await page.keyboard.press('Escape'); await shown('#settings-view');
+  await setting('profiles').waitFor();
+  await check(await focused('profiles'),'Returning from Profiles must restore its trigger');
+  await activate(setting('advanced'));
   await page.evaluate(() => { window.__uiQaPhase = 'settings.preference'; });
-  await activate(page.getByRole('button',{name:/Wybór profilu przy uruchomieniu/})); await action('Zawsze');
+  await activate(setting('profilePickerStartup'));
+  await check(await modal().locator('[aria-pressed="true"]').evaluate(node => node === document.activeElement),'The options dialog must focus the stored choice');
+  await action('Zawsze');
   await page.locator('#modal-layer').waitFor({state:'hidden'});
+  await check(await focused('profilePickerStartup'),'Saving a preference must restore the same Settings row');
   await check((await page.evaluate(() => window.TVBroSamsungPlatform.query('settings.get'))).settings.profilePickerStartup === 'always','Settings change must be persisted through the actual store');
   const pairingEnabled = await page.evaluate(async () => (await window.TVBroSamsungPlatform.query('bootstrap')).capabilities.pairing);
   await check(await page.locator('#settings-pairing').isVisible() === pairingEnabled,'Cloud UI must match the actual publisher capability');
@@ -384,6 +401,8 @@ async (page) => {
   await page.waitForFunction(async () => !(await window.TVBroSamsungPlatform.query('parental.get')).enabled);
   phases.push('actual settings persistence + publisher capability gate + canonical parental PIN enable/disable');
 
+  await page.keyboard.press('Escape'); await shown('#home-view');
+  await check(await page.locator('#show-settings').evaluate(node => node === document.activeElement),'Back from Settings must restore the Home Settings button');
   await activate('#show-profiles'); await shown('#profiles-view'); await activate('#add-profile');
   await page.evaluate(() => { window.__uiQaPhase = 'profiles.create'; });
   await edit(modal().locator('input').nth(0),'Drugi QA'); await edit(modal().locator('input').nth(1),'1234'); await action('Zapisz'); await shown('#setup-view'); await activate('#setup-source'); await shown('#sources-view');

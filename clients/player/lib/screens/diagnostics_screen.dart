@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../widgets/app_appearance.dart';
 import '../data/diagnostics_log.dart';
 import '../l10n/app_localizations.dart';
 import '../theme.dart';
@@ -60,10 +61,13 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final log = DiagnosticsLog.instance;
     return Scaffold(
-      backgroundColor: AppColors.ink,
+      backgroundColor: AppAppearance.background,
       appBar: AppBar(
         title: Text(tr('Diagnostics')),
         leading: BackButton(onPressed: () => Navigator.of(context).maybePop()),
@@ -93,9 +97,9 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                   width: double.infinity,
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: AppColors.panel,
-                    border: Border.all(color: AppColors.line),
-                    borderRadius: BorderRadius.circular(AppRadius.tile),
+                    color: AppAppearance.surface,
+                    border: Border.all(color: AppAppearance.line),
+                    borderRadius: BorderRadius.circular(AppAppearance.radius),
                   ),
                   child: SelectableText(
                     log.asText(),

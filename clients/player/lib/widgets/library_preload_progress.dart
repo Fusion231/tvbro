@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../l10n/app_localizations.dart';
 import '../sources/source.dart';
 import '../theme.dart';
+import 'app_appearance.dart';
 
 /// First-source preparation: null is loading, true saved, and false failed.
 class LibraryPreloadProgress extends StatelessWidget {
@@ -59,8 +60,11 @@ class LibraryPreloadProgress extends StatelessWidget {
                     width: compact ? 52 : 72,
                     height: compact ? 52 : 72,
                     decoration: BoxDecoration(
-                      color: AppColors.panel,
-                      borderRadius: BorderRadius.circular(18),
+                      color: error == null
+                          ? AppAppearance.raised
+                          : AppAppearance.focusFill,
+                      borderRadius: BorderRadius.circular(AppAppearance.radius),
+                      border: Border.all(color: AppAppearance.line),
                     ),
                     child:
                         connecting && !MediaQuery.disableAnimationsOf(context)
@@ -134,7 +138,7 @@ class LibraryPreloadProgress extends StatelessWidget {
                       minHeight: 6,
                       borderRadius: BorderRadius.circular(3),
                       color: AppColors.accent,
-                      backgroundColor: AppColors.panelHi,
+                      backgroundColor: AppAppearance.raised,
                     ),
                   ),
                 if (error != null) ...[

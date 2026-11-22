@@ -359,7 +359,9 @@ async function main() {
     assert.equal(link.origin,new URL(config.panelUrl).origin);
   });
   await check('original onboarding language catalog and parameter substitution',async()=>{
-    assert.deepEqual(JSON.parse(core.appLanguages()).map(language=>language.code),['en','pl']);
+    const codes=JSON.parse(core.appLanguages()).map(language=>language.code);
+    assert.ok(codes.includes('en')&&codes.includes('pl')&&codes.includes('uk'));
+    assert.equal(new Set(codes).size,codes.length);
     assert.equal(core.translateUi('Download from cloud','pl','{}'),'Pobierz z chmury');
     assert.equal(core.translateUi('Found {count} ready source(s).','pl','{"count":3}'),'Gotowe źródła: 3.');
     assert.equal(core.translateUi('Download from cloud','en','{}'),'Download from cloud');

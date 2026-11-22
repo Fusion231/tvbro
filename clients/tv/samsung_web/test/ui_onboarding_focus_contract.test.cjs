@@ -8,6 +8,7 @@ const vm = require('node:vm');
 const acorn = require('acorn');
 
 const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
+const markup = fs.readFileSync(path.join(__dirname, '../ui/index.html'), 'utf8');
 const names = ['showScreen', 'showLanguage', 'renderLanguages', 'showProfiles', 'renderProfiles'];
 const declarations = acorn.parse(source, {ecmaVersion:2022}).body[0].expression.callee.body.body;
 const handlers = declarations.filter(node => node.type === 'FunctionDeclaration' && names.includes(node.id.name))
@@ -57,6 +58,26 @@ function harness() {
   vm.createContext(env); vm.runInContext(handlers, env);
   return {env, view, byId, focused};
 }
+
+test('initial library preparation exposes the four independent statuses and recovery actions', () => {
+  const node = declarations.find(row => row.type === 'FunctionDeclaration' && row.id.name === 'renderSetupProgress');
+  assert.ok(node, 'the initial source load must render a progress panel');
+  assert.match(markup, /id="setup-progress"[^>]*hidden/);
+  const kit = harness();
+  vm.runInContext(source.slice(node.start, node.end), kit.env);
+  kit.view.setupLoad = { message:'Loading library' };
+  kit.env.renderSetupProgress({sections:{live:{status:'ready'},movie:{status:'empty'},epg:{status:'pending'}}});
+  assert.equal(kit.byId('setup-progress').hidden,false);
+  assert.equal(kit.byId('setup-progress-live').textContent,'Ready');
+  assert.equal(kit.byId('setup-progress-movie').textContent,'No items');
+  assert.equal(kit.byId('setup-progress-epg').textContent,'Waiting');
+  assert.equal(kit.byId('setup-load-retry').hidden,true);
+  kit.view.setupLoad.error = true;
+  kit.env.renderSetupProgress();
+  assert.equal(kit.byId('setup-load-retry').hidden,false);
+  assert.equal(kit.byId('setup-load-edit').hidden,false);
+  assert.equal(kit.byId('setup-progress-stages').hidden,true);
+});
 
 test('language entry focuses the selected language once after rendering, including reentry', () => {
   const kit = harness();

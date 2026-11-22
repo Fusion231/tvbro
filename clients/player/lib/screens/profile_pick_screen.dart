@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../widgets/app_appearance.dart';
 import '../data/app_database.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
@@ -572,7 +573,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.panel,
+        backgroundColor: AppAppearance.surface,
         title: Text(tr('Switch to {name}?', {'name': entry.name})),
         content: Text(details, style: const TextStyle(fontSize: 14)),
         actions: [
@@ -854,7 +855,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
     final action = await showDialog<String>(
       context: context,
       builder: (ctx) => SimpleDialog(
-        backgroundColor: AppColors.panel,
+        backgroundColor: AppAppearance.surface,
         title: Text(entry.name.isEmpty ? tr('Profile') : entry.name),
         // `ListTile`, not `SimpleDialogOption`: on a remote every row has to be
         // a focus target, and the first has to take focus when it opens.
@@ -958,7 +959,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: AppColors.panel,
+        backgroundColor: AppAppearance.surface,
         title: Text(tr('Delete profile?')),
         content: Text(
           tr('Delete “{name}”? This cannot be undone.', {'name': entry.name}),
@@ -1054,31 +1055,23 @@ class _ProfilePickScreenState extends State<ProfilePickScreen>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     if (_checking) {
       return const Scaffold(
-        backgroundColor: AppColors.ink,
+        backgroundColor: AppAppearance.background,
         body: Center(child: CircularProgressIndicator()),
       );
     }
 
     return Scaffold(
-      backgroundColor: AppColors.ink,
+      backgroundColor: AppAppearance.background,
       body: Stack(
         children: [
-          Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: const Alignment(0, -0.1),
-                  radius: 1.2,
-                  colors: [
-                    AppColors.accent.withValues(alpha: 0.08),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
+          const Positioned.fill(
+            child: DecoratedBox(decoration: AppAppearance.backdrop),
           ),
           SafeArea(
             child: LayoutBuilder(
@@ -1434,9 +1427,9 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                           width: 28,
                           height: 28,
                           decoration: BoxDecoration(
-                            color: AppColors.panel,
+                            color: AppAppearance.surface,
                             shape: BoxShape.circle,
-                            border: Border.all(color: AppColors.line, width: 1),
+                            border: Border.all(color: AppAppearance.line, width: 1),
                           ),
                           child: const Icon(
                             Icons.more_horiz_rounded,
@@ -1456,9 +1449,9 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                           width: 24,
                           height: 24,
                           decoration: BoxDecoration(
-                            color: AppColors.panel,
+                            color: AppAppearance.surface,
                             shape: BoxShape.circle,
-                            border: Border.all(color: AppColors.line, width: 1),
+                            border: Border.all(color: AppAppearance.line, width: 1),
                           ),
                           child: const Icon(
                             Icons.lock_rounded,
@@ -1494,9 +1487,9 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                         width: 24,
                         height: 24,
                         decoration: BoxDecoration(
-                          color: AppColors.panel,
+                          color: AppAppearance.surface,
                           shape: BoxShape.circle,
-                          border: Border.all(color: AppColors.line, width: 1),
+                          border: Border.all(color: AppAppearance.line, width: 1),
                         ),
                         child: Icon(
                           widget.entry.isCloud
@@ -1665,9 +1658,12 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     return AlertDialog(
-      backgroundColor: AppColors.panel,
+      backgroundColor: AppAppearance.surface,
       title: Text(tr('New profile')),
       scrollable: true,
       // TvTextField, not a bare TextField: on a TV remote a plain TextField

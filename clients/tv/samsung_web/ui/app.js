@@ -29,6 +29,10 @@
     "Do you want to close TVBro?": "Czy chcesz zamknąć TVBro?",
     "Could not change the setting.": "Nie można zmienić ustawienia.",
     "Help & connection": "Pomoc i połączenie",
+    "Channels & EPG": "Kanały i EPG",
+    "Profiles & data": "Profile i dane",
+    "Help & information": "Pomoc i informacje",
+    "Advanced settings": "Ustawienia zaawansowane",
     "TVBro sends provider requests directly from this TV.": "TVBro wysyła zapytania do dostawcy bezpośrednio z tego telewizora.",
     "On Titan OS, this TV version requires HTTPS. HTTP provider and media addresses are blocked before a request or playback.": "Na Titan OS ta wersja TV wymaga HTTPS. Adresy dostawcy i multimedia HTTP są blokowane przed wysłaniem zapytania lub odtworzeniem.",
     "The provider must allow TVBro to connect from this app. Ask them to enable access for TVBro.": "Dostawca musi zezwolić aplikacji TVBro na połączenie. Poproś go o włączenie dostępu dla TVBro.",
@@ -69,6 +73,11 @@
     "Could not save the channel list on this TV. It may need to download again next time.": "Nie udało się zapisać listy na telewizorze. Przy kolejnym uruchomieniu może być potrzebne ponowne pobranie.",
     "Loading cloud profiles…": "Wczytywanie profili z chmury…",
     "Preparing your library…": "Przygotowywanie biblioteki…",
+    "Waiting": "Oczekuje",
+    "Ready": "Gotowe",
+    "No items": "Brak pozycji",
+    "Unavailable": "Niedostępne",
+    "Back and edit source": "Wróć i popraw źródło",
     "Preparing your profile…": "Przygotowywanie profilu…",
     "Saving your profile…": "Zapisywanie profilu…",
     "Connecting to source…": "Łączenie ze źródłem…",
@@ -401,14 +410,14 @@
       if (!data || data.languageSelected !== true || data.languageCode !== code) throw new Error('Language was not saved.');
       view.languageSaving = false; view.languageCode = data.languageCode; view.languageSelected = data.languageSelected === true;
       view.languages = array(data.languages); applyUiLanguage(view.languageCode);
-      if (view.languageReturn) showSettings(); else routeAfterLanguage();
+      if (view.languageReturn) showSettings('language'); else routeAfterLanguage();
     }).catch(function () {
       view.languageSaving = false; renderLanguages(); text(byId('language-error'), t('Could not save the language. Please try again.'));
     });
   }
   function leaveLanguage() {
     if (view.languageSaving) return;
-    if (view.languageReturn) { applyUiLanguage(view.languagePrevious); showSettings(); }
+    if (view.languageReturn) { applyUiLanguage(view.languagePrevious); showSettings('language'); }
     else requestExit();
   }
   function text(node, value) { node.textContent = value == null ? '' : String(value); }
@@ -426,6 +435,36 @@
     var node = byId('app-status'), pending = !!value && !error && (loading === true || view.busy || view.pairingBusy);
     text(node, value); node.className = 'app-status' + (error ? ' is-error' : '') + (pending && view.screen !== 'pairing' ? ' is-busy' : '');
     node.setAttribute('aria-busy', pending ? 'true' : 'false');
+    if (view.screen === 'settings') {
+      var settingsStatus = byId('settings-status');
+      text(settingsStatus, value);
+      settingsStatus.className = error ? 'is-error' : '';
+    }
+    if (view.setupLoad) {
+      view.setupLoad.message = value;
+      view.setupLoad.error = !!error;
+    }
+    renderSetupProgress();
+  }
+  function renderSetupProgress(preparation) {
+    var panel = byId('setup-progress'), load = view.setupLoad;
+    panel.hidden = !load;
+    byId('app-shell').setAttribute('data-setup-progress', load ? 'true' : 'false');
+    if (!load) return;
+    if (preparation) load.sections = preparation.sections || {};
+    var sections = load.sections || {};
+    var labels = {ready:'Ready',empty:'No items',failed:'Unavailable',unavailable:'Unavailable',pending:'Waiting'};
+    text(byId('setup-progress-title'), t(load.error ? 'Could not load the source.' : 'Preparing your library…'));
+    text(byId('setup-progress-summary'), load.message);
+    byId('setup-progress-stages').hidden = !!load.error;
+    byId('setup-load-retry').hidden = !load.error;
+    byId('setup-load-edit').hidden = !load.error || !!(load.config && load.config.kind === 'demo');
+    ['live','movie','series','epg'].forEach(function (kind) {
+      var value = sections[kind] && sections[kind].status;
+      var row = byId('setup-progress-' + kind);
+      text(row, t(labels[value] || 'Waiting'));
+      row.setAttribute('data-state', value || 'pending');
+    });
   }
   function afterLoadingPaint() {
     return new Promise(function (resolve) {
@@ -562,9 +601,16 @@
     stopSeekHold();
     cancelPlayerZap();
     var layer = byId('modal-layer'); if (dialogs.length) dialogs[dialogs.length - 1].node.hidden = true;
-    var node = element('section', 'dialog' + (wide ? ' dialog-wide' : ''));
+    var styled = view.player || ['home', 'language', 'profiles', 'setup', 'sources', 'settings', 'pairing'].indexOf(view.screen) >= 0;
+    var settings = view.screen === 'settings';
+    var node = element('section', 'dialog' + (wide ? ' dialog-wide' : '') + (styled ? ' app-dialog' : '') + (settings ? ' settings-dialog' : ''));
+    if (settings) {
+      layer.classList.add('settings-modal');
+      byId('settings-view').setAttribute('aria-hidden', 'true');
+    }
     node.setAttribute('role', 'dialog'); node.setAttribute('aria-modal', 'true'); node.setAttribute('aria-label', title);
     var heading = element('h2', '', title), body = element('div', 'dialog-body'), error = element('p', 'dialog-error'), actions = element('div', 'dialog-actions');
+    if (settings) error.setAttribute('role', 'status');
     node.appendChild(heading); node.appendChild(body); node.appendChild(error); node.appendChild(actions); layer.appendChild(node); layer.hidden = false;
     var record = { node: node, body: body, error: error, actions: actions, focus: document.activeElement, onCancel: onCancel };
     dialogs.push(record); document.body.classList.add('dialog-open'); window.clearTimeout(hideTimer); hideTimer = null; syncPreviewIdleTimer(); return record;
@@ -574,8 +620,12 @@
     var record = dialogs.pop(), inputs = record.node.querySelectorAll('input'); record.closed = true;
     for (var i = 0; i < inputs.length; i++) inputs[i].value = '';
     record.node.parentNode.removeChild(record.node);
-    if (dialogs.length) dialogs[dialogs.length - 1].node.hidden = false; else { byId('modal-layer').hidden = true; document.body.classList.remove('dialog-open'); }
-    focus(record.focus);
+    if (dialogs.length) dialogs[dialogs.length - 1].node.hidden = false; else {
+      var layer = byId('modal-layer'); layer.hidden = true; layer.classList.remove('settings-modal'); document.body.classList.remove('dialog-open');
+      if (view.screen === 'settings') byId('settings-view').setAttribute('aria-hidden', 'false');
+    }
+    var settingKey = view.screen === 'settings' && record.focus && record.focus.getAttribute && record.focus.getAttribute('data-setting-key');
+    if (settingKey && !dialogs.length && !visible(record.focus)) focusSetting(settingKey); else focus(record.focus);
     if (!visible(document.activeElement) || document.activeElement === document.body) {
       var root = dialogs.length ? dialogs[dialogs.length - 1].node : view.player ? byId('player-chrome') : byId(view.screen + '-view');
       var candidates = root.querySelectorAll('[data-nav]');
@@ -648,12 +698,20 @@
   }
   function optionDialog(title, options, selected, action) {
     var record = dialog(title), list = element('div', 'dialog-list'); record.body.appendChild(list);
+    var selectedButton = null, settings = view.screen === 'settings';
     options.forEach(function (option) {
-      list.appendChild(button(option.label, 'button' + (option.value === selected ? ' selected-option' : ''), function () {
-        Promise.resolve().then(function () { return action(option.value); }).then(function () { closeDialog(false, record); }, function (error) { text(record.error, message(error, t("Could not change the setting."))); });
-      }));
+      var row = button(option.label, 'button' + (option.value === selected ? ' selected-option' : ''), function () {
+        if (settings && record.saving) return;
+        record.saving = true;
+        Promise.resolve().then(function () { return action(option.value); }).then(function () { closeDialog(false, record); }, function (error) {
+          record.saving = false; text(record.error, message(error, t("Could not change the setting.")));
+        });
+      });
+      if (settings) row.setAttribute('aria-pressed', option.value === selected ? 'true' : 'false');
+      if (option.value === selected) selectedButton = row;
+      list.appendChild(row);
     });
-    dialogButton(record, t("Back"), function () { closeDialog(true); }); focus(list.querySelector('button') || record.actions.firstChild);
+    dialogButton(record, t("Back"), function () { closeDialog(true); }); focus(settings && selectedButton || list.querySelector('button') || record.actions.firstChild);
   }
   function showScreen(name, target) {
     if (suspendedDetails && name !== suspendedDetails.screen) discardDetails();
@@ -666,8 +724,13 @@
     var screens = document.querySelectorAll('[data-screen]');
     for (var i = 0; i < screens.length; i++) screens[i].hidden = screens[i].getAttribute('data-screen') !== name;
     view.screen = name;
+    view.setupLoad = null;
     var shell = byId('app-shell'), header = document.querySelector('.app-header');
     shell.setAttribute('data-active-screen', name);
+    var settingsBackdrop = name === 'settings' && view.settingsOrigin && view.settingsOrigin.screen === 'home';
+    shell.setAttribute('data-settings-home', settingsBackdrop ? 'true' : 'false');
+    byId('home-view').setAttribute('aria-hidden', settingsBackdrop ? 'true' : 'false');
+    header.setAttribute('aria-hidden', name === 'settings' ? 'true' : 'false');
     var section = name === 'catalog' || name === 'media';
     var toolbar = section && byId(name + '-view').querySelector('.catalog-toolbar, .guide-toolbar');
     if (toolbar) toolbar.insertBefore(header, toolbar.firstChild);
@@ -704,6 +767,7 @@
   }
   function afterProfile(data) {
     ++view.request; ++view.mediaRequest; ++view.guideRequest;
+    view.settingsProfiles = false; view.settingsOrigin = null;
     ++view.pairingRequest; view.pairingOnboarding = false; view.pairingReady = false;
     view.source = null; view.channels = []; view.categories = []; view.nowNext = {}; clearPlaybackPresentation();
     applyBootstrap(data); view.manageProfiles = false; if (!view.profile) showProfiles(); else { openProfileContent(); refreshParental().catch(report); }
@@ -799,15 +863,16 @@
     ['m3u', 'xtream', 'stalker'].forEach(function (kind) { byId('kind-' + kind).className = 'source-tab' + (kind === view.kind ? ' is-active' : ''); byId('kind-' + kind).setAttribute('aria-pressed', kind === view.kind ? 'true' : 'false'); });
   }
   function cancelSourceEdit() { view.editSource = null; byId('source-form').reset(); renderFields(); text(byId('source-form-title'), t("Add source")); text(byId('connect-source'), t("Connect and load channels")); byId('cancel-source-edit').hidden = true; }
+  function editSource(config) {
+    view.editSource = config; view.kind = config.kind; renderFields(config); byId('source-label').value = config.label || '';
+    text(byId('source-form-title'), t("Edit source")); text(byId('connect-source'), t("Save and open")); byId('cancel-source-edit').hidden = false; focus(byId('source-label'));
+  }
   function renderSources() {
     var parent = byId('saved-sources'); clear(parent);
     view.sources.forEach(function (config) {
       var row = element('div', 'source-row');
       row.appendChild(button(sourceName(config), 'button source-open', function () { loadSource(config); }));
-      row.appendChild(button(t("Edit"), 'button source-edit', function () {
-        view.editSource = config; view.kind = config.kind; renderFields(config); byId('source-label').value = config.label || '';
-        text(byId('source-form-title'), t("Edit source")); text(byId('connect-source'), t("Save and open")); byId('cancel-source-edit').hidden = false; focus(byId('source-label'));
-      }));
+      row.appendChild(button(t("Edit"), 'button source-edit', function () { editSource(config); }));
       row.appendChild(button(t('Settings'), 'button source-edit', function () { sourceTools(config); }));
       row.appendChild(button(t("Delete"), 'button source-remove', function () {
         confirmAction(t("Delete source?"), sourceName(config), function () { return query('sources.remove', { id: config.id }).then(function (sources) {
@@ -834,14 +899,15 @@
         closeDialog(false); return openCategoryVisibility(config, kind);
       });
     }));
-    if (cap('guide')) list.appendChild(button(t('EPG mapping'), 'button', function () {
-      var current = editorContext();
-      query('organization.get', {sourceId:config.id}).then(function (data) {
-        if (!current()) return;
-        pagedEditor(t('EPG mapping'), array(data.channels), function (channel) { return channel.name; }, function (channel) { epgMapping(config, channel); });
-      }).catch(report);
-    }));
+    if (cap('guide')) list.appendChild(button(t('EPG mapping'), 'button', function () { openEpgMapping(config); }));
     dialogButton(record, t('Back'), function () { closeDialog(true, record); }); focus(list.firstChild);
+  }
+  function openEpgMapping(config) {
+    var current = editorContext();
+    return query('organization.get', {sourceId:config.id}).then(function (data) {
+      if (!current()) return;
+      pagedEditor(t('EPG mapping'), array(data.channels), function (channel) { return channel.name; }, function (channel) { epgMapping(config, channel); });
+    }).catch(report);
   }
   function applyEditedCatalog(data) {
     var catalog = data && data.catalog;
@@ -1120,7 +1186,9 @@
     if (view.caps.requiresHttpsProvider === true && hostedHttpSource(config)) {
       status(t('This provider uses HTTP. This TV version needs HTTPS. Ask your provider for an HTTPS address or use TVBro on Android, Windows or Samsung.'), true); return Promise.resolve();
     }
-    var request = ++view.request, screen = view.screen; busy(true); status(t("Loading source…") + ' ' + sourceName(config));
+    var request = ++view.request, screen = view.screen;
+    if (!view.source && (screen === 'sources' || screen === 'setup' || screen === 'home')) view.setupLoad = {config:config};
+    busy(true); status(t("Loading source…") + ' ' + sourceName(config));
     return afterLoadingPaint().then(function () {
       if (request !== view.request) throw cancelled();
       return query('sources.load', { id: config.id });
@@ -1134,7 +1202,11 @@
       if (catalog.cachePersisted === false) notices.push(t("Could not save the channel list on this TV. It may need to download again next time."));
       if (catalog.expiry && catalog.expiry.notice) notices.push(t(catalog.expiry.notice === 'expired' ? 'Your playlist has expired.' : 'Your playlist expires on {date}.', {date:new Date(catalog.expiry.date).toLocaleDateString()}));
       if (notices.length) status(notices.join(' '), catalog.cachePersisted === false || catalog.expiry && catalog.expiry.notice === 'expired');
-    }).catch(function (error) { if (request === view.request) { busy(false); report(error, t("Could not load the source.")); } });
+    }).catch(function (error) {
+      if (request !== view.request) return;
+      busy(false); report(error, t("Could not load the source."));
+      if (view.setupLoad) focus(view.setupLoad.config.kind === 'demo' ? byId('setup-load-retry') : byId('setup-load-edit'));
+    });
   }
   function hostedHttpSource(config) {
     if (!config || !config.fields) return false;
@@ -1651,6 +1723,7 @@
       status('');
     }
     var warnings = state && state.catalogPreparation && state.catalogPreparation.warnings || [];
+    if (view.setupLoad && view.busy && state) renderSetupProgress(state.catalogPreparation);
     var warningKey = warnings.length ? JSON.stringify(warnings) : '';
     if (!view.busy && !view.player && warningKey && view.catalogPreparationWarningKey !== warningKey) {
       view.catalogPreparationWarningKey = warningKey;
@@ -2515,55 +2588,130 @@
     }).catch(function (error) { if (record) text(record.error, message(error, t("Could not update protection."))); else report(error); });
   }
   function parentalForm() {
+    var current = editorContext(), read = view.settingsRead;
     refreshParental().then(function (data) {
+      if (!current() || view.settingsRead !== read) return;
       var record = dialog(t("Parental controls")), lockSettings = !!data.lockSettings;
       record.body.appendChild(element('p', 'muted', data.enabled ? t("Protection is enabled. Enter the current PIN to make changes.") : t("Set a four-digit PIN to protect selected channels and categories.")));
       var input = editableInput(record.body, t("New PIN"), 'password', '', 4); input.setAttribute('inputmode', 'numeric');
-      var protect = button('', 'setting-row', function () { lockSettings = !lockSettings; text(protect, t("Protect settings: {value}", { value: lockSettings ? t("Yes") : t("No") })); });
-      text(protect, t("Protect settings: {value}", { value: lockSettings ? t("Yes") : t("No") })); record.body.appendChild(protect);
+      var protect = button('', 'setting-row', function () { lockSettings = !lockSettings; showProtectionChoice(); });
+      function showProtectionChoice() {
+        text(protect, t("Protect settings: {value}", { value: lockSettings ? t("Yes") : t("No") }));
+        protect.setAttribute('aria-pressed', lockSettings ? 'true' : 'false');
+      }
+      showProtectionChoice(); record.body.appendChild(protect);
       var save = dialogButton(record, t("Save PIN and settings protection"), function () {
-        query('parental.setPin', { newPin: input.value, lockSettings: lockSettings }).then(function () { closeDialog(false, record); showSettings(); }).catch(function (error) { text(record.error, message(error, t("Could not save parental controls."))); });
+        query('parental.setPin', { newPin: input.value, lockSettings: lockSettings }).then(function () { closeDialog(false, record); if (view.screen === 'settings') showSettings('parental'); }).catch(function (error) { text(record.error, message(error, t("Could not save parental controls."))); });
       }, true); save.disabled = true; input.addEventListener('input', function () { save.disabled = !input.value; });
-      if (data.enabled) dialogButton(record, t("Disable parental controls"), function () { query('parental.setPin', { newPin: '' }).then(function () { closeDialog(false, record); showSettings(); }).catch(function (error) { text(record.error, message(error, t("Could not disable parental controls."))); }); });
+      if (data.enabled) dialogButton(record, t("Disable parental controls"), function () { query('parental.setPin', { newPin: '' }).then(function () { closeDialog(false, record); if (view.screen === 'settings') showSettings('parental'); }).catch(function (error) { text(record.error, message(error, t("Could not disable parental controls."))); }); });
       dialogButton(record, t("Back"), function () { closeDialog(true); }); focus(input);
     }).catch(report);
   }
-  function showSettings() {
-    showScreen('settings'); byId('settings-view').tabIndex = -1; focus(byId('settings-view'));
-    var request = view.request;
-    clear(byId('settings-list')); text(byId('settings-profile'), view.profile ? view.profile.name : ''); status(t("Loading settings…"));
-    Promise.all([query('settings.get'), refreshParental()]).then(function (data) { if (view.screen !== 'settings' || request !== view.request) return; renderSettings(data[0]); status(''); }).catch(function (error) { if (view.screen === 'settings' && request === view.request) report(error); });
+  function openSettings() {
+    view.settingsOrigin = {screen:view.screen, trigger:byId('show-settings')};
+    view.settingsAdvanced = false;
+    showSettings();
   }
-  function renderSettings(data) {
-    view.settings = data.settings || {}; var parent = byId('settings-list'); clear(parent);
-    parent.appendChild(button(t('Help & connection'), 'setting-row', connectionHelp));
-    var language = button('', 'setting-row', function () { showLanguage(true); });
-    language.appendChild(element('span', 'setting-label', t('Language')));
+  function leaveSettings() {
+    var origin = view.settingsOrigin;
+    view.settingsOrigin = null;
+    if (origin && origin.screen === 'sources') showScreen('sources', false);
+    else if (view.source) showHome();
+    else showSources();
+    if (origin) focus(origin.trigger);
+  }
+  function openProfiles(fromSettings) {
+    var screen = view.screen, request = view.request;
+    query('profiles.list').then(function (data) {
+      if (view.screen !== screen || view.request !== request) return;
+      view.profiles = array(data.profiles); view.profile = data.profile;
+      view.settingsProfiles = fromSettings === true;
+      showProfiles();
+    }).catch(report);
+  }
+  function showSettings(preferred) {
+    showScreen('settings', byId('settings-back'));
+    byId('settings-view').setAttribute('aria-hidden', 'false');
+    var request = view.request, read = view.settingsRead = (view.settingsRead || 0) + 1;
+    clear(byId('settings-list')); text(byId('settings-profile'), view.profile ? view.profile.name : ''); status(t("Loading settings…"));
+    function current() { return view.screen === 'settings' && request === view.request && read === view.settingsRead; }
+    Promise.all([query('settings.get'), refreshParental()]).then(function (data) {
+      if (!current()) return;
+      renderSettings(data[0], preferred); status('');
+    }).catch(function (error) { if (current()) report(error); });
+  }
+  function settingRow(parent, key, icon, label, value, action) {
+    var row = button('', 'setting-row', action), mark = element('span', 'setting-icon', icon);
+    row.setAttribute('data-setting-key', key); mark.setAttribute('aria-hidden', 'true');
+    row.appendChild(mark); row.appendChild(element('span', 'setting-label', label));
+    if (value) row.appendChild(element('span', 'setting-value', value));
+    var arrow = element('span', 'setting-arrow');
+    arrow.setAttribute('aria-hidden', 'true'); row.appendChild(arrow);
+    parent.appendChild(row); return row;
+  }
+  function settingsGroup(parent, title) {
+    var group = element('section', 'settings-group');
+    group.appendChild(element('h2', '', t(title))); parent.appendChild(group); return group;
+  }
+  function focusSetting(key) {
+    var rows = Array.prototype.filter.call(byId('settings-list').querySelectorAll('[data-setting-key]'), visible);
+    var preferred = rows.filter(function (row) { return row.getAttribute('data-setting-key') === key; })[0];
+    var target = preferred || rows[0] || byId('settings-back');
+    if (dialogs.length) dialogs[0].focus = target; else focus(target);
+  }
+  function renderSettings(data, preferred) {
+    view.settings = data.settings || {};
+    var parent = byId('settings-list'); clear(parent);
+    var channels = settingsGroup(parent, 'Channels & EPG');
+    var source = view.source;
+    if (source) {
+      settingRow(channels, 'source', '▣', t('Source settings'), sourceName(source), function () { sourceTools(source); });
+      if (cap('guide')) settingRow(channels, 'epg', '▤', t('EPG mapping'), null, function () { openEpgMapping(source); });
+    }
+    settingRow(channels, 'parental', '◈', t('Parental controls'), view.parental && view.parental.enabled ? t('On') : t('Off'), parentalForm);
+    if (view.parental && view.parental.enabled) settingRow(channels, 'protected', '◈', t(view.parental.unlocked ? 'Hide protected content' : 'Show protected content'), null, function () {
+      var request = view.request, read = view.settingsRead;
+      query(view.parental.unlocked ? 'parental.lock' : 'parental.unlock').then(function () {
+        return refreshBootstrap();
+      }).then(function () { return refreshParental(); }).then(function () {
+        if (view.source) return query('organization.get', {sourceId:view.source.id}).then(applyEditedCatalog);
+      }).then(function () { if (view.screen === 'settings' && request === view.request && read === view.settingsRead) showSettings('protected'); }).catch(report);
+    });
+    var profiles = settingsGroup(parent, 'Profiles & data');
     var selectedLanguage = (view.languages.length ? view.languages : JSON.parse(core.appLanguages())).filter(function (row) { return row.code === view.languageCode; })[0];
-    language.appendChild(element('span', 'setting-value', selectedLanguage ? selectedLanguage.name : view.languageCode)); parent.appendChild(language);
-    array(data.fields).forEach(function (field) {
-      if (field.type !== 'select' || !Array.isArray(field.options)) return;
+    settingRow(profiles, 'language', '◎', t('Language'), selectedLanguage ? selectedLanguage.name : view.languageCode, function () { showLanguage(true); });
+    if (cap('profiles')) settingRow(profiles, 'profiles', '○', t('Profiles'), null, function () { openProfiles(true); });
+    if (cap('pairing')) {
+      var pairing = settingRow(profiles, 'cloud', '⇅', t('Link to cloud account'), null, function () { showPairing(false, 'settings'); });
+      pairing.id = 'settings-pairing';
+    }
+    if (cap('backupExport')) settingRow(profiles, 'backup-export', '↑', t('Export encrypted backup'), null, function () { backupFlow(true); });
+    if (cap('backupImport')) settingRow(profiles, 'backup-import', '↓', t('Import encrypted backup'), null, function () { backupFlow(false); });
+    settingRow(settingsGroup(parent, 'Help & information'), 'help', '?', t('Help & connection'), null, connectionHelp);
+    var fields = array(data.fields).filter(function (field) { return field.type === 'select' && Array.isArray(field.options); });
+    if (fields.length) {
+      var advanced = settingRow(parent, 'advanced', '⚙', t('Advanced settings'), null, function () {
+        view.settingsAdvanced = !view.settingsAdvanced; renderSettings(data, 'advanced');
+      });
+      advanced.setAttribute('aria-expanded', view.settingsAdvanced ? 'true' : 'false');
+    }
+    if (view.settingsAdvanced) fields.forEach(function (field) {
       var choices = field.options.map(function (option) {
         var labels = { auto: 'Auto', always: 'Always', off: 'Never' };
         return { value: option.value, label: field.key === 'profilePickerStartup' ? t(labels[option.value] || option.label) : uiLabel(option.label) };
       });
       var current = view.settings[field.key], selected = choices.filter(function (option) { return option.value === current; })[0];
-      var row = button('', 'setting-row', function () {
-        optionDialog(uiLabel(field.label), choices, current, function (value) { var settings = {}; settings[field.key] = value; return query('settings.set', { settings: settings }).then(renderSettings); });
-      }); row.appendChild(element('span', 'setting-label', uiLabel(field.label))); row.appendChild(element('span', 'setting-value', selected ? selected.label : t("Default"))); parent.appendChild(row);
+      settingRow(parent, field.key, '·', uiLabel(field.label), selected ? selected.label : t('Default'), function () {
+        var read = view.settingsRead;
+        optionDialog(uiLabel(field.label), choices, current, function (value) {
+          var settings = {}; settings[field.key] = value;
+          return query('settings.set', {settings:settings}).then(function (updated) {
+            if (view.screen === 'settings' && read === view.settingsRead) renderSettings(updated, field.key);
+          });
+        });
+      });
     });
-    var parental = button('', 'setting-row', parentalForm); parental.appendChild(element('span', 'setting-label', t("Parental controls"))); parental.appendChild(element('span', 'setting-value', view.parental && view.parental.enabled ? t("On") : t("Off"))); parent.appendChild(parental);
-    if (view.source) parent.appendChild(button(t('Source settings') + ' · ' + sourceName(view.source), 'setting-row', function () { sourceTools(view.source); }));
-    if (view.parental && view.parental.enabled) parent.appendChild(button(t(view.parental.unlocked ? 'Hide protected content' : 'Show protected content'), 'setting-row', function () {
-      query(view.parental.unlocked ? 'parental.lock' : 'parental.unlock').then(function () {
-        return refreshBootstrap();
-      }).then(function () { return refreshParental(); }).then(function () {
-        if (view.source) return query('organization.get', {sourceId:view.source.id}).then(applyEditedCatalog);
-      }).then(function () { showSettings(); }).catch(report);
-    }));
-    if (cap('backupExport')) parent.appendChild(button(t('Export encrypted backup'), 'setting-row', function () { backupFlow(true); }));
-    if (cap('backupImport')) parent.appendChild(button(t('Import encrypted backup'), 'setting-row', function () { backupFlow(false); }));
-    byId('settings-pairing').hidden = !cap('pairing'); focus(parent.querySelector('button') || byId('settings-pairing'));
+    focusSetting(preferred);
   }
   function connectionHelp() {
     var record = dialog(t('Help & connection'));
@@ -2657,7 +2805,11 @@
         }).catch(function (error) { if (request === view.pairingRequest) { if (record) text(record.error, message(error, t("Could not select the profile."))); else report(error); } });
       }
       if (view.pairingOnboarding && rows.length === 1) return selectProfile(rows[0]);
-      var record = dialog(t("Panel profiles"), false, function () { ++view.pairingRequest; }), list = element('div', 'dialog-list'); record.body.appendChild(list);
+      var record = dialog(t("Panel profiles"), false, function () { ++view.pairingRequest; }), list = element('div', 'dialog-list');
+      if (view.pairingOnboarding && rows.length) {
+        record.body.appendChild(element('p', 'muted', t('Choose a profile. Its playlists and settings will be downloaded automatically.')));
+      }
+      record.body.appendChild(list);
       rows.forEach(function (profile) { list.appendChild(button(profile.name + (profile.pinSet ? ' · PIN' : ''), 'button', function () { selectProfile(profile, record); })); });
       if (!rows.length) list.appendChild(element('p', 'muted', t("No account profiles yet. Create one in the panel, then refresh profiles.")));
       dialogButton(record, t("Back"), function () { closeDialog(true); }); focus(list.querySelector('button') || record.actions.firstChild);
@@ -2723,6 +2875,9 @@
       try { if (typeof core.pairingQrDataUri === 'function') view.pairingQrData = core.pairingQrDataUri(view.pairingUrl); } catch (_) {}
     }
     var qr = byId('pairing-qr'), qrData = view.pairingCode && view.pairingQrData;
+    var pairingCard = byId('pairing-card');
+    pairingCard.hidden = !view.pairingCode;
+    pairingCard.className = 'pairing-card' + (qrData ? ' has-qr' : '');
     qr.hidden = !qrData;
     if (qrData) { if (qr.getAttribute('src') !== qrData) qr.src = qrData; } else qr.removeAttribute('src');
     byId('pairing-start').hidden = linked; text(byId('pairing-start'), view.pairingCode ? t("New pairing code") : t("Generate pairing code"));
@@ -2741,7 +2896,7 @@
     stopPairingWatch();
     var target = view.pairingReady ? 'profiles' : view.pairingReturn;
     ++view.pairingRequest; view.pairingBusy = false; view.pairingOnboarding = false; view.pairingReady = false;
-    if (target === 'profiles') showProfiles(); else if (target === 'setup' && view.profile && !view.sources.length) showSetup(); else showSettings();
+    if (target === 'profiles') showProfiles(); else if (target === 'setup' && view.profile && !view.sources.length) showSetup(); else showSettings('cloud');
   }
   function continuePairing() {
     if (!view.pairingReady || view.pairingBusy) return;
@@ -2766,8 +2921,18 @@
     if (moveSeries(key, active)) return;
     if (moveDetails(key, active)) return;
     if (moveGuideRow(key, active)) return;
-    var root = dialogs.length ? dialogs[dialogs.length - 1].node : view.player ? byId('player-chrome') : byId('app-shell');
+    var root = dialogs.length ? dialogs[dialogs.length - 1].node : view.player ? byId('player-chrome') : view.screen === 'settings' ? byId('settings-view') : byId('app-shell');
     var nodes = root.querySelectorAll('[data-nav]');
+    if (!dialogs.length && view.screen === 'settings') {
+      var rows = Array.prototype.filter.call(nodes, visible), index = rows.indexOf(active);
+      if (key === 38 || key === 40) focus(rows[index < 0 ? 0 : index + (key === 38 ? -1 : 1)]);
+      else {
+        var towardBack = key === (uiLanguage === 'ar' ? 39 : 37);
+        if (towardBack) focus(rows[0]);
+        else if (index <= 0) focus(rows[1]);
+      }
+      return;
+    }
     // The TV action row can wrap with translated labels. Left/right must still
     // reach every action in reading order, including the next visual row.
     if (!dialogs.length && view.player && (key === 37 || key === 39)) {
@@ -2832,15 +2997,19 @@
         if (request === view.request && view.screen === 'sources') { view.sources = array(sources); renderSources(); }
       }).catch(function (error) { if (request === view.request) report(error); }); return;
     }
+    if (view.setupLoad && view.setupLoad.error) {
+      view.setupLoad = null; status(''); focus(byId(view.screen + '-view').querySelector('[data-nav]')); return;
+    }
     if (view.player) { if (playerZapPending || playerZapDigits) cancelPlayerZap(); else if (!view.playerReady) returnFromPlayer(); else if (view.chrome) showChrome(false); else returnFromPlayer(); return; }
     if (view.screen === 'catalog' && byId('channel-search').value) { window.clearTimeout(searchTimer); searchTimer = null; byId('channel-search').value = ''; view.page = 0; renderChannels(); focus(byId('channel-search')); return; }
     if (view.screen === 'media' && byId('media-search').value) { clearMediaSearch(); return; }
     if (view.screen === 'catalog' || view.screen === 'media') { showHome(); return; }
-    if (view.screen === 'settings') { if (view.source) showHome(); else showSources(); return; }
+    if (view.screen === 'settings') { leaveSettings(); return; }
     if (view.screen === 'sources' && view.editSource) { cancelSourceEdit(); focus(byId('kind-' + view.kind)); return; }
     if (view.screen === 'sources' && view.sourceSetup) { showSetup(); return; }
     if (view.screen === 'setup') { showProfiles(); return; }
     if (view.screen === 'profiles' && view.manageProfiles) { view.manageProfiles = false; renderProfiles(); focus(byId('manage-profiles')); return; }
+    if (view.screen === 'profiles' && view.settingsProfiles) { view.settingsProfiles = false; showSettings('profiles'); return; }
     requestExit();
   }
   function onKey(event) {
@@ -2848,11 +3017,19 @@
     if (typeof window !== 'undefined' && window.TVBroPlatformAdapters && typeof window.TVBroPlatformAdapters.normalizeKey === 'function') key = window.TVBroPlatformAdapters.normalizeKey(key);
     if (seekHold && seekHold.key !== key) stopSeekHold();
     var editable = active && active.hasAttribute && active.hasAttribute('data-editable'), isBack = key === 10009 || key === 27 || key === 8;
-    if (editable && !active.readOnly) { if (key === 13 || key === 65376 || isBack && key !== 8) { event.preventDefault(); endEditing(active); } return; }
+    if (editable && !active.readOnly && !(view.screen === 'settings' && key === 9)) { if (key === 13 || key === 65376 || isBack && key !== 8) { event.preventDefault(); endEditing(active); } return; }
     if (isBack) {
       event.preventDefault();
       if (!dialogs.length && view.player && scrub) { cancelScrub(); return; }
       back(); return;
+    }
+    if (key === 9 && view.screen === 'settings') {
+      if (editable && !active.readOnly) endEditing(active);
+      var root = dialogs.length ? dialogs[dialogs.length - 1].node : byId('settings-view');
+      var rows = Array.prototype.filter.call(root.querySelectorAll('[data-nav]'), visible), index = rows.indexOf(active);
+      event.preventDefault();
+      if (rows.length) focus(rows[index < 0 ? 0 : (index + (event.shiftKey ? -1 : 1) + rows.length) % rows.length]);
+      return;
     }
     if (!dialogs.length && view.player && view.chrome && active === byId('player-progress-track') && !active.disabled) {
       if (key === 37 || key === 39) { event.preventDefault(); adjustScrub(key === 37 ? -10 : 10); return; }
@@ -2926,12 +3103,18 @@
   window.addEventListener('online', refreshProfileListing);
   window.addEventListener('pagehide', function () { stopPairingWatch(); cancelPreviewIdleTimer(); cancelPlayerZap(); window.clearTimeout(channelNowNextTimer); channelNowNextTimer = null; });
   document.addEventListener('blur', function (event) { if (event.target.hasAttribute && event.target.hasAttribute('data-editable')) { event.target.readOnly = true; event.target.classList.remove('is-editing'); } }, true);
-  bind('show-home', showHome); bind('show-sources', showSources); bind('show-settings', showSettings);
+  bind('show-home', showHome); bind('show-sources', showSources); bind('show-settings', openSettings); bind('settings-back', leaveSettings);
   bind('language-continue', function () { saveLanguage(uiLanguage); }); bind('language-back', leaveLanguage);
-  bind('show-profiles', function () { query('profiles.list').then(function (data) { view.profiles = array(data.profiles); view.profile = data.profile; showProfiles(); }).catch(report); });
+  bind('show-profiles', openProfiles);
   bind('add-profile', function () { profileForm(null); }); bind('manage-profiles', function () { view.manageProfiles = !view.manageProfiles; renderProfiles(); focus(byId('profile-list').querySelector('button')); });
   bind('download-cloud', function () { showPairing(true, 'profiles'); });
   bind('setup-source', function () { showSources(true); }); bind('setup-cloud', function () { showPairing(true, 'setup'); });
+  bind('setup-load-edit', function () {
+    if (!view.setupLoad || view.busy) return;
+    var config = view.setupLoad.config;
+    showSources(true); editSource(config);
+  });
+  bind('setup-load-retry', function () { if (view.setupLoad && !view.busy) loadSource(view.setupLoad.config); });
   bind('setup-demo', useDemo); bind('setup-back', showProfiles);
   bind('skip-profile', function () { if (view.profile) selectExistingProfile(view.profile); });
   ['m3u', 'xtream', 'stalker'].forEach(function (kind) { bind('kind-' + kind, function () { view.kind = kind; renderFields(); focus(byId('source-label')); }); });
@@ -2958,7 +3141,7 @@
   bind('guide-now', function () { view.guideFrom = Date.now() - Date.now() % 1800000; fetchGuide(); });
   byId('guide-grid').addEventListener('scroll', onGuideScroll);
   byId('channel-list').addEventListener('scroll', onChannelListScroll);
-  bind('settings-pairing', function () { showPairing(false, 'settings'); }); bind('pairing-choose-profile', chooseCloudProfile);
+  bind('pairing-choose-profile', chooseCloudProfile);
   bind('pairing-continue', continuePairing); bind('pairing-back', leavePairing); ['start', 'check', 'pull', 'push', 'unpair'].forEach(function (action) {
     bind('pairing-' + action, function () { if (action === 'unpair') confirmAction(t("Unpair this device?"), t("Downloaded sources and favorites will stay on this TV."), function () { return query('pairing.unpair').then(function (data) { view.pairingCode = null; view.cloudProfile = null; text(byId('pairing-profile'), ''); renderPairing(data || {}); return refreshBootstrap(); }); }); else pairingAction(action); });
   });
@@ -2975,7 +3158,15 @@
       var saved = config.id ? view.sources.filter(function (row) { return row.id === config.id; })[0] : view.sources[view.sources.length - 1]; if (saved) return loadSource(saved);
     }).catch(function (error) { if (request === view.request) { busy(false); report(error, t("Could not save the source.")); } });
   });
-  window.addEventListener('resize', function () { scheduleArtwork(); if (seriesList) seriesList.layout = null; scheduleSeriesScroll(); var rect = view.player && view.playerReady ? fullRect() : view.preview ? previewRect() : null; if (rect) { nativeRect(rect); query('player.rect', { rect: rect }).catch(report); } });
+  window.addEventListener('resize', function () {
+    scheduleArtwork(); if (seriesList) seriesList.layout = null; scheduleSeriesScroll();
+    if (view.screen === 'settings') {
+      var root = dialogs.length ? dialogs[dialogs.length - 1].node : byId('settings-view');
+      if (root.contains(document.activeElement)) focus(document.activeElement);
+    }
+    var rect = view.player && view.playerReady ? fullRect() : view.preview ? previewRect() : null;
+    if (rect) { nativeRect(rect); query('player.rect', { rect: rect }).catch(report); }
+  });
   if (!platform || typeof platform.query !== 'function' || !validation || !validation.KIND_FIELDS) { busy(true); status(t("Could not start the app."), true); return; }
   busy(true); status(t("Starting TVBro…")); platform.onState(updatePlayer); updatePlayer(platform.getState());
   refreshBootstrap().then(function () {

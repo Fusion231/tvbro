@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../l10n/app_localizations.dart';
 import '../player/channel_owner.dart';
 import '../theme.dart';
+import 'app_appearance.dart';
 import 'routed_focus_node.dart';
 
 /// A text field that behaves under a TV remote's D-pad as well as touch/mouse.
@@ -256,6 +257,7 @@ class _TvTextFieldState extends State<TvTextField> with WidgetsBindingObserver {
   }
 
   Widget _buildCell(bool highlighted) {
+    final refreshed = AppAppearance.isApplied(context);
     // While editing, swallow Back to leave edit mode instead of popping the route.
     // PopScope (not BackButtonListener) is the Navigator-compatible mechanism —
     // this app uses Navigator, not a Router, so BackButtonListener would throw.
@@ -269,14 +271,18 @@ class _TvTextFieldState extends State<TvTextField> with WidgetsBindingObserver {
         // Vertically centers the Row within a fixed-height cell.
         alignment: Alignment.centerLeft,
         decoration: BoxDecoration(
-          color: highlighted ? AppColors.panelHi : AppColors.panel,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
+          color: refreshed
+              ? (highlighted ? AppAppearance.raised : AppAppearance.surface)
+              : (highlighted ? AppColors.panelHi : AppColors.panel),
+          borderRadius: BorderRadius.circular(
+            refreshed ? AppAppearance.radius : AppRadius.tile,
+          ),
           border: Border.all(
             color: highlighted
-                ? AppColors.accent
+                ? (refreshed ? Colors.white : AppColors.accent)
                 : (widget.errorText != null
                       ? AppColors.danger
-                      : AppColors.line),
+                      : (refreshed ? AppAppearance.line : AppColors.line)),
             width: highlighted ? 2 : (widget.errorText != null ? 1.5 : 1),
           ),
         ),

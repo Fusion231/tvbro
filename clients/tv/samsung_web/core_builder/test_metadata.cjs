@@ -54,11 +54,11 @@ async function main() {
     provider: 'tvdb', tmdbApiKey: 'fake-tmdb-key', tvdbApiKey: 'fake-tvdb-key', tvdbPin: '',
     mdblistApiKey: 'fake-mdblist-key', autoEnrich: false,
   }, language: 'pl' });
-  assert.deepEqual(order.providers, ['tvdb', 'tmdb', 'tvmaze', 'mdblist']);
+  assert.deepEqual(order.providers, ['tvdb', 'tmdb', 'tvmaze', 'wikimedia', 'mdblist']);
   assert.equal(order.language, 'pol');
   assert.equal(order.autoEnrich, false);
   const configured = await invoke(source, 'metadata.configure', { config: settings, language: 'eng' });
-  assert.deepEqual(configured.providers, ['tmdb', 'tvmaze']);
+  assert.deepEqual(configured.providers, ['tmdb', 'tvmaze', 'wikimedia']);
   assert.equal(configured.autoEnrich, true);
 
   const input = { id: 'movie-1', title: 'Cache Film', kind: 'movie', year: '2020', providerId: null, extra: {} };
@@ -82,6 +82,8 @@ async function main() {
   assert.equal(snapshot.schema, 1);
   assert.ok(snapshot.records.length > 0);
   assert.equal(JSON.stringify(snapshot).includes('fake-tmdb-key'), false, 'cache snapshot must not contain credentials');
+  const wikimediaRecord = { ...snapshot.records[0], provider: 'wikimedia', providerKey: 'fixture-image' };
+  snapshot.records.push(wikimediaRecord);
 
   const beforeRestore = calls.length;
   await source.dispose();
@@ -89,6 +91,8 @@ async function main() {
   await invoke(source, 'metadata.configure', { config: settings, language: 'eng' });
   assert.equal(await invoke(source, 'metadata.import', { scope: 'another-profile', snapshot: JSON.stringify(snapshot) }), false);
   assert.equal(await invoke(source, 'metadata.import', { scope: 'profile-source-scope', snapshot: JSON.stringify(snapshot) }), true);
+  const restored = await invoke(source, 'metadata.export', { scope: 'profile-source-scope' });
+  assert.deepEqual(restored.records.find(row => row.provider === 'wikimedia'), wikimediaRecord);
   const offline = await invoke(source, 'metadata.details', { item: base, sourceDetailsLoaded: true });
   assert.equal(offline.poster, first.poster);
   assert.equal(calls.length, beforeRestore, 'restored cache is reused without provider traffic');
@@ -126,7 +130,7 @@ async function main() {
     return response(request,url.pathname==='/search/shows'?[{show:publicShow}]:publicShow);
   });
   const defaults=await invoke(publicSource,'metadata.configure',{config:{},language:'pl'});
-  assert.deepEqual(defaults.providers,['tvmaze']);
+  assert.deepEqual(defaults.providers,['tvmaze','wikimedia']);
   const publicItem={id:'public-series',kind:'series',title:'PL - VisionQuest',extra:{}};
   const enriched=await invoke(publicSource,'metadata.enrich',{items:[publicItem]});
   assert.equal(enriched[0].poster,'https://images.test/show-poster.jpg');

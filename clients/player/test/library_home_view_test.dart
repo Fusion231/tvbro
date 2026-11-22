@@ -89,6 +89,28 @@ void main() {
     });
   }
 
+  testWidgets('home artwork keeps remote activation on the existing tiles', (
+    tester,
+  ) async {
+    final selected = <ContentKind>[];
+    await pumpHome(
+      tester,
+      size: const Size(640, 360),
+      television: true,
+      onSelected: selected.add,
+    );
+    final tv = find.byKey(const ValueKey('home-live'));
+    expect(
+      find.descendant(of: tv, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(selected, [ContentKind.movie]);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('TV Home stays wide at 640x360dp', (tester) async {
     await pumpHome(tester, size: const Size(640, 360), television: true);
 

@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../widgets/app_appearance.dart';
 import '../data/app_backup.dart';
 import '../data/app_database.dart';
 import '../l10n/app_localizations.dart';
@@ -140,7 +141,7 @@ class _BackupScreenState extends State<BackupScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        backgroundColor: AppColors.panelHi,
+        backgroundColor: AppAppearance.raised,
         title: Text(tr('Restore backup?')),
         content: SingleChildScrollView(
           child: Column(
@@ -210,7 +211,10 @@ class _BackupScreenState extends State<BackupScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => PopScope(
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) => PopScope(
     canPop: !_busy,
     child: Scaffold(
       appBar: AppBar(
@@ -313,8 +317,11 @@ class _BackupPasswordDialogState extends State<_BackupPasswordDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    backgroundColor: AppColors.panelHi,
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) => AlertDialog(
+    backgroundColor: AppAppearance.raised,
     title: Text(tr(widget.creating ? 'Create backup' : 'Open backup')),
     content: SizedBox(
       width: 420,

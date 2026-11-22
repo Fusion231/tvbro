@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../widgets/app_appearance.dart';
 import '../data/device_class.dart';
 import '../l10n/app_localizations.dart';
 import '../theme.dart';
@@ -51,7 +52,10 @@ class _LanguageSelectionScreenState extends State<LanguageSelectionScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final deviceLanguage = _controller.deviceLanguage;
     final languages = [
       ?deviceLanguage,
@@ -65,7 +69,7 @@ class _LanguageSelectionScreenState extends State<LanguageSelectionScreen> {
       child: Scaffold(
         appBar: widget.onConfirmed == null
             ? null
-            : AppBar(backgroundColor: AppColors.ink),
+            : AppBar(backgroundColor: AppAppearance.background),
         body: SafeArea(
           minimum: EdgeInsets.all(isTelevision ? 28 : 16),
           child: Center(
@@ -176,9 +180,9 @@ class _LanguageSelectionScreenState extends State<LanguageSelectionScreen> {
               minimumSize: Size.fromHeight(isTelevision ? 62 : 52),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               foregroundColor: AppColors.textHi,
-              backgroundColor: AppColors.panel,
+              backgroundColor: AppAppearance.surface,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppRadius.tile),
+                borderRadius: BorderRadius.circular(AppAppearance.radius),
               ),
             ).copyWith(
               side: WidgetStateProperty.resolveWith((states) {

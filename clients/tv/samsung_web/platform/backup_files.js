@@ -132,12 +132,13 @@
       if (!directory || directory.isDirectory !== true || directory.readOnly === true || typeof directory.createFile !== 'function') throw fail('backup_write_failed', 'Choose a writable storage folder.');
       try { directory.resolve(name); throw fail('backup_exists', 'A backup with this name already exists. Choose another name.'); }
       catch (error) { if (!error || error.name !== 'NotFoundError') throw error; }
-      var file = directory.createFile(name), expectedPath = (directory.fullPath || path(directoryPath)) + '/' + name;
-      if (!file || file.fullPath && file.fullPath !== expectedPath) throw fail('backup_write_failed', 'Invalid backup destination.');
+      var file = directory.createFile(name), expectedPath = path(directoryPath) + '/' + name;
+      var nativePath = directory.fullPath ? directory.fullPath.replace(/\/+$/, '') + '/' + name : expectedPath;
+      if (!file || file.fullPath && file.fullPath !== nativePath) throw fail('backup_write_failed', 'Invalid backup destination.');
       function cleanup(error) {
         return new Promise(function (ok) {
           if (typeof directory.deleteFile !== 'function') { ok(); return; }
-          try { directory.deleteFile(expectedPath, ok, ok); } catch (_) { ok(); }
+          try { directory.deleteFile(nativePath, ok, ok); } catch (_) { ok(); }
         }).then(function () { throw error; });
       }
       return open(file, 'w').then(function (stream) {
@@ -180,6 +181,8 @@
   function directory(location) {
     return resolve(location, 'r').then(function (file) {
       if (!file || file.isDirectory !== true || typeof file.listFiles !== 'function') throw fail('backup_path_invalid', 'Choose a storage folder.');
+      // Tizen may return an absolute fullPath even when the picker opened a virtual storage root.
+      var folder = path(location);
       return new Promise(function (ok, no) {
         try { file.listFiles(function (rows) {
           var entries = [], truncated = false;
@@ -187,10 +190,10 @@
             if (!entry || typeof entry.name !== 'string' || entry.name === '.' || entry.name === '..' || /[\/\\\x00-\x1f]/.test(entry.name) ||
                 entry.isDirectory !== true && !/\.tvbro$/i.test(entry.name)) return false;
             if (entries.length === 200) { truncated = true; return true; }
-            entries.push({name:entry.name,path:(file.fullPath || path(location))+'/'+entry.name,isDirectory:entry.isDirectory === true,size:entry.isFile === true?entry.fileSize:null});
+            entries.push({name:entry.name,path:folder+'/'+entry.name,isDirectory:entry.isDirectory === true,size:entry.isFile === true?entry.fileSize:null});
             return false;
           });
-          ok({path:file.fullPath || location,entries:entries,truncated:truncated});
+          ok({path:folder,entries:entries,truncated:truncated});
         }, no); } catch (error) { no(error); }
       });
     });

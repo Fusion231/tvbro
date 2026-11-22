@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 
+import '../widgets/app_appearance.dart';
 import '../dvr/dvr_scheduler.dart';
 import '../dvr/dvr_service.dart';
 import '../l10n/app_localizations.dart';
@@ -178,7 +179,10 @@ class _RecordingScheduleDialogState extends State<_RecordingScheduleDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) => AlertDialog(
     title: Text(tr('Schedule recording')),
     content: SizedBox(
       width: 520,

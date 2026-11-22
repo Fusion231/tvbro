@@ -213,7 +213,8 @@ ExternalMetadata? _externalMetadataFromJson(Object? value) {
   if (data.length != fields.length || !data.keys.toSet().containsAll(fields)) return null;
   final provider = data['provider'], providerKey = data['providerKey'], payload = data['payload'];
   final at = data['refreshedAt'], rating = data['rating'];
-  if (provider is! String || !const {'tmdb', 'tvdb', 'tvmaze', 'mdblist'}.contains(provider) ||
+  if (provider is! String ||
+      !const {'tmdb', 'tvdb', 'tvmaze', 'wikimedia', 'mdblist'}.contains(provider) ||
       providerKey is! String || providerKey.length > 1024 || payload is! Map || at is! int || at < 0 ||
       at > DateTime.now().add(const Duration(days: 1)).millisecondsSinceEpoch ||
       rating != null && (rating is! num || !rating.isFinite)) return null;
@@ -286,10 +287,10 @@ class _WebMetadataCache {
     write(sourceId, item, metadata);
   }
 
-  // The TV port caches external metadata separately from its catalog snapshots.
+  // The web port returns enriched items without writing native SQLite rows.
   Future<void> updateMediaDisplayFields(String sourceId, List<MediaItem> items,
-      {({DateTime? syncedAt})? seriesCatalogVersion, String? expectedCacheIdentity}) async =>
-      _ensureCurrent(expectedCacheIdentity);
+      {({DateTime? syncedAt})? seriesCatalogVersion,
+       String? expectedCacheIdentity}) async => _ensureCurrent(expectedCacheIdentity);
 
   String key(String scope, String sourceId) => sha256.convert(utf8.encode(
       jsonEncode(['external-metadata-v1', scope, sourceId]))).toString();

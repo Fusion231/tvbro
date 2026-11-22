@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../l10n/app_localizations.dart';
 import '../sources/source.dart';
 import '../theme.dart';
+import '../widgets/app_appearance.dart';
 import '../widgets/focusable_card.dart';
 
 class LibraryHomeView extends StatelessWidget {
@@ -32,12 +33,12 @@ class LibraryHomeView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
+    final body = LayoutBuilder(
       builder: (context, constraints) {
         final size = MediaQuery.sizeOf(context);
         final wide = isWideLayout(size) || size.width >= 700;
-        final padding = wide ? 28.0 : 16.0;
-        final tileHeight = constraints.maxHeight < 380 ? 136.0 : 156.0;
+        final padding = wide && size.width >= 900 ? 36.0 : 16.0;
+        final tileHeight = constraints.maxHeight < 380 ? 106.0 : 166.0;
         final tiles = [
           _tile(
             id: 'live',
@@ -45,8 +46,6 @@ class LibraryHomeView extends StatelessWidget {
             focusNode: focusNodes[ContentKind.live],
             autofocus: !autofocusFavorites && autofocusKind == ContentKind.live,
             label: tr('TV'),
-            icon: Icons.live_tv_rounded,
-            tint: AppColors.live,
             wide: wide,
             height: tileHeight,
           ),
@@ -57,8 +56,6 @@ class LibraryHomeView extends StatelessWidget {
             autofocus:
                 !autofocusFavorites && autofocusKind == ContentKind.movie,
             label: tr('Movies'),
-            icon: Icons.movie_outlined,
-            tint: AppColors.accentFill,
             wide: wide,
             height: tileHeight,
           ),
@@ -69,8 +66,6 @@ class LibraryHomeView extends StatelessWidget {
             autofocus:
                 !autofocusFavorites && autofocusKind == ContentKind.series,
             label: tr('Series'),
-            icon: Icons.video_library_outlined,
-            tint: AppColors.accent,
             wide: wide,
             height: tileHeight,
           ),
@@ -80,8 +75,6 @@ class LibraryHomeView extends StatelessWidget {
             focusNode: favoritesFocusNode,
             autofocus: autofocusFavorites,
             label: tr('Favorites'),
-            icon: Icons.favorite_outline_rounded,
-            tint: AppColors.accent,
             wide: wide,
             height: tileHeight,
           ),
@@ -94,7 +87,7 @@ class LibraryHomeView extends StatelessWidget {
               padding: EdgeInsets.all(padding),
               child: Center(
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1100),
+                  constraints: const BoxConstraints(maxWidth: 1440),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -106,7 +99,7 @@ class LibraryHomeView extends StatelessWidget {
                               tr('What would you like to watch?'),
                               style: TextStyle(
                                 color: AppColors.textHi,
-                                fontSize: wide ? 26 : 22,
+                                fontSize: wide && size.width >= 900 ? 32 : 23,
                                 fontWeight: FontWeight.w600,
                                 height: 1.2,
                               ),
@@ -122,11 +115,11 @@ class LibraryHomeView extends StatelessWidget {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Expanded(child: tiles[0]),
-                                  const SizedBox(width: 20),
+                                  const SizedBox(width: 12),
                                   Expanded(child: tiles[1]),
-                                  const SizedBox(width: 20),
+                                  const SizedBox(width: 12),
                                   Expanded(child: tiles[2]),
-                                  const SizedBox(width: 20),
+                                  const SizedBox(width: 12),
                                   Expanded(child: tiles[3]),
                                 ],
                               )
@@ -156,6 +149,9 @@ class LibraryHomeView extends StatelessWidget {
         );
       },
     );
+    return AppAppearance(
+      child: DecoratedBox(decoration: AppAppearance.backdrop, child: body),
+    );
   }
 
   Widget _tile({
@@ -164,84 +160,74 @@ class LibraryHomeView extends StatelessWidget {
     required FocusNode? focusNode,
     required bool autofocus,
     required String label,
-    required IconData icon,
-    required Color tint,
     required bool wide,
     required double height,
   }) {
-    final symbol = Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: tint.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(AppRadius.tile),
-      ),
-      child: Icon(icon, color: AppColors.textHi, size: wide ? 30 : 24),
-    );
-    final title = Text(
-      label,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: TextStyle(
-        color: AppColors.textHi,
-        fontSize: wide ? 23 : 20,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-    const arrow = Icon(
-      Icons.arrow_forward_rounded,
-      color: AppColors.textLo,
-      size: 24,
-    );
-
     return FocusableCard(
       key: ValueKey('home-$id'),
       focusNode: focusNode,
       autofocus: autofocus,
       semanticsLabel: label,
       onTap: onTap,
-      child: Container(
-        height: wide ? height : 76,
-        padding: EdgeInsets.all(wide ? 16 : 12),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(AppRadius.tile),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              tint.withValues(alpha: 0.18),
-              tint.withValues(alpha: 0.025),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(AppAppearance.radius),
+        child: SizedBox(
+          height: wide ? height : 76,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.asset(
+                'assets/home/$id.jpg',
+                fit: BoxFit.cover,
+                alignment: Alignment.centerRight,
+                excludeFromSemantics: true,
+              ),
+              const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      Color(0xCC090E19),
+                      Color(0x55090E19),
+                      Colors.transparent,
+                    ],
+                    stops: [0, 0.48, 1],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(14),
+                child: Align(
+                  alignment: wide
+                      ? AlignmentDirectional.bottomStart
+                      : AlignmentDirectional.centerStart,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: AlignmentDirectional.centerStart,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          label,
+                          style: TextStyle(
+                            color: AppColors.textHi,
+                            fontSize: wide ? 23 : 20,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(
+                          Icons.arrow_forward_rounded,
+                          color: AppColors.textHi,
+                          size: 20,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
-        child: wide
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  symbol,
-                  const Spacer(),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          alignment: Alignment.centerLeft,
-                          child: title,
-                        ),
-                      ),
-                      arrow,
-                    ],
-                  ),
-                ],
-              )
-            : Row(
-                children: [
-                  symbol,
-                  const SizedBox(width: 20),
-                  Expanded(child: title),
-                  const SizedBox(width: 8),
-                  arrow,
-                ],
-              ),
       ),
     );
   }

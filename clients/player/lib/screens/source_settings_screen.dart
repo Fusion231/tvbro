@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../widgets/app_appearance.dart';
 import '../l10n/app_localizations.dart';
 
 import '../data/app_database.dart';
@@ -485,7 +486,10 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       ContentKind.values.any((k) => _filtered(k).isNotEmpty);
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Text(tr('{name} · settings', {'name': _config.label})),

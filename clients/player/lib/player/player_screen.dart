@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../widgets/app_appearance.dart';
 import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
 import '../data/provider_image_cache.dart';
@@ -6206,7 +6207,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       backgroundColor: _transparentHandoff ? Colors.transparent : Colors.black,
       body: CallbackShortcuts(

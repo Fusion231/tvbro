@@ -11,6 +11,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../sources/source.dart';
 import '../l10n/app_localizations.dart';
 import '../theme.dart';
+import '../widgets/app_appearance.dart';
 import '../widgets/image_utils.dart';
 import 'dvr_controls.dart';
 import 'playback_backend.dart';
@@ -1382,7 +1383,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     _onMenuOpened();
     final selected = await showModalBottomSheet<MediaItem>(
       context: context,
-      backgroundColor: AppColors.panel,
+      backgroundColor: AppAppearance.surface,
       constraints: BoxConstraints(maxWidth: size.width),
       builder: (sheetContext) => MediaQuery.withClampedTextScaling(
         maxScaleFactor: kTouchMaxTextScale,
@@ -2783,7 +2784,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 : () => _activateQuickListRow(row, ZapCommandKind.activate),
             child: Container(
               decoration: BoxDecoration(
-                color: selected ? AppColors.panelHi : Colors.transparent,
+                color: selected ? AppAppearance.focusFill : Colors.transparent,
                 borderRadius: BorderRadius.circular(10),
               ),
               // The accent ring is painted over the child, never laid out as a
@@ -2791,7 +2792,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               // poster-reload bug (docs/tv-navigation.md, `FocusableCard`).
               foregroundDecoration: selected
                   ? BoxDecoration(
-                      border: Border.all(color: AppColors.accent, width: 2),
+                      border: Border.all(color: Colors.white, width: 2),
                       borderRadius: BorderRadius.circular(10),
                     )
                   : null,
@@ -3227,15 +3228,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           message: tooltip,
           child: Material(
             color: active
-                ? Color.alphaBlend(
-                    AppColors.accent.withValues(alpha: 0.30),
-                    AppColors.panel,
-                  )
-                : AppColors.panel.withValues(alpha: 0.85),
+                ? AppAppearance.focusFill
+                : AppAppearance.surface.withValues(alpha: 0.88),
             borderRadius: BorderRadius.circular(compact ? 10 : 12),
             clipBehavior: Clip.antiAlias,
             child: InkWell(
               focusNode: focusNode,
+              focusColor: Colors.white24,
               onTap: handle,
               child: child,
             ),
@@ -3248,7 +3247,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   Widget _badge(String text) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
     decoration: BoxDecoration(
-      color: AppColors.panel.withValues(alpha: 0.85),
+      color: AppAppearance.surface.withValues(alpha: 0.88),
       borderRadius: BorderRadius.circular(6),
     ),
     child: Text(

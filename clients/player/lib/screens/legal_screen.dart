@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../widgets/app_appearance.dart';
 import '../l10n/app_localizations.dart';
 import '../app_brand.dart';
 import '../data/app_links.dart';
@@ -29,7 +30,10 @@ class LegalScreen extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final support = AppLinks.support;
     final website = AppLinks.website;
     final repository = AppLinks.repository;

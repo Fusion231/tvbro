@@ -124,6 +124,10 @@ void main() {
 
     expect(find.text('Add a source').hitTestable(), findsOneWidget);
     expect(find.text('Use demo streams').hitTestable(), findsOneWidget);
+    expect(
+      find.widgetWithText(OutlinedButton, 'Use demo streams'),
+      findsOneWidget,
+    );
   });
 
   testWidgets(

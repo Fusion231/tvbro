@@ -5,7 +5,7 @@ const declarations=acorn.parse(source,{ecmaVersion:2022}).body[0].expression.cal
 const handlers=declarations.filter(node=>node.type==='FunctionDeclaration'&&['loadSource','showSettings','refreshLibraryPresentation'].includes(node.id.name)).map(node=>source.slice(node.start,node.end)).join('\n');
 function harness(){
   let done;const pending=new Promise(resolve=>done=resolve),calls=[],view={request:0,screen:'home',busy:false,caps:{},profile:{name:'Fixture'}};
-  const env={Promise,view,cancelPlayerZap(){},busy(value){view.busy=value;},status(){},sourceName:()=>'',t:value=>value,afterLoadingPaint:()=>Promise.resolve(),query:()=>pending,cancelled:()=>Error('cancelled'),clearPlaybackPresentation(){},setCatalog(){calls.push('catalog');},showHome(){calls.push('home');view.screen='home';},report(){calls.push('error');},showScreen(name){view.screen=name;},byId:()=>({}),focus(){},clear(){},text(){},refreshParental:()=>Promise.resolve(),renderSettings(){calls.push('settings');}};
+  const env={Promise,view,cancelPlayerZap(){},busy(value){view.busy=value;},status(){},sourceName:()=>'',t:value=>value,afterLoadingPaint:()=>Promise.resolve(),query:()=>pending,cancelled:()=>Error('cancelled'),clearPlaybackPresentation(){},setCatalog(){calls.push('catalog');},showHome(){calls.push('home');view.screen='home';},report(){calls.push('error');},showScreen(name){view.screen=name;},byId:()=>({setAttribute(){}}),focus(){},clear(){},text(){},refreshParental:()=>Promise.resolve(),renderSettings(){calls.push('settings');}};
   vm.createContext(env);vm.runInContext(handlers,env);return {env,view,calls,done};
 }
 test('startup catalogue completion preserves the user selected Settings screen',async()=>{
@@ -14,6 +14,18 @@ test('startup catalogue completion preserves the user selected Settings screen',
 });
 test('late settings load cannot render or steal focus after leaving Settings',async()=>{
   const kit=harness();kit.env.showSettings();kit.view.screen='profiles';kit.done({});await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(kit.calls,[]);
+});
+
+test('reopening Settings ignores the first request even on the same profile',async()=>{
+  const kit=harness(), renders=[];
+  kit.env.renderSettings=(data,preferred)=>renders.push([data,preferred]);
+  kit.env.showSettings();
+  kit.view.screen='home';
+  kit.env.query=()=>Promise.resolve('new request');
+  kit.env.showSettings('profiles');
+  kit.done('old request');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(renders,[['new request','profiles']]);
 });
 
 for(const fullscreen of [false,true]) test('background catalogue publication preserves source identity, playback, navigation and list focus: fullscreen='+fullscreen,async()=>{

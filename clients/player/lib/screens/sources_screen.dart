@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart' show KeyRepeatEvent;
 
+import '../widgets/app_appearance.dart';
 import '../l10n/app_localizations.dart';
 import '../data/app_database.dart';
 import '../data/device_class.dart';
@@ -242,7 +243,7 @@ class _SourcesScreenState extends State<SourcesScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: AppColors.panelHi,
+        backgroundColor: AppAppearance.raised,
         title: Text(tr('Delete source?')),
         content: Text(tr('Remove "{name}"?', {'name': c.label})),
         actions: [
@@ -273,7 +274,10 @@ class _SourcesScreenState extends State<SourcesScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Text(tr('Sources')),
@@ -409,18 +413,21 @@ class _AppSettingsScreen extends StatelessWidget {
   );
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final hasAutostart =
         isTelevision && defaultTargetPlatform == TargetPlatform.android;
     return Scaffold(
-      backgroundColor: AppColors.ink,
+      backgroundColor: AppAppearance.background,
       appBar: AppBar(
         toolbarHeight: 48,
         leading: BackButton(onPressed: () => Navigator.of(context).pop()),
         title: Text(tr('Settings')),
-        backgroundColor: AppColors.ink,
+        backgroundColor: AppAppearance.background,
         scrolledUnderElevation: 0,
-        shape: const Border(bottom: BorderSide(color: AppColors.line)),
+        shape: const Border(bottom: BorderSide(color: AppAppearance.line)),
       ),
       body: SafeArea(
         top: false,
@@ -437,10 +444,10 @@ class _AppSettingsScreen extends StatelessWidget {
                   if (hasAutostart) ...[
                     _section('Startup'),
                     Material(
-                      color: AppColors.panel,
+                      color: AppAppearance.surface,
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(AppRadius.tile),
-                        side: const BorderSide(color: AppColors.line),
+                        borderRadius: BorderRadius.circular(AppAppearance.radius),
+                        side: const BorderSide(color: AppAppearance.line),
                       ),
                       clipBehavior: Clip.antiAlias,
                       child: const BootAutostartSetting(autofocus: true),
@@ -810,7 +817,7 @@ class _SourceCardState extends State<_SourceCard> {
                 height: 44,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: AppColors.panelHi,
+                  color: AppAppearance.raised,
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Icon(
@@ -916,7 +923,7 @@ class _ExpiryBadge extends StatelessWidget {
         height: 16,
         width: 90,
         decoration: BoxDecoration(
-          color: AppColors.line.withValues(alpha: 0.4),
+          color: AppAppearance.line.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(4),
         ),
       );
@@ -1080,7 +1087,7 @@ class _SourceKindFieldFrameState extends State<_SourceKindFieldFrame> {
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
         color: _focused ? AppColors.panelHi : AppColors.panel,
-        borderRadius: BorderRadius.circular(AppRadius.control),
+        borderRadius: BorderRadius.circular(AppAppearance.radius),
         border: Border.all(
           color: _focused ? AppColors.accent : AppColors.line,
           width: _focused ? 2 : 1,
@@ -1269,7 +1276,10 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     // New source: the Type selector picks the field set below it, so it
     // should be the first stop — otherwise a TV user has to go Up from Label,
     // cycle Type, then come back down past Label again. Editing an existing
@@ -1323,8 +1333,8 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
                       filled: false,
                       isCollapsed: true,
                     ),
-                    dropdownColor: AppColors.panelHi,
-                    borderRadius: BorderRadius.circular(AppRadius.control),
+                    dropdownColor: AppAppearance.raised,
+                    borderRadius: BorderRadius.circular(AppAppearance.radius),
                     items: SourceKind.values
                         .map(
                           (k) => DropdownMenuItem(
@@ -1371,8 +1381,8 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
                   ),
                 ],
                 const SizedBox(height: 28),
-                SizedBox(
-                  height: 48,
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 48),
                   child: FilledButton.icon(
                     onPressed: _saving ? null : _save,
                     icon: _saving
@@ -1468,7 +1478,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: AppColors.panelHi,
+        backgroundColor: AppAppearance.raised,
         title: Text(tr('Clear metadata cache?')),
         content: Text(
           tr(
@@ -1503,7 +1513,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: AppColors.panelHi,
+        backgroundColor: AppAppearance.raised,
         title: Text(tr('Reset enriched display?')),
         content: Text(
           tr(
@@ -1536,7 +1546,10 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(tr('Metadata'))),
       // Edge-to-edge (targetSdk 35+): keep the form clear of the system bar.
@@ -1789,7 +1802,7 @@ class _UpdateTrackCardState extends State<_UpdateTrackCard> {
     final selected = await showDialog<UpdateTrack>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: AppColors.panelHi,
+        backgroundColor: AppAppearance.raised,
         title: Text(tr('GitHub update track')),
         content: Text(
           tr(

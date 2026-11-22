@@ -523,7 +523,7 @@ end
 if digit_item then
   local accent_digits = nil
   for _, event in ipairs(digits_events) do
-    if event.body:find('}123', 1, true) and event.body:find('F66C7B', 1, true) then
+    if event.body:find('}123', 1, true) and event.body:find('6452FF', 1, true) then
       accent_digits = tonumber(event.body:match('\\fs([%d%.]+)'))
     end
   end

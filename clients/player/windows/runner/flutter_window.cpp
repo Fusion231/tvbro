@@ -1206,11 +1206,14 @@ constexpr int kNativeChipPaddingX = 14;
 // surfaces draw the same rows and must not drift apart on colour either.
 // `kNativeLiveColor` is this file's existing LIVE-badge red, reused rather
 // than a second red introduced beside it.
-const COLORREF kNativeAccentColor = RGB(123, 108, 246);
+const COLORREF kNativeAccentColor = RGB(255, 82, 100);
+const COLORREF kNativeAccentFill = RGB(185, 28, 53);
+const COLORREF kNativeSurfaceColor = RGB(21, 30, 46);
+const COLORREF kNativeFocusFill = RGB(57, 35, 51);
 const COLORREF kNativeTextHiColor = RGB(238, 240, 247);
 const COLORREF kNativeTextLoColor = RGB(154, 161, 178);
 const COLORREF kNativeLiveColor = RGB(255, 64, 112);
-const COLORREF kNativeZapBannerBg = RGB(22, 24, 31);
+const COLORREF kNativeZapBannerBg = kNativeSurfaceColor;
 
 // The zap banner's own geometry, mirroring the Lua OSD's `draw_zap_banner`
 // (which mirrors Compose's `ZapBanner` padding).
@@ -1267,7 +1270,7 @@ void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
                     bool active = false,
                     std::optional<COLORREF> fg_override = std::nullopt,
                     int radius = kNativeButtonRadius, int icon_size = 20) {
-  const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
+  const COLORREF bg = active ? kNativeFocusFill : kNativeSurfaceColor;
   const COLORREF fg = fg_override.value_or(active ? RGB(255, 255, 255)
                                                   : RGB(232, 235, 244));
   FillRoundRectAA(hdc, rect, radius, bg);
@@ -1323,7 +1326,7 @@ int MeasureTextChipWidth(const std::wstring &label) {
 
 void DrawTextButton(HDC hdc, const RECT &rect, const std::wstring &label,
                     bool active = false) {
-  const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
+  const COLORREF bg = active ? kNativeFocusFill : kNativeSurfaceColor;
   const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
   FillRoundRectAA(hdc, rect, kNativeButtonRadius, bg);
   // Bold, matching the badges — a button label is a handful of short words at
@@ -2010,12 +2013,12 @@ void DrawSlider(HDC hdc, const RECT &track, double ratio, int thumb_radius) {
       track.left + static_cast<int>(RectWidth(track) * std::clamp(ratio, 0.0,
                                                                   1.0));
   FillRoundRectAA(hdc, RectFrom(track.left, cy - 3, fill_x, cy + 3), 6,
-                  RGB(123, 108, 246));
+                  kNativeAccentColor);
   // A square of side 2r at radius r is a circle — and now a smooth one.
   FillRoundRectAA(hdc,
                   RectFrom(fill_x - thumb_radius, cy - thumb_radius,
                            fill_x + thumb_radius, cy + thumb_radius),
-                  thumb_radius, RGB(154, 141, 255));
+                  thumb_radius, kNativeAccentColor);
 }
 
 // Draws a pill badge ending at [right_edge]; returns the horizontal space it
@@ -2397,7 +2400,7 @@ void PaintInfoPanel(HDC hdc, const RECT &rect) {
                      RectFrom(panel.left + 110, y, panel.right - 14, y + 20),
                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                      value_font,
-                     hdr ? RGB(154, 141, 255) : RGB(238, 240, 247));
+                     hdr ? kNativeAccentColor : kNativeTextHiColor);
     y += 22;
   }
   DeleteObject(label_font);
@@ -2446,7 +2449,7 @@ void PaintListMenu(HDC hdc, const RECT &rect) {
                                         menu.left + option_rects[i].right,
                                         menu.top + option_rects[i].bottom);
       FillRoundRect(hdc, option_rect, 12,
-                    active ? RGB(123, 108, 246) : RGB(26, 29, 40));
+                    active ? kNativeAccentFill : kNativeSurfaceColor);
       DrawTextWithFont(hdc, option.label,
                        RectFrom(option_rect.left + 12, option_rect.top,
                                 option_rect.right - 12, option_rect.bottom),
@@ -2474,7 +2477,7 @@ void PaintListMenu(HDC hdc, const RECT &rect) {
       FillRoundRect(hdc,
                     RectFrom(menu.right - 7, thumb_top, menu.right - 2,
                              thumb_top + thumb_height),
-                    5, RGB(123, 108, 246));
+                    5, kNativeAccentColor);
     }
   }
   DeleteObject(label_font);
@@ -2551,7 +2554,7 @@ void DrawQuickListRow(HDC hdc, const RECT &row_rect,
     // The same accent fill the list menu gives its active row — this panel is
     // a mode of that one, and a second selection idiom on the same surface is
     // how two lists start looking like two different apps.
-    FillRoundRect(hdc, row_rect, 12, kNativeAccentColor);
+    FillRoundRect(hdc, row_rect, 12, kNativeAccentFill);
   }
   const int row_top = static_cast<int>(row_rect.top);
   const int row_bottom = static_cast<int>(row_rect.bottom);
@@ -3108,7 +3111,7 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     const bool favorited = g_native_control_state.is_favorite;
     DrawIconButton(paint_hdc, l.favorite, favorited ? L"\xE735" : L"\xE734",
                    is_focused(NativeFocusItem::kFavorite),
-                   favorited ? std::optional<COLORREF>(RGB(123, 108, 246))
+                   favorited ? std::optional<COLORREF>(kNativeAccentColor)
                              : std::nullopt);
   }
   if (l.has_go_live) {

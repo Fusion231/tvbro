@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'package:url_launcher/url_launcher.dart';
 
+import '../widgets/app_appearance.dart';
 import '../l10n/app_localizations.dart';
 import '../data/app_database.dart';
 import '../data/cloud_config.dart';
@@ -1059,7 +1060,10 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     return PopScope(
       canPop: !_committing,
       child: Scaffold(
@@ -1085,8 +1089,8 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
                     }
                     return Center(
                       child: ConstrainedBox(
-                        constraints: const BoxConstraints(
-                          maxWidth: kSettingsMaxContentWidth,
+                        constraints: BoxConstraints(
+                          maxWidth: !_paired ? 840 : kSettingsMaxContentWidth,
                         ),
                         child: SingleChildScrollView(
                           padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
@@ -1230,68 +1234,87 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       style: const TextStyle(color: AppColors.textLo),
     ),
     const SizedBox(height: 20),
-    Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 360),
-        child: InkWell(
-          onTap: _code == null ? null : _copyCode,
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-            decoration: BoxDecoration(
-              color: AppColors.panelHi,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                // Balances the trailing copy icon so the code stays centered.
-                const SizedBox(width: 38),
-                // Scale the code down so any glyph mix fits the box on a
-                // narrow phone instead of overflowing.
-                Expanded(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.center,
-                    child: Text(
-                      _code?.code ?? '········',
-                      maxLines: 1,
-                      style: const TextStyle(
-                        fontSize: 40,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 8,
-                        fontFeatures: [FontFeature.tabularFigures()],
-                      ),
+    LayoutBuilder(
+      builder: (context, constraints) {
+        final copyCode = Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: InkWell(
+                  onTap: _code == null ? null : _copyCode,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 18,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppAppearance.raised,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        // Balances the trailing copy icon so the code stays centered.
+                        const SizedBox(width: 38),
+                        // Scale the code down so any glyph mix fits the box on a
+                        // narrow phone instead of overflowing.
+                        Expanded(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.center,
+                            child: Text(
+                              _code?.code ?? '········',
+                              maxLines: 1,
+                              style: const TextStyle(
+                                fontSize: 40,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 8,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        const Icon(Icons.copy_rounded, color: AppColors.textLo),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 14),
-                const Icon(Icons.copy_rounded, color: AppColors.textLo),
-              ],
+              ),
             ),
-          ),
-        ),
-      ),
-    ),
-    const SizedBox(height: 8),
-    Center(
-      child: Text(
-        tr('Tap the code to copy it'),
-        style: TextStyle(color: AppColors.textLo, fontSize: 12),
-      ),
-    ),
-    if (_code case final code?) ...[
-      const SizedBox(height: 20),
-      Center(
-        child: PairingQrView(
+            const SizedBox(height: 8),
+            Center(
+              child: Text(
+                tr('Tap the code to copy it'),
+                style: TextStyle(color: AppColors.textLo, fontSize: 12),
+              ),
+            ),
+          ],
+        );
+        final code = _code;
+        if (code == null) return copyCode;
+        final qr = PairingQrView(
           link: pairingPanelLink(
             CloudConfig.accountPanelUrl(),
             code.code,
             language: AppLanguageController.instance.language.code,
           ),
-        ),
-      ),
-    ],
+        );
+        if (constraints.maxWidth < 600) {
+          return Column(children: [copyCode, const SizedBox(height: 20), qr]);
+        }
+        return Row(
+          children: [
+            Expanded(child: copyCode),
+            const SizedBox(width: 28),
+            Expanded(child: qr),
+          ],
+        );
+      },
+    ),
     // Read-only on purpose: naming happens in the panel, on a real keyboard.
     // Adding a text field here would put a focus target — and a Back-ladder
     // rung — on a screen reached by D-pad remote.
@@ -1346,16 +1369,38 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   ];
 
   List<Widget> _onboardingBody() => [
-    Text(
-      tr('Choose the profile you want to download.'),
-      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-    ),
-    const SizedBox(height: 8),
-    Text(
-      tr(
-        'Choose a profile. Its playlists and settings will be downloaded automatically.',
+    DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppAppearance.surface,
+        borderRadius: BorderRadius.circular(AppAppearance.radius),
+        border: Border.all(color: AppAppearance.line),
       ),
-      style: const TextStyle(color: AppColors.textLo),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.cloud_download_outlined, size: 26),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    tr('Choose the profile you want to download.'),
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    tr('Choose a profile. Its playlists and settings will be downloaded automatically.'),
+                    style: const TextStyle(color: AppColors.textLo),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     ),
     ..._profileSection(),
     if (_activeProfileId != null) ...[
@@ -1583,8 +1628,8 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   Widget _transferPreview() => Container(
     padding: const EdgeInsets.all(18),
     decoration: BoxDecoration(
-      color: AppColors.panel,
-      border: Border.all(color: AppColors.line),
+      color: AppAppearance.surface,
+      border: Border.all(color: AppAppearance.line),
       borderRadius: BorderRadius.circular(12),
     ),
     child: Column(

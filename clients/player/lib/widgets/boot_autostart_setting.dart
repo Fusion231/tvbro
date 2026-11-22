@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../data/device_class.dart';
 import '../l10n/app_localizations.dart';
 import '../theme.dart';
+import 'app_appearance.dart';
 
 /// One device-wide preference shared by onboarding and settings.
 class BootAutostartSetting extends StatefulWidget {
@@ -101,13 +102,23 @@ class _BootAutostartSettingState extends State<BootAutostartSetting>
   Future<void> _requestPermission() async {
     final accepted = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (context) => AppAppearance(child: AlertDialog(
         scrollable: true,
         title: Text(tr('Allow TVBro to start automatically')),
-        content: Text(
-          tr(
-            'Android needs your permission to open TVBro when your TV or box starts. In system settings, choose TVBro and turn on "Display over other apps", then return here. TVBro uses this permission for autostart.',
-          ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (MediaQuery.sizeOf(context).height >= 480) ...[
+              const Icon(Icons.power_settings_new_rounded, size: 32),
+              const SizedBox(height: 12),
+            ],
+            Text(
+              tr(
+                'Android needs your permission to open TVBro when your TV or box starts. In system settings, choose TVBro and turn on "Display over other apps", then return here. TVBro uses this permission for autostart.',
+              ),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -120,7 +131,7 @@ class _BootAutostartSettingState extends State<BootAutostartSetting>
             child: Text(tr('Open Android settings')),
           ),
         ],
-      ),
+      )),
     );
     if (accepted != true || !mounted) return;
     setState(() {
@@ -151,11 +162,11 @@ class _BootAutostartSettingState extends State<BootAutostartSetting>
         SwitchListTile(
           autofocus: widget.autofocus && !_loading && _enabled != null,
           onFocusChange: (value) => setState(() => _focused = value),
-          tileColor: _focused ? AppColors.accent.withValues(alpha: 0.22) : null,
+          tileColor: _focused ? AppAppearance.focusFill : null,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.tile),
+            borderRadius: BorderRadius.circular(AppAppearance.radius),
             side: BorderSide(
-              color: _focused ? AppColors.accent : Colors.transparent,
+              color: _focused ? Colors.white : Colors.transparent,
               width: 2,
             ),
           ),

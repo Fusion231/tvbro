@@ -6,6 +6,7 @@ import '../data/recently_watched_store.dart';
 import '../l10n/app_localizations.dart';
 import '../sources/source.dart';
 import '../theme.dart';
+import '../widgets/app_appearance.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
 
@@ -141,7 +142,7 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
         style: const TextStyle(
           color: AppColors.textHi,
           fontSize: 20,
-          fontWeight: FontWeight.w600,
+          fontWeight: FontWeight.w700,
         ),
       ),
       const SizedBox(height: 12),
@@ -224,13 +225,15 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
         : media!.kind == ContentKind.movie
         ? Icons.movie_outlined
         : Icons.video_library_outlined;
-    final fallback = Center(
-      child: Icon(icon, size: 32, color: AppColors.textLo),
+    final fallback = ColoredBox(
+      color: AppAppearance.raised,
+      child: Center(child: Icon(icon, size: 32, color: AppColors.textLo)),
     );
     return FocusableCard(
       key: ValueKey(
         'recent-${channel != null ? 'live' : media!.kind.name}-${channel?.id ?? media!.id}',
       ),
+      centerOnFocus: false,
       semanticsLabel: entry.series == null
           ? '$label: $title'
           : '$label: $title, ${media!.title}',
@@ -243,7 +246,7 @@ class _RecentlyWatchedViewState extends State<RecentlyWatchedView> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             ClipRRect(
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(8),
               child: SizedBox(
                 height: 90,
                 width: double.infinity,

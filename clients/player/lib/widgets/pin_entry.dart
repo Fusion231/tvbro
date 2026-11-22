@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../data/profile_pin.dart';
 import '../l10n/app_localizations.dart';
 import '../theme.dart';
+import 'app_appearance.dart';
 import 'focusable_card.dart';
 
 /// Profile-PIN entry: one dialog, two jobs — unlocking a profile and choosing a
@@ -377,7 +378,10 @@ class _PinDialogState extends State<_PinDialog> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildDialog));
+
+  Widget _buildDialog(BuildContext context) {
     // Two different questions. `keypad` is "does this platform type or tap?",
     // which decides who holds focus; `padDrawn` is "is there actually a pad on
     // screen?", which an unreadable verifier turns off.
@@ -394,7 +398,7 @@ class _PinDialogState extends State<_PinDialog> {
     // landscape handset at a 2.0 text scale is the case that forces both.
     final short = MediaQuery.sizeOf(context).height < 420;
     return AlertDialog(
-      backgroundColor: AppColors.panel,
+      backgroundColor: AppAppearance.surface,
       insetPadding: EdgeInsets.symmetric(
         horizontal: 16,
         vertical: short ? 8 : 24,

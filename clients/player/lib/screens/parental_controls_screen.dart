@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../widgets/app_appearance.dart';
 import '../l10n/app_localizations.dart';
 
 import '../data/app_database.dart';
@@ -135,7 +136,10 @@ class _ParentalControlsScreenState extends State<ParentalControlsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final rules = _controls.rules;
     final query = _query.toLowerCase();
     final categories =

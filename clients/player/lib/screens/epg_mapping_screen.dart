@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 
+import '../widgets/app_appearance.dart';
 import '../l10n/app_localizations.dart';
 
 import '../data/library_repository.dart';
@@ -82,7 +83,10 @@ class _EpgMappingScreenState extends State<EpgMappingScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final query = _filter.text.trim().toLowerCase();
     final channels = query.isEmpty
         ? widget.channels

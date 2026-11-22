@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'app_appearance.dart';
 import '../data/cloud_config.dart';
 import '../data/distribution_channel.dart';
 import '../data/supporter_access.dart';
@@ -113,7 +114,10 @@ class _SupporterGateState extends State<_SupporterGate> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     return FocusScope(

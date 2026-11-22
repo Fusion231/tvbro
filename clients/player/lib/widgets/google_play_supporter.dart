@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'app_appearance.dart';
 import '../data/cloud_config.dart';
 import '../data/distribution_channel.dart';
 import '../data/supporter_access.dart';
@@ -264,7 +265,10 @@ class _GooglePlaySupporterState extends State<_GooglePlaySupporter>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     final product = _product;
     return AlertDialog(
       scrollable: true,

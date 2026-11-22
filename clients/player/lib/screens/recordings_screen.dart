@@ -5,6 +5,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../widgets/app_appearance.dart';
 import '../dvr/dvr_service.dart';
 import '../l10n/app_localizations.dart';
 import '../dvr/dvr_scheduler.dart';
@@ -275,7 +276,10 @@ class _RecordingsScreenState extends State<RecordingsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      AppAppearance(child: Builder(builder: _buildScreen));
+
+  Widget _buildScreen(BuildContext context) {
     _rowExtent = _recordingRowExtent(context);
     if (_loading) {
       return Scaffold(
@@ -497,9 +501,9 @@ class _StorageSummary extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: AppColors.panel,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
-          border: Border.all(color: AppColors.line),
+          color: AppAppearance.surface,
+          borderRadius: BorderRadius.circular(AppAppearance.radius),
+          border: Border.all(color: AppAppearance.line),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -552,9 +556,9 @@ class _NotificationNotice extends StatelessWidget {
     child: Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppColors.panel,
-        borderRadius: BorderRadius.circular(AppRadius.tile),
-        border: Border.all(color: AppColors.line),
+        color: AppAppearance.surface,
+        borderRadius: BorderRadius.circular(AppAppearance.radius),
+        border: Border.all(color: AppAppearance.line),
       ),
       child: Row(
         children: [
@@ -598,9 +602,9 @@ class _TimeshiftCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: AppColors.panel,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
-          border: Border.all(color: AppColors.line),
+          color: AppAppearance.surface,
+          borderRadius: BorderRadius.circular(AppAppearance.radius),
+          border: Border.all(color: AppAppearance.line),
         ),
         child: Row(
           children: [
@@ -728,10 +732,10 @@ class _RecordingRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Container(
         decoration: BoxDecoration(
-          color: selected ? AppColors.panelHi : AppColors.panel,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
+          color: selected ? AppAppearance.focusFill : AppAppearance.surface,
+          borderRadius: BorderRadius.circular(AppAppearance.radius),
           border: Border.all(
-            color: selected ? AppColors.accent : AppColors.line,
+            color: selected ? Colors.white : AppAppearance.line,
             width: selected ? 2 : 1,
           ),
         ),
@@ -740,7 +744,7 @@ class _RecordingRow extends StatelessWidget {
             Expanded(
               child: InkWell(
                 canRequestFocus: false,
-                borderRadius: BorderRadius.circular(AppRadius.tile),
+                borderRadius: BorderRadius.circular(AppAppearance.radius),
                 onTap: onSelect,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
@@ -866,10 +870,10 @@ class _ScheduleRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Container(
         decoration: BoxDecoration(
-          color: selected ? AppColors.panelHi : AppColors.panel,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
+          color: selected ? AppAppearance.focusFill : AppAppearance.surface,
+          borderRadius: BorderRadius.circular(AppAppearance.radius),
           border: Border.all(
-            color: selected ? AppColors.accent : AppColors.line,
+            color: selected ? Colors.white : AppAppearance.line,
             width: selected ? 2 : 1,
           ),
         ),

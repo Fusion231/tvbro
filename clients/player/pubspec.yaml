@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.21+6007
+version: 1.0.22+6008
 
 environment:
   sdk: ^3.13.5
@@ -145,6 +145,7 @@ flutter:
 
   assets:
     - assets/brand/tvbro-logo.png
+    - assets/home/
 
   # Bundled for deterministic offline rendering. These same files are used by
   # the native Android player controls, so Flutter must not fetch fonts at

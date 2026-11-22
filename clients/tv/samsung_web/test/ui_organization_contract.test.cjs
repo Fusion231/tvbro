@@ -9,7 +9,8 @@ const acorn = require('acorn');
 const source = fs.readFileSync(path.join(__dirname, '../ui/app.js'), 'utf8');
 const names = ['pagedEditor','organizationCopy','editOrganizedChannel','saveOrganization','sourceSettings',
   'epgMapping','searchProgrammes','playerSettings','editorContext','openCategoryVisibility',
-  'chooseBackupPath','backupFlow','confirmBackupImport','renderSettings','connectionHelp','loadSource','hostedHttpSource'];
+  'chooseBackupPath','backupFlow','confirmBackupImport','renderSettings','settingRow','settingsGroup',
+  'focusSetting','connectionHelp','loadSource','hostedHttpSource'];
 const handlers = acorn.parse(source, {ecmaVersion:2022}).body[0].expression.callee.body.body
   .filter(node => node.type === 'FunctionDeclaration' && names.includes(node.id.name))
   .map(node => source.slice(node.start,node.end)).join('\n');
@@ -17,14 +18,22 @@ const handlers = acorn.parse(source, {ecmaVersion:2022}).body[0].expression.call
 function harness() {
   const calls = [], dialogs = [], timers = new Map(), nodes = Object.create(null); let sequence = 0;
   class Node {
-    constructor(tag, className, value) { this.tagName = tag; this.className = className || ''; this.textContent = value || ''; this.children = []; this.listeners = {}; this.value = ''; }
+    constructor(tag, className, value) { this.tagName = tag; this.className = className || ''; this.textContent = value || ''; this.children = []; this.listeners = {}; this.value = ''; this.attributes = {}; }
     appendChild(child) { this.children.push(child); return child; }
     get firstChild() { return this.children[0]; }
     get lastChild() { return this.children.at(-1); }
-    setAttribute() {}
+    setAttribute(name, value) { this.attributes[name] = value; }
+    getAttribute(name) { return this.attributes[name] ?? null; }
     addEventListener(name, callback) { this.listeners[name] = callback; }
     fire(name) { if (this.listeners[name]) this.listeners[name](); }
-    querySelector() { return this.children.find(node => node.tagName === 'button' || node.tagName === 'input') || null; }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    querySelectorAll(selector) {
+      return this.children.flatMap(child => {
+        const matches = selector === '[data-setting-key]' ? child.getAttribute('data-setting-key') !== null :
+          child.tagName === 'button' || child.tagName === 'input';
+        return [...(matches ? [child] : []), ...child.querySelectorAll(selector)];
+      });
+    }
   }
   const view = {request:1,screen:'settings',source:{id:'source'},languages:[{code:'en',name:'English'},{code:'pl',name:'Polski'}],languageCode:'en',
     playingState:{speed:2,displayMode:'PLAYER_DISPLAY_MODE_FULL_SCREEN'},caps:{playbackRates:[1,2],aspectModes:[{id:'fit',label:'Fit'},{id:'fill',label:'Fill'}]}};
@@ -41,7 +50,8 @@ function harness() {
     closeDialog(cancel,record) { if (!record) record = dialogs.at(-1); if (dialogs.at(-1) === record) { dialogs.pop(); record.closed = true; } },
     dialogButton(record,label,action) { const node = env.button(label,'',action); record.actions.appendChild(node); return node; },
     editableInput(parent,label,type,value) { const node = new Node('input'); node.label = label; node.type = type; node.value = value; parent.appendChild(node); return node; },
-    focus(node) { env.focused = node; },cap() { return true; },
+    focus(node) { env.focused = node; }, visible(node) { return !!node && !node.hidden; },
+    cap(key) { return view.caps[key] !== false; }, openProfiles() {},
     parentalForm() {},
     applyEditedCatalog(data) { calls.push(['catalog',data]); },renderSources() {},renderChannels() {},
     message(error) { return error.message; },report(error) { throw error; },clock() { return '12:00'; },
@@ -72,8 +82,8 @@ function uiMessages() {
 
 test('Settings Help & connection is reachable, bilingual and explains Titan HTTP without network or export claims',()=>{
   const kit=harness();kit.view.caps.requiresHttpsProvider=true;kit.env.renderSettings({fields:[]});
-  const rows=kit.env.byId('settings-list').children;
-  const row=rows.find(node=>node.textContent==='Help & connection');
+  const rows=kit.env.byId('settings-list').querySelectorAll('[data-setting-key]');
+  const row=rows.find(node=>node.getAttribute('data-setting-key')==='help');
   assert.ok(row,'Settings exposes a D-pad button for connection help');
   row.click();
   const record=kit.dialogs.at(-1),text=record.body.children.map(node=>node.textContent).join(' ');
@@ -86,6 +96,31 @@ test('Settings Help & connection is reachable, bilingual and explains Titan HTTP
   const messages=uiMessages();
   assert.equal(messages['Help & connection'],'Pomoc i połączenie');
   assert.match(messages['This provider uses HTTP. This TV version needs HTTPS. Ask your provider for an HTTPS address or use TVBro on Android, Windows or Samsung.'],/Poproś o adres HTTPS/);
+});
+
+test('Settings exposes only supported actions and keeps the selected advanced row after a save', async () => {
+  const kit = harness();
+  Object.assign(kit.view.caps, {backupExport:false, backupImport:false, pairing:false, guide:false});
+  const field = {key:'profilePickerStartup', label:'Startup mode', type:'select', options:[{value:'auto',label:'auto'},{value:'always',label:'always'}]};
+  const data = {settings:{profilePickerStartup:'auto'},fields:[field]};
+  kit.env.renderSettings(data);
+  const settings = kit.env.byId('settings-list');
+  const keys = () => settings.querySelectorAll('[data-setting-key]').map(row=>row.getAttribute('data-setting-key'));
+  assert.deepEqual(Array.from(keys()), ['source','parental','language','profiles','help','advanced']);
+  const advanced=settings.querySelectorAll('[data-setting-key]').at(-1);
+  assert.equal(advanced.getAttribute('aria-expanded'), 'false');
+  advanced.click();
+  const row = settings.querySelectorAll('[data-setting-key]').find(node=>node.getAttribute('data-setting-key')==='profilePickerStartup');
+  assert.ok(row);
+  assert.equal(kit.env.focused.getAttribute('data-setting-key'), 'advanced');
+  row.click();
+  const option = kit.calls.find(call=>call[0]==='options');
+  assert.equal(option[3],'auto');
+  kit.env.respond = () => ({...data,settings:{profilePickerStartup:'always'}});
+  await option[4]('always');
+  assert.equal(kit.env.focused.getAttribute('data-setting-key'),'profilePickerStartup');
+  assert.equal(kit.env.focused.children.find(child=>child.className==='setting-value').textContent,'Always');
+  assert.deepEqual(kit.calls.find(call=>call[0]==='settings.set')[1].settings.profilePickerStartup,'always');
 });
 
 test('Titan source form gives a local HTTP warning before sending the source-load query',async()=>{

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import 'app_appearance.dart';
 import 'routed_focus_node.dart';
 
 /// Outer vertical padding a [FocusableCard] adds around itself (top and
@@ -144,6 +145,10 @@ class _FocusableCardState extends State<FocusableCard> {
 
   @override
   Widget build(BuildContext context) {
+    final refreshed = AppAppearance.isApplied(context);
+    final radius = BorderRadius.circular(
+      refreshed ? AppAppearance.radius : AppRadius.tile,
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(
         vertical: kFocusableCardVerticalPadding,
@@ -175,8 +180,12 @@ class _FocusableCardState extends State<FocusableCard> {
               child: AnimatedContainer(
                 duration: appMotion(context, const Duration(milliseconds: 120)),
                 decoration: BoxDecoration(
-                  color: _focused ? _focusedFill : AppColors.panel,
-                  borderRadius: BorderRadius.circular(AppRadius.tile),
+                  color: refreshed
+                      ? (_focused
+                            ? AppAppearance.focusFill
+                            : AppAppearance.surface)
+                      : (_focused ? _focusedFill : AppColors.panel),
+                  borderRadius: radius,
                   // Transparent and fixed-width: this border exists only to
                   // reserve the ring's space, so the child's constraints are
                   // identical focused and unfocused. See
@@ -190,9 +199,11 @@ class _FocusableCardState extends State<FocusableCard> {
                 // it — `foregroundDecoration` contributes no padding, so its
                 // width is free to animate.
                 foregroundDecoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(AppRadius.tile),
+                  borderRadius: radius,
                   border: Border.all(
-                    color: _focused ? AppColors.accent : AppColors.line,
+                    color: refreshed
+                        ? (_focused ? Colors.white : AppAppearance.line)
+                        : (_focused ? AppColors.accent : AppColors.line),
                     width: _focused ? 2 : 1,
                   ),
                 ),
@@ -200,8 +211,10 @@ class _FocusableCardState extends State<FocusableCard> {
                   type: MaterialType.transparency,
                   child: InkWell(
                     canRequestFocus: false,
-                    borderRadius: BorderRadius.circular(AppRadius.tile),
-                    hoverColor: AppColors.panelHi,
+                    borderRadius: radius,
+                    hoverColor: refreshed
+                        ? AppAppearance.raised
+                        : AppColors.panelHi,
                     onTap: widget.onTap,
                     onLongPress: widget.onLongPress,
                     child: widget.child,

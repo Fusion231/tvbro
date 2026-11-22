@@ -94,6 +94,7 @@ async (page) => {
     await page.reload();
   }
   try {
+    await page.addInitScript(() => Object.defineProperty(navigator,'languages',{get:()=>['en-US']}));
     await page.goto(origin);
     await page.waitForFunction(() => !document.querySelector('#language-view').hidden || document.querySelector('#app-status').classList.contains('is-error'));
     const bootSdk = await page.evaluate(() => ({saves:window.__samsungFixture.calls.filter(row => row[0] === 'keymanager.save').length,
@@ -114,18 +115,18 @@ async (page) => {
     await activate('#add-profile'); await edit(modal().locator('input').first(),'Settings'); await action('Zapisz'); await shown('#setup-view');
     await check((await page.locator('#setup-title').textContent()).includes('Settings'),'User profile name was translated as UI content.');
     await activate('#setup-demo'); await shown('#home-view'); await activate('#show-settings'); await shown('#settings-view');
-    await activate(page.locator('#settings-list .setting-row').first()); await shown('#language-view');
-    await activate(page.locator('#language-list').getByRole('button',{name:'English',exact:true})); await activate('#language-continue'); await shown('#settings-view');
+    await activate('[data-setting-key="language"]'); await shown('#language-view');
+    await activate(page.locator('#language-list').getByRole('button',{name:/^English/})); await activate('#language-continue'); await shown('#settings-view');
     await check(await page.locator('#settings-view h1').textContent() === 'Settings','English Settings heading was not translated.');
     await check(await page.locator('#show-profiles').textContent() === 'Profiles','English global controls were not translated.');
     await check(await page.locator('#settings-profile').textContent() === 'Settings','User profile name must remain byte-identical.');
     await reloadWithSdkAliases(); await shown('#home-view');
     await check((await bootstrap()).languageCode === 'en','English choice must persist across reload.');
     await activate('#show-settings'); await shown('#settings-view');
-    await activate(page.locator('#settings-list .setting-row').first()); await shown('#language-view');
+    await activate('[data-setting-key="language"]'); await shown('#language-view');
     await page.keyboard.press('Escape'); await shown('#settings-view');
     await check((await bootstrap()).languageCode === 'en','Back from language selection must preserve the saved language.');
-    await activate(page.locator('#settings-list .setting-row').first());
+    await activate('[data-setting-key="language"]');
     await activate(page.locator('#language-list').getByRole('button',{name:'Polski',exact:true})); await activate('#language-continue'); await shown('#settings-view');
     phases.push('Real Settings PL→EN, reload, Back without commit, and EN→PL; user name preserved');
 

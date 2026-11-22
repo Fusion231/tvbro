@@ -13,18 +13,17 @@ local assdraw = require 'mp.assdraw'
 local utils = require 'mp.utils'
 
 -- ===== Palette =====
--- ASS colors are &HBBGGRR& (byte-swapped RGB). Every value below is derived
--- from lib/theme.dart's AppColors — do not hand-tune these; if the app theme
--- changes, recompute the BGR swap from the new RGB and update the comment.
+-- ASS colors are &HBBGGRR& (byte-swapped RGB). Match the player palette in
+-- lib/widgets/app_appearance.dart and lib/theme.dart.
 local COLOR = {
-    accent  = 'F66C7B', -- #7B6CF6 AppColors.accent  (seek/progress fill, favorite-on, spinner)
+    accent  = '6452FF', -- #FF5264 (seek/progress fill, favorite-on, spinner)
     live    = '6D4DFF', -- #FF4D6D AppColors.live    (LIVE badge, synced)
     textHi  = 'F8F4F2', -- #F2F4F8 AppColors.textHi  (kept for parity; _LinuxPlayerControls text is literal white/textLo, see below)
     textLo  = 'B2A39A', -- #9AA3B2 AppColors.textLo  (secondary text: EPG line, info labels)
-    panel   = '1F1816', -- #16181F AppColors.panel   (info panel bg)
-    panelHi = '362B27', -- #272B36 AppColors.panelHi (popup menu bg)
-    line    = '493B35', -- #353B49 AppColors.line    (seek/progress track)
-    ink     = '130F0E', -- #0E0F13 AppColors.ink     (unused here: no app-bg surface behind video)
+    panel   = '2E1E15', -- #151E2E (info panel bg)
+    panelHi = '432E21', -- #212E43 (popup menu bg)
+    line    = '594437', -- #374459 (seek/progress track)
+    ink     = '190E09', -- #090E19
     white   = 'FFFFFF',
 }
 

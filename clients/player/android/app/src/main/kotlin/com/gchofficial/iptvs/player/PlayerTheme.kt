@@ -11,27 +11,21 @@ import com.gchofficial.iptvs.R
 /**
  * Design tokens for the native player's Compose control overlay.
  *
- * These mirror `lib/theme.dart` `AppColors` exactly so the Android player shares
- * the app's (and the Windows native overlay's) visual language: dark surfaces,
- * a purple accent, and the Inter typeface.
- *
- * `lib/theme.dart` `AppColors` is the source of truth — these are hand-copied,
- * not generated, so re-check every value here against it whenever either file
- * changes.
+ * Keep the overlay palette aligned with the Flutter player's AppAppearance.
  */
 object PlayerColors {
-    val Ink = Color(0xFF0E0F13) // app background / scrims
-    val Panel = Color(0xFF16181F) // cards / surfaces
-    val PanelHi = Color(0xFF272B36) // hover / focus lift
-    val Line = Color(0xFF353B49) // hairlines / borders
+    val Ink = Color(0xFF090E19) // app background / scrims
+    val Panel = Color(0xFF151E2E) // cards / surfaces
+    val PanelHi = Color(0xFF212E43) // hover / focus lift
+    val Line = Color(0xFF374459) // hairlines / borders
     val TextHi = Color(0xFFF2F4F8)
     val TextLo = Color(0xFF9AA3B2)
-    val Accent = Color(0xFF7B6CF6) // brand / progress
+    val Accent = Color(0xFFFF5264) // brand / progress
     val Live = Color(0xFFFF4D6D) // "on air" signal
 
     // Overlay-only tints derived from the tokens above.
-    val ButtonBg = Color(0x33FFFFFF) // translucent chip behind controls
-    val ButtonBgFocused = Accent
+    val ButtonBg = Color(0xDA151E2E) // translucent chip behind controls
+    val ButtonBgFocused = Color(0xFFB91C35)
     val ScrimTop = Color(0xCC000000)
     val ScrimBottom = Color(0xE6000000)
     val TrackInactive = Color(0x4DFFFFFF)
