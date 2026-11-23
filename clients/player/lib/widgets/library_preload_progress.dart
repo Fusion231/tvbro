@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../data/import_progress.dart';
 import '../l10n/app_localizations.dart';
 import '../sources/source.dart';
 import '../theme.dart';
@@ -8,7 +9,9 @@ import 'app_appearance.dart';
 /// First-source preparation: null is loading, true saved, and false failed.
 class LibraryPreloadProgress extends StatelessWidget {
   final Map<ContentKind, bool?> stages;
+  final ImportProgressStage? work;
   final bool connecting;
+  final bool sharedPlaylist;
   final bool includeEpg;
   final bool? epgReady;
   final String? epgMessage;
@@ -19,7 +22,9 @@ class LibraryPreloadProgress extends StatelessWidget {
   const LibraryPreloadProgress({
     super.key,
     required this.stages,
+    this.work,
     this.connecting = false,
+    this.sharedPlaylist = false,
     this.includeEpg = false,
     this.epgReady,
     this.epgMessage,
@@ -36,14 +41,25 @@ class LibraryPreloadProgress extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final kinds = sharedPlaylist ? const [ContentKind.live] : _kinds;
     final completed =
-        _kinds.where((kind) => stages[kind] != null).length +
+        kinds.where((kind) => stages[kind] != null).length +
         (includeEpg && epgReady != null ? 1 : 0);
-    final total = _kinds.length + (includeEpg ? 1 : 0);
+    final total = kinds.length + (includeEpg ? 1 : 0);
     final finished = completed == total;
     final failed =
-        _kinds.any((kind) => stages[kind] == false) ||
+        kinds.any((kind) => stages[kind] == false) ||
         (includeEpg && epgReady == false);
+    final activeWork = !finished && error == null ? work : null;
+    final subtitle = error == null
+        ? switch (activeWork) {
+            ImportProgressStage.waiting => 'Waiting for the source…',
+            ImportProgressStage.downloading => 'Downloading data…',
+            ImportProgressStage.processing => 'Processing data…',
+            ImportProgressStage.saving => 'Saving the library…',
+            null => 'Saving your content now for faster browsing later.',
+          }
+        : 'Review the error below and try again.';
     final compact = MediaQuery.sizeOf(context).width < 520;
     return SafeArea(
       child: Center(
@@ -95,16 +111,17 @@ class LibraryPreloadProgress extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  tr(
-                    error != null
-                        ? 'Review the error below and try again.'
-                        : 'Saving your content now for faster browsing later.',
+                if (error == null || !sharedPlaylist || onRetry != null) ...[
+                  const SizedBox(height: 8),
+                  Semantics(
+                    liveRegion: activeWork != null,
+                    child: Text(
+                      tr(subtitle),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: AppColors.textLo),
+                    ),
                   ),
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: AppColors.textLo),
-                ),
+                ],
                 const SizedBox(height: 24),
                 Semantics(
                   liveRegion: true,
@@ -150,10 +167,11 @@ class LibraryPreloadProgress extends StatelessWidget {
                   const SizedBox(height: 12),
                 ],
                 const SizedBox(height: 20),
-                for (final kind in _kinds) ...[
-                  _stage(context, kind),
-                  const SizedBox(height: 8),
-                ],
+                if (!sharedPlaylist || error == null)
+                  for (final kind in kinds) ...[
+                    _stage(context, kind),
+                    const SizedBox(height: 8),
+                  ],
                 if (includeEpg) ...[
                   _stage(context, null),
                   const SizedBox(height: 8),
@@ -227,6 +245,11 @@ class LibraryPreloadProgress extends StatelessWidget {
         'Program guide (EPG)',
         'Downloading and saving the program guide…',
         Icons.calendar_view_week_rounded,
+      ),
+      ContentKind.live when sharedPlaylist => (
+        'M3U playlist',
+        'Downloading and saving the M3U playlist…',
+        Icons.video_library_outlined,
       ),
       ContentKind.live => (
         'TV channels',

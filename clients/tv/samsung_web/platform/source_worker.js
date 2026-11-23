@@ -19,10 +19,19 @@
     var record = errorRecord(value);
     return error(record.name, record.message, record.code);
   }
+  function importStage(stage) {
+    return stage === 'waiting' || stage === 'downloading' || stage === 'processing' || stage === 'saving';
+  }
+  function reportImportProgress(source, stage) {
+    if (!source || source.closed || typeof source.onImportProgress !== 'function' || !importStage(stage)) return;
+    try { source.onImportProgress(stage); } catch (_) {}
+  }
   // 0.1.31 transfers the XHR buffer; base64 is needed only at the Dart JSON
   // boundary inside this worker. 24576 is divisible by three (no inner padding).
   function httpResponse(value) {
     if (typeof value === 'string') return value;
+    if (value && value.bodyBlob) return {bodyBlob:value.bodyBlob,
+      metadata:JSON.stringify({status:value.status,headers:value.headers,url:value.url,decoded:value.decoded})};
     if (value && value.bodyBuffer) {
       var bytes = new Uint8Array(value.bodyBuffer), chunks = [];
       for (var offset = 0; offset < bytes.length; offset += 24576) {
@@ -80,12 +89,13 @@
       delete sources[id];
       Object.keys(http).forEach(function (key) {
         if (http[key].source !== id) return;
-        http[key].reject(cancelled()); delete http[key];
+        if (http[key].close) http[key].close();
+        else { http[key].reject(cancelled()); delete http[key]; }
       });
       if (source) Promise.resolve().then(function () { return source.dispose(); }).then(function () {}, function () {});
     }
     try {
-      root.importScripts('../polyfills.js', '../pako-inflate.js', 'streaming_gzip.js', '../canonical-core.js');
+      root.importScripts('../polyfills.js', '../pako-inflate.js', 'streaming_gzip.js', 'm3u_disk_catalog.js', '../canonical-core.js');
       if (!root.TVBroCanonical || typeof root.TVBroCanonical.createSource !== 'function') throw error('NotSupportedError', 'The canonical source engine is unavailable.');
     } catch (_) {
       root.postMessage({ type: 'fatal', error: errorRecord(error('NotSupportedError', 'The source worker could not start.')) });
@@ -103,9 +113,37 @@
       if (message.type === 'httpResult') {
         var waiting = http[message.id];
         if (!waiting) return;
+        if (message.stream) {
+          waiting.close = function () {
+            if (!http[message.id]) return;
+            delete http[message.id];
+            if (waiting.read) waiting.read.reject(cancelled());
+            root.postMessage({type:'httpClose',id:message.id});
+          };
+          waiting.resolve({metadata:message.value,bodyStream:{
+            next:function () {
+              return new Promise(function (resolve, reject) {
+                if (!http[message.id]) { resolve(null); return; }
+                if (waiting.read) { reject(error('InvalidStateError', 'Playlist read already in progress.')); return; }
+                waiting.read = {resolve:resolve,reject:reject};
+                root.postMessage({type:'httpRead',id:message.id});
+              });
+            },
+            close:waiting.close
+          }});
+          return;
+        }
         delete http[message.id];
         try { waiting.resolve(httpResponse(message.value)); }
         catch (_) { waiting.reject(error('NetworkError', 'The provider response could not be decoded.')); }
+        return;
+      }
+      if (message.type === 'httpChunk') {
+        var streamed = http[message.id];
+        if (!streamed || !streamed.read) return;
+        var read = streamed.read; streamed.read = null;
+        if (message.error || message.value === null) delete http[message.id];
+        if (message.error) read.reject(fromRecord(message.error)); else read.resolve(message.value);
         return;
       }
       if (message.type === 'dispose') { disposeSource(message.source); return; }
@@ -127,7 +165,7 @@
       Promise.resolve().then(function () {
         if (message.type === 'create') {
           if (sources[message.source]) throw error('InvalidStateError', 'This source already exists.');
-          sources[message.source] = root.TVBroCanonical.createSource(message.config, function (request) {
+          var createdSource = root.TVBroCanonical.createSource(message.config, function (request) {
             return new Promise(function (resolve, reject) {
               if (!sources[message.source]) { reject(cancelled()); return; }
               var id = ++nextHttp;
@@ -135,7 +173,11 @@
               try { root.postMessage({ type: 'http', id: id, source: message.source, request: request }); }
               catch (_) { delete http[id]; reject(error('NetworkError', 'The provider request could not be transferred.')); }
             });
-          });
+          }, message.importProgress === true ? function (stage) {
+            if (!createdSource || sources[message.source] !== createdSource || !importStage(stage)) return;
+            try { root.postMessage({ type: 'importProgress', source: message.source, stage: stage }); } catch (_) {}
+          } : null);
+          sources[message.source] = createdSource;
           return null;
         }
         var source = sources[message.source];
@@ -172,6 +214,12 @@
       try { memoryPolicy = environment.TVBroSamsungMemoryPolicy.create({ environment: environment }); } catch (_) {}
     }
     var current = null, nextSource = 0, nextCall = 0;
+    function closeStream(session, id) {
+      var stream = session.streams[id];
+      if (!stream) return;
+      delete session.streams[id];
+      stream.body.close();
+    }
     function stop(session, failure) {
       if (current !== session) return;
       current = null;
@@ -181,6 +229,7 @@
       session.rejectReady(failure);
       Object.keys(session.pending).forEach(function (id) { session.pending[id].reject(failure); });
       session.pending = Object.create(null);
+      Object.keys(session.streams).forEach(function (id) { closeStream(session, id); });
       Object.keys(session.sources).forEach(function (id) { session.sources[id].closed = true; });
       Object.keys(session.jobs).forEach(function (id) { session.jobs[id].closed = true; });
       session.sources = Object.create(null); session.jobs = Object.create(null); session.count = 0;
@@ -197,7 +246,7 @@
       if (current) return current;
       if (typeof environment.Worker !== 'function') throw error('NotSupportedError', 'This TV does not provide a source worker.');
       var session = { worker: new environment.Worker('platform/source_worker.js'), sources: Object.create(null),
-        jobs: Object.create(null), pending: Object.create(null), count: 0, ready: null, timer: null };
+        jobs: Object.create(null), pending: Object.create(null), streams: Object.create(null), count: 0, ready: null, timer: null };
       session.ready = new Promise(function (resolve, reject) { session.resolveReady = resolve; session.rejectReady = reject; });
       current = session;
       session.worker.onerror = function (event) {
@@ -231,14 +280,51 @@
           if (message.error) pending.reject(fromRecord(message.error)); else pending.resolve(message.value);
           return;
         }
+        if (message.type === 'importProgress') {
+          var importing = session.sources[message.source];
+          if (importing && importing.id === message.source) reportImportProgress(importing, message.stage);
+          return;
+        }
+        if (message.type === 'httpClose') { closeStream(session, message.id); return; }
+        if (message.type === 'httpRead') {
+          var stream = session.streams[message.id];
+          if (!stream) return;
+          Promise.resolve().then(function () { return stream.body.next(); }).then(function (chunk) {
+            if (session.streams[message.id] !== stream) return;
+            if (chunk === null) closeStream(session, message.id);
+            else if (chunk.byteOffset !== 0 || chunk.byteLength !== chunk.buffer.byteLength) chunk = new Uint8Array(chunk);
+            post(session, {type:'httpChunk',id:message.id,value:chunk}, chunk ? [chunk.buffer] : []);
+          }).catch(function (failure) {
+            if (session.streams[message.id] !== stream) return;
+            closeStream(session, message.id);
+            var name = failure && failure.name;
+            var safe = name === 'AbortError' ? cancelled() : name === 'TimeoutError'
+              ? error('TimeoutError', 'The provider body timed out.') : error('NetworkError', 'The provider body could not be read.');
+            try { post(session, {type:'httpChunk',id:message.id,error:errorRecord(safe)}); } catch (_) {}
+          });
+          return;
+        }
         if (message.type !== 'http') return;
         var source = session.sources[message.source];
         if (!source || source.closed) return;
         Promise.resolve().then(function () {
           if (current !== session || source.closed) throw cancelled();
-          return source.transport(message.request, {binaryResponse:true});
+          var responseOptions = {binaryResponse:true};
+          if (source.onImportProgress) responseOptions.onImportProgress = function (stage) {
+            reportImportProgress(source, stage);
+          };
+          return source.transport(message.request, responseOptions);
         }).then(function (value) {
-          if (current !== session || source.closed) return;
+          if (current !== session || source.closed) {
+            if (value && value.bodyStream) value.bodyStream.close();
+            return;
+          }
+          if (value && value.bodyStream) {
+            session.streams[message.id] = {source:source.id,body:value.bodyStream};
+            post(session, {type:'httpResult',id:message.id,stream:true,
+              value:JSON.stringify({status:value.status,headers:value.headers,url:value.url,decoded:value.decoded})});
+            return;
+          }
           var buffers = value && value.bodyBuffer ? [value.bodyBuffer] : [];
           post(session, { type: 'httpResult', id: message.id, value: value }, buffers);
         }).catch(function () {
@@ -271,6 +357,9 @@
         if (session.pending[id].source !== source.id) return;
         session.pending[id].reject(cancelled()); delete session.pending[id];
       });
+      Object.keys(session.streams).forEach(function (id) {
+        if (session.streams[id].source === source.id) closeStream(session, id);
+      });
       if (current === session) {
         if (!session.count) stop(session, cancelled());
         else { try { post(session, { type: 'dispose', source: source.id }); } catch (_) {} }
@@ -302,11 +391,14 @@
         finishPin(job); throw failure;
       });
     }
-    return { createSource: function (config, transport) {
+    return { createSource: function (config, transport, onImportProgress) {
       if (typeof config !== 'string' || typeof transport !== 'function') throw new TypeError('Source configuration and transport are required.');
-      var session = start(), source = { id: ++nextSource, session: session, transport: transport, closed: false };
+      var session = start(), source = { id: ++nextSource, session: session, transport: transport, closed: false,
+        onImportProgress: typeof onImportProgress === 'function' ? onImportProgress : null };
       session.sources[source.id] = source; session.count += 1;
-      var created = session.ready.then(function () { return call(source, { type: 'create', config: config }); });
+      var created = session.ready.then(function () {
+        return call(source, { type: 'create', config: config, importProgress: !!source.onImportProgress });
+      });
       created.then(function () {}, function () {});
       function catalogCall(method, args) {
         if (source.closed) return Promise.reject(cancelled());

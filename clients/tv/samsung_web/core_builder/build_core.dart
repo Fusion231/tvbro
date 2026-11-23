@@ -91,6 +91,7 @@ Future<void> main(List<String> args) async {
   }
 
   declarations('lib/data/load_token.dart', null);
+  declarations('lib/data/import_progress.dart', null);
   declarations('lib/sources/source.dart', null);
   declarations('lib/sources/expiry.dart', null);
   declarations('lib/data/net.dart', {'HttpWorkloadPolicy', '_mib', 'kPlaylistWorkload', 'kProviderJsonWorkload', 'kMetadataJsonWorkload'});
@@ -99,7 +100,8 @@ Future<void> main(List<String> args) async {
   declarations('lib/sources/source_config.dart', {'newSourceId'});
   declarations('lib/sources/m3u_catalog.dart', null);
   declarations('lib/sources/m3u_source.dart',
-      {'M3uParsed', '_parseM3uBytes', 'parseM3uPlaylist', 'm3uPlaybackHeaders', '_attr', '_headerEpgAttribute', '_name'});
+      {'M3uParsed', '_parseM3uBytes', 'parseM3uPlaylist', 'm3uPlaybackHeaders', '_M3uPlaylistParser',
+        '_attributePatterns', '_attr', '_headerEpgAttribute', '_entryTitle'});
   declarations('lib/sources/xtream_source.dart', {
     'kXtreamStreamExtensions', 'resolveXtreamStreamExtension',
     'mapLiveChannels', 'decodeLiveChannelsBytes', 'mapMediaItemsFromDecoded',
@@ -185,7 +187,7 @@ Future<void> main(List<String> args) async {
   // Entire provider classes remain verbatim. Only their native IO vocabulary
   // is bound to the browser transport/session resources below.
   declarations('lib/data/net.dart', {
-    'HttpReadMetrics', 'kEpgWorkload', 'kStalkerJsonWorkload',
+    'HttpReadMetrics', 'kEpgWorkload', 'kStalkerJsonWorkload', 'kStreamingM3uWorkload',
     'isTransientHttpStatus', 'HttpWorkloadException', 'isTransientNetworkError',
     'providerHttpRefusalStatus',
     'HttpOperation', 'readBoundedBytes', 'writeBoundedStreamToFile',

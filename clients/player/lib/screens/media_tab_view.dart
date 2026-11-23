@@ -400,7 +400,7 @@ class MediaTabView extends StatelessWidget {
     final railSliver = showRail
         ? SliverToBoxAdapter(
             child: _MediaPosterRail(
-              title: tr('Continue watching'),
+              title: _supporterResumeLabel(tr('Continue watching')),
               items: [for (final entry in continueWatching) entry.item],
               resumeEntries: {
                 for (final entry in continueWatching) entry.item.id: entry,
@@ -1407,6 +1407,7 @@ String _continueWatchingSemantics(ContinueWatchingEntry entry) {
         'season': item.seasonNumber!,
         'episode': item.episodeNumber!,
       }),
+    _episodePlaybackLabel(entry.position),
     ?_remainingLabel(entry.position),
   ];
   return parts.join(', ');
@@ -2111,6 +2112,7 @@ class MediaDetailsSheet extends StatefulWidget {
   /// screen's own play path (rather than pushing a player here) so the
   /// "Continue watching" rail reloads on return, exactly like a movie does.
   final ValueChanged<MediaItem>? onPlayEpisode;
+  final ValueChanged<MediaItem>? onPlayEpisodeFromStart;
 
   const MediaDetailsSheet({
     super.key,
@@ -2122,12 +2124,13 @@ class MediaDetailsSheet extends StatefulWidget {
     this.onChanged,
     this.enrich,
     this.onPlayEpisode,
+    this.onPlayEpisodeFromStart,
     this.resume,
     this.onPlayFromStart,
   });
 
   /// Saved resume point for this item, if any — turns the Play button into
-  /// "Resume from h:mm:ss" and surfaces [onPlayFromStart] beside it.
+  /// a Supporter resume action and surfaces [onPlayFromStart] beside it.
   final PlaybackPosition? resume;
   final VoidCallback? onPlayFromStart;
 
@@ -2310,7 +2313,9 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
       if (progress.latestEpisode == null) {
         if (!mounted || load != _seriesProgressLoad) return;
         if (_seriesProgress?.latestEpisode != null) {
-          if (_browseEpisodesFocusNode.hasFocus) _playFocusNode.requestFocus();
+          if (_browseEpisodesFocusNode.hasFocus || _fromStartFocusNode.hasFocus) {
+            _playFocusNode.requestFocus();
+          }
           setState(() {
             _seriesProgress = progress;
             _seriesContinuation = null;
@@ -2367,7 +2372,9 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
         }
       }
       if (!mounted || load != _seriesProgressLoad) return;
-      if (continuation == null && _browseEpisodesFocusNode.hasFocus) {
+      if ((continuation == null && _browseEpisodesFocusNode.hasFocus) ||
+          (_fromStartFocusNode.hasFocus &&
+              !_hasResume(progress.positions[continuation?.id]))) {
         _playFocusNode.requestFocus();
       }
       setState(() {
@@ -2810,6 +2817,14 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
     final duration = _mediaDurationLabel(_item.durationSeconds);
     final continuation = _seriesContinuation;
     final continuing = continuation != null && widget.onPlayEpisode != null;
+    final continuationPosition = _seriesProgress?.positions[continuation?.id];
+    final resumingEpisode = continuing && _hasResume(continuationPosition);
+    final resume = widget.resume;
+    final fromStart = resumingEpisode && widget.onPlayEpisodeFromStart != null
+        ? () => widget.onPlayEpisodeFromStart!(continuation)
+        : _hasResume(resume)
+        ? widget.onPlayFromStart
+        : null;
     final fallback = DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -2964,7 +2979,7 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                       ] else if (continuation != null) ...[
                         const SizedBox(height: 5),
                         Text(
-                          progress.latestPosition?.isFinished == false
+                          _hasResume(progress.latestPosition)
                               ? _episodePlaybackLabel(progress.latestPosition!)
                               : tr('Next episode: {episode}', {
                                   'episode': _episodeSemanticsLabel(
@@ -3003,23 +3018,31 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                             : Icons.play_arrow_rounded,
                       ),
                       label: Text(
-                        continuing
-                            ? tr(
-                                _seriesProgress!.latestPosition!.isFinished
-                                    ? 'Play {episode}'
-                                    : 'Resume {episode}',
-                                {'episode': _episodeNumberLabel(continuation)},
+                        resumingEpisode
+                            ? _supporterResumeLabel(
+                                tr('Resume {episode}', {
+                                  'episode': _episodeNumberLabel(continuation),
+                                }),
                               )
+                            : continuing
+                            ? tr('Play {episode}', {
+                                'episode': _episodeNumberLabel(continuation),
+                              })
                             : widget.onPlay == null
                             ? tr('View episodes')
-                            : widget.resume != null
-                            ? tr('Resume from {position}', {
-                                'position': _positionLabel(
-                                  widget.resume!.position,
-                                ),
-                              })
+                            : _hasResume(resume)
+                            ? _episodePlaybackLabel(resume!)
                             : tr('Play'),
                       ),
+                    ),
+                  if (fromStart != null)
+                    OutlinedButton.icon(
+                      focusNode: _fromStartFocusNode,
+                      onFocusChange: (value) =>
+                          _revealControl(_fromStartFocusNode, value),
+                      onPressed: fromStart,
+                      icon: const Icon(Icons.replay_rounded),
+                      label: Text(tr('Watch from beginning')),
                     ),
                   if (continuing)
                     OutlinedButton.icon(
@@ -3030,15 +3053,6 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                       onPressed: _showEpisodes,
                       icon: const Icon(Icons.video_library_outlined),
                       label: Text(tr('View episodes')),
-                    ),
-                  if (widget.resume != null && widget.onPlayFromStart != null)
-                    OutlinedButton.icon(
-                      focusNode: _fromStartFocusNode,
-                      onFocusChange: (value) =>
-                          _revealControl(_fromStartFocusNode, value),
-                      onPressed: widget.onPlayFromStart,
-                      icon: const Icon(Icons.replay_rounded),
-                      label: Text(tr('From start')),
                     ),
                   if (_item.kind == ContentKind.movie ||
                       _item.kind == ContentKind.series)
@@ -3556,11 +3570,18 @@ String _episodeNumberLabel(MediaItem episode) =>
       })
     : episode.title;
 
+String _supporterResumeLabel(String label) => '$label · Supporter';
+
+bool _hasResume(PlaybackPosition? position) =>
+    position != null && !position.isFinished && position.position > Duration.zero;
+
 String _episodePlaybackLabel(PlaybackPosition position) => position.isFinished
     ? tr('Watched')
-    : tr('Resume from {position}', {
-        'position': _positionLabel(position.position),
-      });
+    : _supporterResumeLabel(
+        tr('Resume from {position}', {
+          'position': _positionLabel(position.position),
+        }),
+      );
 
 class _SeriesBrowser extends StatefulWidget {
   final LibraryRepository repo;

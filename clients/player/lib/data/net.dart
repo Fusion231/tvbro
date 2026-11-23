@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
 import '../l10n/app_localizations.dart';
+import 'import_progress.dart';
 import 'load_token.dart';
 import 'provider_request_gate.dart';
 
@@ -86,6 +88,13 @@ const kPlaylistWorkload = HttpWorkloadPolicy(
   totalTimeout: Duration(minutes: 5),
 );
 
+const kStreamingM3uWorkload = HttpWorkloadPolicy(
+  name: 'playlist',
+  maximumBodyBytes: 512 * _mib,
+  maximumDecodedBytes: 512 * _mib,
+  totalTimeout: Duration(minutes: 10),
+);
+
 /// XMLTV guides are streamed to disk and parsed from there with the gzip
 /// inflated on the fly (`xmltvGuideFeed`, `parseXmltvFileBatched`), so neither
 /// number below is a memory budget any more — the body ceiling is disk, and the
@@ -146,9 +155,18 @@ bool isTransientHttpStatus(int status) =>
     status == HttpStatus.gatewayTimeout;
 
 class HttpWorkloadException implements Exception {
-  const HttpWorkloadException(this.message, {this.isSizeLimit = false});
+  const HttpWorkloadException(
+    this.message, {
+    this.isSizeLimit = false,
+    this.workloadName,
+    this.actualBytes,
+    this.limitBytes,
+  });
   final String message;
   final bool isSizeLimit;
+  final String? workloadName;
+  final int? actualBytes;
+  final int? limitBytes;
 
   @override
   String toString() => 'HttpWorkloadException: $message';
@@ -319,6 +337,24 @@ String? _providerErrorMessage(Object error) {
     );
   }
   if (error is HttpWorkloadException) {
+    final limit = error.limitBytes;
+    final actual = error.actualBytes;
+    if (error.isSizeLimit && limit != null) {
+      if (error.workloadName == 'playlist' && actual != null) {
+        return tr(
+          'The M3U playlist exceeds the {limit} size limit (about {size}). '
+          'Use a smaller playlist from your provider.',
+          {'limit': formatBytes(limit), 'size': formatBytes(actual)},
+        );
+      }
+      if (error.workloadName == 'playlist line') {
+        return tr(
+          'An entry in the M3U playlist exceeds the {limit} per-line limit. '
+          'Ask your provider for a corrected playlist.',
+          {'limit': formatBytes(limit)},
+        );
+      }
+    }
     return tr('The source returned more data than the app can safely load.');
   }
   if (error is FormatException ||
@@ -440,6 +476,9 @@ class HttpOperation {
       totalTimeout: remaining,
       workloadName: policy.name,
     );
+    if (encoded.isNotEmpty) {
+      reportImportProgress(ImportProgressStage.processing);
+    }
     if (!_isGzip(response, encoded)) {
       _checkLimit(encoded.length, policy.maximumDecodedBytes, policy.name);
       lastReadMetrics = HttpReadMetrics(
@@ -458,6 +497,84 @@ class HttpOperation {
     );
     onReadMetrics?.call(lastReadMetrics!);
     return decoded;
+  }
+
+  Stream<String> readPlaylistLines(
+    HttpClientResponse response, {
+    bool limitBodyBytes = true,
+  }) async* {
+    if (limitBodyBytes) {
+      _checkContentLength(
+        response.contentLength,
+        policy.maximumBodyBytes,
+        policy.name,
+      );
+    }
+    var received = 0;
+    var decoded = 0;
+    var lineBytes = 0;
+    const maximumLineBytes = 256 * 1024;
+    final chunks = StreamIterator(response.timeout(policy.idleTimeout));
+    try {
+      final prefix = BytesBuilder(copy: false);
+      while (prefix.length < 2 && await chunks.moveNext()) {
+        prefix.add(chunks.current);
+      }
+      final first = prefix.takeBytes();
+      if (first.isNotEmpty) {
+        reportImportProgress(ImportProgressStage.processing);
+      }
+      final compressed = _isGzip(response, first);
+      Stream<List<int>> wire() async* {
+        List<int> chunk = first;
+        do {
+          received += chunk.length;
+          if (limitBodyBytes) {
+            _checkLimit(received, policy.maximumBodyBytes, policy.name);
+          }
+          if (compressed && chunk.length > 8192) {
+            // Bound the decoder's output even before its decoded-size check.
+            for (var offset = 0; offset < chunk.length; offset += 8192) {
+              yield chunk.sublist(
+                offset,
+                (offset + 8192).clamp(0, chunk.length),
+              );
+            }
+          } else {
+            yield chunk;
+          }
+          if (!await chunks.moveNext()) break;
+          chunk = chunks.current;
+        } while (true);
+      }
+
+      final body = wire();
+      final inflated = compressed ? gzip.decoder.bind(body) : body;
+      final bounded = inflated.map((chunk) {
+        decoded += chunk.length;
+        if (limitBodyBytes) {
+          _checkLimit(decoded, policy.maximumDecodedBytes, policy.name);
+        }
+        for (final byte in chunk) {
+          if (byte == 10 || byte == 13) {
+            lineBytes = 0;
+          } else {
+            _checkLimit(++lineBytes, maximumLineBytes, 'playlist line');
+          }
+        }
+        return chunk;
+      });
+      yield* bounded
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter());
+      lastReadMetrics = HttpReadMetrics(
+        compressedBytes: received,
+        decodedBytes: decoded,
+      );
+      onReadMetrics?.call(lastReadMetrics!);
+    } finally {
+      await chunks.cancel();
+    }
   }
 
   /// Streams a response directly to [destination], bounding both a declared
@@ -537,6 +654,7 @@ Future<T> providerHttpGet<T>(
         }
 
         try {
+          reportImportProgress(ImportProgressStage.waiting);
           final openedRequest = await waitForRequest<HttpClientRequest>(
             client.getUrl(current).then((opened) {
               if (finished) opened.abort();
@@ -610,6 +728,11 @@ Future<T> providerHttpGet<T>(
             return (redirect: next, value: null);
           }
           onResponseUri?.call(current);
+          if (response.statusCode >= 200 &&
+              response.statusCode < 300 &&
+              response.contentLength != 0) {
+            reportImportProgress(ImportProgressStage.downloading);
+          }
           return (
             redirect: null,
             value: await waitForRequest(readResponse(response)),
@@ -792,6 +915,9 @@ void _checkContentLength(int contentLength, int maximum, String name) {
       '$name download is ${formatBytes(contentLength)}, over the '
       '${formatBytes(maximum)} limit',
       isSizeLimit: true,
+      workloadName: name,
+      actualBytes: contentLength,
+      limitBytes: maximum,
     );
   }
 }
@@ -801,6 +927,9 @@ void _checkLimit(int actual, int maximum, String name) {
     throw HttpWorkloadException(
       '$name is ${formatBytes(actual)}, over the ${formatBytes(maximum)} limit',
       isSizeLimit: true,
+      workloadName: name,
+      actualBytes: actual,
+      limitBytes: maximum,
     );
   }
 }

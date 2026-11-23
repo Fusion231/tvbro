@@ -15,6 +15,7 @@
     store: store,
     playerModule: environment.TVBroLgWebosPlayer,
     catalogStoreModule: environment.TVBroWebOSCatalogStore,
+    requireCatalogEncryption: true,
     backupFilesModule: environment.TVBroWebOSBackupFiles,
     deviceLabel: 'LG TV',
     normalizeKey: function (key) { return key === 461 ? 10009 : key; },

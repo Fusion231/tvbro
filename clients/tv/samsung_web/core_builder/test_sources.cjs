@@ -7,9 +7,10 @@ const zlib = require('node:zlib');
 const assert = require('node:assert/strict');
 const output = path.resolve(process.argv[2]);
 const bytes = fs.readFileSync(path.join(output, 'core.js'));
-const sandbox = {console, crypto:crypto.webcrypto, setTimeout, clearTimeout, TextEncoder, TextDecoder};
+const sandbox = {console, crypto:crypto.webcrypto, setTimeout, clearTimeout, TextEncoder, TextDecoder, atob, btoa, pako:require('pako')};
 sandbox.window = sandbox; sandbox.self = sandbox;
 vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../platform/streaming_gzip.js'),'utf8'),sandbox);
 vm.runInContext(bytes.toString('utf8'), sandbox, {filename:'compiled-original-core.js'});
 const core = sandbox.TVBroCanonical;
 const checks = [];
@@ -136,6 +137,44 @@ async function main() {
       assert.equal(movie.headers['User-Agent'],'Fixture Agent');
       assert.equal(kit.requests.length,1);
     } finally { await kit.source.dispose(); }
+  });
+
+  await check('browser M3U reads a raw gzip Blob in bounded chunks and retains typed rows', async () => {
+    const playlist = '#EXTM3U\r\n#EXTINF:-1 group-title="Mix",Łódź Live\r\nhttps://streams.fixture/1\r\n' +
+      '#EXTINF:-1 stream-type="movie" group-title="Mix",A Movie\r\nhttps://streams.fixture/2\r\n' +
+      '#EXTINF:-1 stream-type="series" group-title="Mix",A Show S01E02\r\nhttps://streams.fixture/3\r\n';
+    const bodyBlob = new Blob([zlib.gzipSync(Buffer.from(playlist))]);
+    bodyBlob.arrayBuffer = () => { throw Error('The unsliced body must never be converted to an ArrayBuffer.'); };
+    const source = core.createSource(JSON.stringify({id:'blob-m3u',kind:'m3u',fields:{playlistUrl:'https://blob.fixture/list'},settings:{}}),async () => ({
+      metadata:JSON.stringify({status:200,headers:{},url:'https://blob.fixture/list',decoded:true}),bodyBlob
+    }));
+    const invoke = async (method,args={}) => JSON.parse(await source.invoke(method,JSON.stringify(args)));
+    try {
+      assert.deepEqual((await invoke('channels')).map(row=>row.name),['Łódź Live']);
+      assert.deepEqual((await invoke('allMediaItems',{kind:'movie'})).map(row=>row.title),['A Movie']);
+      assert.deepEqual((await invoke('allMediaItems',{kind:'series'})).map(row=>row.title),['A Show']);
+    } finally { await source.dispose(); }
+  });
+
+  await check('legacy FileReader preserves UTF-8 and CRLF across M3U Blob slices', async () => {
+    const header = '#EXTM3U\r\n#' + ' '.repeat(65512) + '\r\n#EXTINF:-1,Łódź\r\n';
+    const buffer = new Blob([header, 'https://streams.fixture/legacy\r\n']);
+    const ranges = [];
+    sandbox.FileReader = class FileReader {
+      async readAsArrayBuffer(part) { this.result = await part.buffer.arrayBuffer(); this.onload(); }
+    };
+    const bodyBlob = {size:buffer.size,slice(start,end) {
+      ranges.push([start,end]);
+      return {buffer:buffer.slice(start,end)};
+    }};
+    const source = core.createSource(JSON.stringify({id:'legacy-blob-m3u',kind:'m3u',fields:{playlistUrl:'https://legacy-blob.fixture/list'},settings:{}}),async () => ({
+      metadata:JSON.stringify({status:200,headers:{},url:'https://legacy-blob.fixture/list',decoded:true}),bodyBlob
+    }));
+    try {
+      const result = JSON.parse(await source.invoke('channels','{}'));
+      assert.deepEqual(result.map(row=>row.name),['Łódź']);
+      assert.deepEqual(ranges,[[0,65536],[65536,buffer.size]]);
+    } finally { delete sandbox.FileReader; await source.dispose(); }
   });
   await check('a cache-only miss never defers the following real guide refresh', async () => {
     const config={id:'partial-guide',kind:'m3u',fields:{playlistUrl:'https://partial-playlist.fixture/list',

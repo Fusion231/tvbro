@@ -126,7 +126,14 @@ const polishOnboardingMessages = <String, String>{
   'Preparing your library': 'Przygotowujemy Twoją bibliotekę',
   'Saving your content now for faster browsing later.':
       'Zapisujemy zawartość, aby później przeglądać ją szybciej.',
+  'Waiting for the source…': 'Oczekiwanie na odpowiedź źródła…',
+  'Downloading data…': 'Pobieranie danych…',
+  'Processing data…': 'Przetwarzanie danych…',
+  'Saving the library…': 'Zapisywanie biblioteki…',
   'Finished {done} of {total}': 'Ukończono {done} z {total}',
+  'M3U playlist': 'Playlista M3U',
+  'Downloading and saving the M3U playlist…':
+      'Pobieranie i zapisywanie playlisty M3U…',
   'TV channels': 'Kanały TV',
   'Loading channels and categories…': 'Pobieranie kanałów i kategorii…',
   'Loading movies and categories…': 'Pobieranie filmów i kategorii…',

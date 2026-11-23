@@ -14,6 +14,7 @@
     store: store,
     playerModule: environment.TVBroTitanPlayer,
     catalogStoreModule: environment.TVBroWebOSCatalogStore,
+    requireCatalogEncryption: true,
     backupFilesModule: environment.TVBroWebOSBackupFiles,
     deviceLabel: 'Titan OS TV',
     requiresHttpsProvider: true,

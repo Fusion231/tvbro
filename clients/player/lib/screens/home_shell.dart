@@ -14,12 +14,13 @@ import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
 import '../data/distribution_channel.dart';
 import '../data/diagnostics_log.dart';
+import '../data/import_progress.dart';
 import '../data/library_repository.dart';
 import '../data/load_token.dart';
 import '../data/local_profile_store.dart';
 import '../data/metadata_clients.dart';
 import '../data/metadata_provider.dart';
-import '../data/net.dart' show sourceLoadErrorMessage;
+import '../data/net.dart' show HttpWorkloadException, sourceLoadErrorMessage;
 import '../sources/m3u_source.dart';
 import '../data/parental_controls.dart';
 import '../data/source_store.dart';
@@ -77,9 +78,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _preloadingContent = false;
   bool _checkingSource = false;
   String? _preloadError;
+  bool _preloadCanRetry = true;
   String? _libraryWarning;
   VoidCallback? _removeDeferredGuideListener;
   final Map<ContentKind, bool?> _preloadStages = {};
+  final Map<ContentKind, ImportProgressStage> _preloadWork = {};
+  bool _preloadEpgStarted = false;
   bool? _preloadEpgReady;
   String? _preloadEpgMessage;
   LoadToken? _preloadToken;
@@ -477,9 +481,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _preloadingContent = forcePreload;
         _checkingSource = forcePreload;
         _preloadStages.clear();
+        _preloadWork.clear();
+        _preloadEpgStarted = false;
         _preloadEpgReady = null;
         _preloadEpgMessage = null;
         _preloadError = null;
+        _preloadCanRetry = true;
         _libraryWarning = null;
       });
     }
@@ -517,6 +524,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
     final previousSource = _source;
     final previousProviders = _metadataProviders;
+    final sharedPlaylist = src is M3uSource;
     setState(() {
       _config = cfg;
       _source = src;
@@ -531,19 +539,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             );
       _profileSetupRequired = profileSetupRequired;
       _preloadingContent = preloadContent;
-      _checkingSource = preloadContent;
+      _checkingSource = preloadContent && !sharedPlaylist;
       _preloadEpgReady = null;
       _preloadEpgMessage = null;
       _preloadStages
         ..clear()
         ..addAll({
-          if (preloadContent)
-            for (final kind in const [
-              ContentKind.live,
-              ContentKind.movie,
-              ContentKind.series,
-            ])
-              kind: null,
+          if (preloadContent) ContentKind.live: null,
+          if (preloadContent && !sharedPlaylist) ...{
+            ContentKind.movie: null,
+            ContentKind.series: null,
+          },
         });
       _loading = preloadContent;
     });
@@ -558,21 +564,34 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final token = LoadToken();
       _preloadToken = token;
       repo.loadToken = token;
+      bool isCurrent() =>
+          mounted && gen == _loadActiveGeneration && !token.isCancelled;
+
+      Future<T> observe<T>(ContentKind kind, Future<T> Function() run) =>
+          trackImportProgress(run, (stage) {
+            if (isCurrent()) setState(() => _preloadWork[kind] = stage);
+          });
+
       try {
         // Sources own bounded transport retries. Repeating the whole setup
         // here multiplies those requests after the provider already failed.
-        await src!.connect();
+        await observe(ContentKind.live, src!.connect);
       } catch (error) {
-        if (!mounted || gen != _loadActiveGeneration) return;
+        if (!isCurrent()) return;
         setState(() {
           _checkingSource = false;
+          _preloadWork.clear();
           _preloadError = sourceLoadErrorMessage(error);
         });
         return;
       }
-      if (!mounted || gen != _loadActiveGeneration) return;
-      setState(() => _checkingSource = false);
-      var itemCount = 0;
+      if (!isCurrent()) return;
+      setState(() {
+        _checkingSource = false;
+        _preloadWork.clear();
+      });
+      var hasContent = false;
+      var canRetry = true;
       final errors = <ContentKind, String>{};
       String? epgWarning;
       // Finish both the catalogs and the guide before reporting setup ready.
@@ -581,22 +600,33 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         var ready = false;
         try {
           if (kind == ContentKind.live) {
-            final snapshot = await repo.load(forceRefresh: forcePreload);
-            itemCount += snapshot.channels.length;
+            final snapshot = await repo.load(
+              forceRefresh: forcePreload || sharedPlaylist,
+            );
+            if (sharedPlaylist
+                ? await widget.db.hasLibraryContent(cfg.id)
+                : snapshot.channels.isNotEmpty) {
+              hasContent = true;
+            }
+            final guideRefresh = repo.pendingEpgRefresh;
             ready = true;
-            if (mounted && gen == _loadActiveGeneration && !token.isCancelled) {
-              setState(() => _preloadStages[kind] = true);
+            if (isCurrent()) {
+              setState(() {
+                _preloadStages[kind] = true;
+                _preloadEpgStarted =
+                    sharedPlaylist &&
+                    guideRefresh != null &&
+                    snapshot.channels.isNotEmpty &&
+                    capabilitiesOf(repo.source).epg !=
+                        CapabilityAvailability.unavailable;
+              });
             }
-            await repo.pendingEpgRefresh;
-            if (!mounted || gen != _loadActiveGeneration || token.isCancelled) {
-              return;
-            }
+            await guideRefresh;
+            if (!isCurrent()) return;
             epgWarning = snapshot.channels.isEmpty
                 ? null
                 : await _epgWarning(repo);
-            if (!mounted || gen != _loadActiveGeneration || token.isCancelled) {
-              return;
-            }
+            if (!isCurrent()) return;
             setState(() {
               _preloadEpgReady = epgWarning == null;
               _preloadEpgMessage =
@@ -612,25 +642,30 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               forceRefresh: forcePreload,
               token: token,
             );
-            itemCount += await widget.db.countMediaItems(cfg.id, kind);
+            if (await widget.db.countMediaItems(cfg.id, kind) > 0) {
+              hasContent = true;
+            }
           }
           ready = true;
         } on LoadCancelledException {
           return;
         } catch (error) {
-          final section = switch (kind) {
-            ContentKind.live => tr('TV channels'),
-            ContentKind.movie => tr('Movies'),
-            _ => tr('Series'),
-          };
-          errors[kind] = tr('Could not load {section}. {message}', {
-            'section': section,
-            'message': sourceLoadErrorMessage(error),
-          });
-          if (kind == ContentKind.live &&
-              mounted &&
-              gen == _loadActiveGeneration &&
-              !token.isCancelled) {
+          final message = sourceLoadErrorMessage(error);
+          if (sharedPlaylist) {
+            errors[kind] = message;
+            canRetry = error is! HttpWorkloadException || !error.isSizeLimit;
+          } else {
+            final section = switch (kind) {
+              ContentKind.live => tr('TV channels'),
+              ContentKind.movie => tr('Movies'),
+              _ => tr('Series'),
+            };
+            errors[kind] = tr('Could not load {section}. {message}', {
+              'section': section,
+              'message': message,
+            });
+          }
+          if (!sharedPlaylist && kind == ContentKind.live && isCurrent()) {
             setState(() {
               _preloadEpgReady = false;
               _preloadEpgMessage = tr(
@@ -640,23 +675,35 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           }
           DiagnosticsLog.instance.add(
             'library',
-            'onboarding ${kind.name} preload failed: ${error.runtimeType}',
+            'onboarding ${sharedPlaylist ? 'playlist' : kind.name} '
+                'preload failed: ${error.runtimeType}',
           );
         } finally {
-          if (mounted && gen == _loadActiveGeneration && !token.isCancelled) {
-            setState(() => _preloadStages[kind] = ready);
+          if (isCurrent()) {
+            setState(() {
+              _preloadStages[kind] = ready;
+              _preloadWork.remove(kind);
+            });
           }
         }
       }
 
-      await Future.wait([
-        prepare(ContentKind.live),
-        prepare(ContentKind.movie),
-        prepare(ContentKind.series),
-      ]);
-      if (!mounted || gen != _loadActiveGeneration) return;
-      if (itemCount == 0) {
+      if (sharedPlaylist) {
+        await observe(ContentKind.live, () => prepare(ContentKind.live));
+      } else {
+        await Future.wait([
+          for (final kind in [
+            ContentKind.live,
+            ContentKind.movie,
+            ContentKind.series,
+          ])
+            observe(kind, () => prepare(kind)),
+        ]);
+      }
+      if (!isCurrent()) return;
+      if (!hasContent) {
         setState(() {
+          _preloadCanRetry = canRetry;
           _preloadError = errors.isEmpty
               ? tr(
                   'This source returned no TV channels, movies, or series. '
@@ -1110,17 +1157,26 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Widget _buildContent(BuildContext context) {
     if (_loading) {
+      ImportProgressStage? work;
+      // Keep a section's queued request from interrupting active work in another.
+      for (final stage in _preloadWork.values) {
+        if (work == null || stage.index > work.index) work = stage;
+      }
       return _preloadingContent
           ? Scaffold(
               body: LibraryPreloadProgress(
                 stages: _preloadStages,
-                includeEpg: true,
+                work: work,
+                sharedPlaylist: _source is M3uSource,
+                includeEpg: _source is! M3uSource || _preloadEpgStarted,
                 epgReady: _preloadEpgReady,
                 epgMessage: _preloadEpgMessage,
                 connecting: _checkingSource,
                 error: _preloadError,
                 onEditSource: () => unawaited(_editPreloadSource()),
-                onRetry: () => unawaited(_loadActive(forcePreload: true)),
+                onRetry: _preloadCanRetry
+                    ? () => unawaited(_loadActive(forcePreload: true))
+                    : null,
               ),
             )
           : const Scaffold(body: Center(child: CircularProgressIndicator()));

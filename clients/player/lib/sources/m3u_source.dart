@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show compute, visibleForTesting;
+import 'package:flutter/foundation.dart' show compute, kIsWeb, visibleForTesting;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:crypto/crypto.dart';
 
@@ -180,7 +180,7 @@ class M3uSource
         : (!_headerKnown
               ? CapabilityAvailability.unknown
               : CapabilityAvailability.unavailable),
-    catchup: _channels == null
+    catchup: !_headerKnown
         ? CapabilityAvailability.unknown
         : (_catchupCapability.supported
               ? CapabilityAvailability.supported
@@ -273,7 +273,7 @@ class M3uSource
     List<Channel> channels, {
     LoadToken? token,
   }) {
-    if (epgUrl?.isNotEmpty != true && _channels == null) {
+    if (epgUrl?.isNotEmpty != true && !_headerKnown) {
       return _discoverEpg(channels, token);
     }
     final feeds = _guideFeeds(channels, token);
@@ -536,29 +536,144 @@ class M3uSource
 
   Future<void> _parse(int generation, LoadToken token) async {
     var effectiveUri = Uri.parse(playlistUrl);
-    final bytes = await _download(
+    Future<T> download<T extends Object>(
+      Future<T> Function(HttpOperation, HttpClientResponse) read,
+    ) => _download<T>(
       effectiveUri,
       kPlaylistWorkload,
       generation: generation,
       token: token,
       onResponseUri: (uri) => effectiveUri = uri,
+      read: read,
     );
-    // Decode + parse on a background isolate: a large playlist (tens of MB,
-    // tens of thousands of channels) would otherwise stall the UI thread for
-    // hundreds of ms while building Channel objects.
-    final parsed = bytes.length < _isolateM3uThreshold
-        ? _parseM3uBytes(bytes)
-        : await compute(_parseM3uBytes, bytes);
+    final M3uParsed parsed;
+    if (kIsWeb) {
+      parsed = await download((operation, response) async {
+        final parser = _M3uPlaylistParser();
+        await for (final line in operation.readPlaylistLines(response)) {
+          if (token.isCancelled) throw const LoadCancelledException();
+          parser.addLine(line);
+        }
+        parser.finish();
+        return parser.takeBatch();
+      });
+    } else {
+      final bytes = await download(
+        (operation, response) => operation.readBytes(response),
+      );
+      // Keep large decodes and parses off the Flutter UI isolate.
+      parsed = bytes.length < _isolateM3uThreshold
+          ? _parseM3uBytes(bytes)
+          : await compute(_parseM3uBytes, bytes);
+    }
     if (_disposed || generation != _parseGeneration) {
       throw const LoadCancelledException();
     }
     _channels = parsed.channels;
     _categories = parsed.categories;
     _media = parsed.media;
-    _headerEpgUrl = parsed.headerEpgUrl;
+    await _rememberHeader(
+      parsed.headerEpgUrl,
+      parsed.catchupCapability,
+      parsed.rejectedRows,
+      effectiveUri,
+    );
+  }
+
+  Future<void> readCatalog(
+    LoadToken token,
+    Future<void> Function(Stream<M3uParsed>) consume, {
+    bool limitBodyBytes = true,
+  }) async {
+    final uri = Uri.parse(playlistUrl);
+    final generation = _parseGeneration;
+    var effectiveUri = uri;
+    final operation = HttpOperation(
+      kStreamingM3uWorkload,
+      onReadMetrics: (m) => DiagnosticsLog.instance.add(
+        'http:playlist',
+        'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
+      ),
+    );
+    final parser = _M3uPlaylistParser();
+    void checkCancellation() {
+      if (token.isCancelled || _disposed || generation != _parseGeneration) {
+        throw const LoadCancelledException();
+      }
+    }
+
+    Stream<M3uParsed> batches(HttpClientResponse response) async* {
+      var batchCharacters = 0;
+      await for (final line in operation.readPlaylistLines(
+        response,
+        limitBodyBytes: limitBodyBytes,
+      )) {
+        checkCancellation();
+        parser.addLine(line);
+        batchCharacters += line.length;
+        if (parser.batchLength == 500 ||
+            (parser.batchLength > 0 && batchCharacters >= 1024 * 1024)) {
+          yield parser.takeBatch();
+          batchCharacters = 0;
+        }
+      }
+      parser.finish();
+      if (parser.batchLength != 0) yield parser.takeBatch();
+    }
+
+    Future<void>? reading;
+    try {
+      for (var attempt = 1; ; attempt++) {
+        final complete = await providerHttpGet<bool>(
+          uri,
+          client: _http,
+          operation: operation,
+          token: token,
+          headers: {HttpHeaders.userAgentHeader: ?userAgent},
+          onResponseUri: (redirected) => effectiveUri = redirected,
+          checkCancellation: checkCancellation,
+          readResponse: (response) async {
+            if (response.statusCode == HttpStatus.ok) {
+              await (reading = consume(batches(response)));
+              return true;
+            }
+            await response.take(0).drain<void>();
+            if (attempt == 1 && isTransientHttpStatus(response.statusCode)) {
+              return false;
+            }
+            throw StateError(
+              'HTTP ${response.statusCode} fetching ${redactUrl(uri)}',
+            );
+          },
+        );
+        if (complete) break;
+        await operation.wait(
+          Future<void>.delayed(const Duration(milliseconds: 600)),
+        );
+      }
+    } catch (_) {
+      // Timeout and cancellation abort the socket before the consumer finishes.
+      await reading?.catchError((Object _) {});
+      rethrow;
+    }
+    checkCancellation();
+    await _rememberHeader(
+      parser.headerEpgUrl,
+      parser.capability,
+      parser.rejectedRows,
+      effectiveUri,
+    );
+  }
+
+  Future<void> _rememberHeader(
+    String? header,
+    CatchupCapability parsedCapability,
+    int rejectedRows,
+    Uri effectiveUri,
+  ) async {
+    _headerEpgUrl = header;
     _effectivePlaylistUri = effectiveUri;
     _headerKnown = true;
-    final parsedCapability = parsed.catchupCapability;
     _catchupCapability = parsedCapability.supported
         ? CatchupCapability(
             mode: parsedCapability.mode,
@@ -572,10 +687,7 @@ class M3uSource
             template: parsedCapability.template,
           )
         : parsedCapability;
-    DiagnosticsLog.instance.add(
-      'parse:m3u',
-      'rejected_rows=${parsed.rejectedRows}',
-    );
+    DiagnosticsLog.instance.add('parse:m3u', 'rejected_rows=$rejectedRows');
     try {
       await const FlutterSecureStorage().write(
         key: _guideHeaderKey,
@@ -632,11 +744,12 @@ class M3uSource
     }
   }
 
-  Future<Uint8List> _download(
+  Future<T> _download<T extends Object>(
     Uri uri,
     HttpWorkloadPolicy policy, {
     required int generation,
     required LoadToken token,
+    required Future<T> Function(HttpOperation, HttpClientResponse) read,
     void Function(Uri)? onResponseUri,
   }) async {
     final operation = HttpOperation(
@@ -648,7 +761,7 @@ class M3uSource
     );
     for (var attempt = 1; ; attempt++) {
       try {
-        final bytes = await providerHttpGet<Uint8List?>(
+        final result = await providerHttpGet<T?>(
           uri,
           client: _http,
           operation: operation,
@@ -662,7 +775,7 @@ class M3uSource
           },
           readResponse: (resp) async {
             if (resp.statusCode == HttpStatus.ok) {
-              return await operation.readBytes(resp);
+              return read(operation, resp);
             }
             await operation.wait(resp.take(0).drain<void>());
             if (attempt >= 2 || !isTransientHttpStatus(resp.statusCode)) {
@@ -677,7 +790,7 @@ class M3uSource
             return null;
           },
         );
-        if (bytes != null) return bytes;
+        if (result != null) return result;
       } catch (error) {
         if (_disposed || generation != _parseGeneration) {
           throw const LoadCancelledException();
@@ -733,13 +846,22 @@ M3uParsed _parseM3uBytes(Uint8List bytes) =>
 /// goes through [M3uSource], which runs this on a background isolate.
 @visibleForTesting
 M3uParsed parseM3uPlaylist(String content) {
-  final channels = <Channel>[];
-  final categoryTitles = <String>{};
-  final mediaBuilder = M3uMediaBuilder();
+  final parser = _M3uPlaylistParser();
+  for (final line in const LineSplitter().convert(content)) {
+    parser.addLine(line);
+  }
+  parser.finish();
+  return parser.takeBatch();
+}
+
+class _M3uPlaylistParser {
+  var channels = <Channel>[];
+  var categoryTitles = <String>{};
+  var mediaBuilder = M3uMediaBuilder();
   String? headerEpgUrl;
   CatchupCapability capability = CatchupCapability.unsupported;
 
-  String? name, group, logo, tvgId;
+  String? _name, _group, _logo, _tvgId;
   String? mediaType;
   var isMedia = false, isRadio = false;
   String? entryUserAgent, entryReferer;
@@ -749,12 +871,13 @@ M3uParsed parseM3uPlaylist(String content) {
   var catchupDays = 0;
   var rejectedRows = 0;
   var hasPlaylistMarker = false;
+  var batchLength = 0;
+  var _liveCount = 0;
 
-  for (final raw in const LineSplitter().convert(
-    content.replaceFirst(RegExp(r'^\uFEFF'), ''),
-  )) {
-    final line = raw.trim();
-    if (line.isEmpty) continue;
+  void addLine(String raw) {
+    final trimmed = raw.trim();
+    final line = trimmed.startsWith('\uFEFF') ? trimmed.substring(1) : trimmed;
+    if (line.isEmpty) return;
 
     if (line.startsWith('#EXTM3U')) {
       hasPlaylistMarker = true;
@@ -770,18 +893,23 @@ M3uParsed parseM3uPlaylist(String content) {
           template: headerCatchupSource,
         );
       }
-      continue;
+      return;
     }
     if (line.startsWith('#EXTINF')) {
       hasPlaylistMarker = true;
-      if (name != null) entryUserAgent = entryReferer = null;
-      tvgId = _attr(line, 'tvg-id');
-      logo = _attr(line, 'tvg-logo');
-      group = _attr(line, 'group-title');
-      name = _name(line);
-      mediaType = _attr(line, 'stream-type') ?? _attr(line, 'media-type') ?? _attr(line, 'type');
-      isMedia = _attr(line, 'media')?.toLowerCase() == 'true' ||
-          _attr(line, 'media-dir') != null || _attr(line, 'media-size') != null;
+      if (_name != null) entryUserAgent = entryReferer = null;
+      _tvgId = _attr(line, 'tvg-id');
+      _logo = _attr(line, 'tvg-logo');
+      _group = _attr(line, 'group-title');
+      _name = _entryTitle(line);
+      mediaType =
+          _attr(line, 'stream-type') ??
+          _attr(line, 'media-type') ??
+          _attr(line, 'type');
+      isMedia =
+          _attr(line, 'media')?.toLowerCase() == 'true' ||
+          _attr(line, 'media-dir') != null ||
+          _attr(line, 'media-size') != null;
       isRadio = _attr(line, 'radio')?.toLowerCase() == 'true';
       final entryMode = _attr(line, 'catchup')?.toLowerCase();
       catchupSource = entryMode == 'none'
@@ -802,15 +930,19 @@ M3uParsed parseM3uPlaylist(String content) {
           );
         }
       }
-      continue;
+      return;
     }
     if (line.startsWith('#EXTGRP:')) {
-      if (name != null && (group == null || group.isEmpty)) group = line.substring(8).trim();
-      continue;
+      if (_name != null && (_group?.isNotEmpty != true)) {
+        _group = line.substring(8).trim();
+      }
+      return;
     }
     if (line.startsWith('#EXT-X-PLAYLIST-TYPE:')) {
-      if (name != null && line.substring(21).trim().toUpperCase() == 'VOD') isMedia = true;
-      continue;
+      if (_name != null && line.substring(21).trim().toUpperCase() == 'VOD') {
+        isMedia = true;
+      }
+      return;
     }
     if (line.startsWith('#EXTVLCOPT:')) {
       final option = line.substring('#EXTVLCOPT:'.length);
@@ -820,69 +952,92 @@ M3uParsed parseM3uPlaylist(String content) {
         final value = option.substring(separator + 1).trim();
         if (value.isNotEmpty && !RegExp(r'[\x00-\x1f\x7f]').hasMatch(value)) {
           if (key == 'http-user-agent') entryUserAgent = value;
-          if (key == 'http-referrer' || key == 'http-referer') entryReferer = value;
+          if (key == 'http-referrer' || key == 'http-referer') {
+            entryReferer = value;
+          }
         }
       }
-      continue;
+      return;
     }
-    if (line.startsWith('#')) continue;
+    if (line.startsWith('#')) return;
 
     // A URL line completes the pending channel.
-    if (name != null) {
+    if (_name != null) {
+      final group = _group;
       final g = (group == null || group.isEmpty) ? 'Uncategorized' : group;
       final entry = Channel(
-          // The stream URL is the only per-entry unique key. tvg-id must NOT
-          // be the id: playlists commonly reuse one tvg-id across quality
-          // variants (HD/FHD/4K of the same channel), and the SQLite cache's
-          // (source_id, id) primary key would silently drop all but one.
-          // tvg-id stays in extra for the XMLTV EPG mapping.
-          id: stableM3uChannelId(line),
-          name: name,
-          number: channels.length + 1,
-          logo: (logo != null && logo.isNotEmpty) ? logo : null,
-          categoryId: g,
-          archiveDays: catchupSource == null
-              ? 0
-              : (catchupDays > 0 ? catchupDays : kDefaultArchiveDays),
-          extra: {
-            'url': line,
-            'streamUserAgent': ?entryUserAgent,
-            'streamReferer': ?entryReferer,
-            if (tvgId != null && tvgId.isNotEmpty) 'tvgId': tvgId,
-            ...?catchupSource == null
-                ? null
-                : <String, dynamic>{'catchupSource': catchupSource},
-          },
-        );
-      if (!mediaBuilder.add(entry, mediaType: mediaType, media: isMedia, radio: isRadio)) {
+        // The stream URL is the only per-entry unique key. tvg-id must NOT
+        // be the id: playlists commonly reuse one tvg-id across quality
+        // variants (HD/FHD/4K of the same channel), and the SQLite cache's
+        // (source_id, id) primary key would silently drop all but one.
+        // tvg-id stays in extra for the XMLTV EPG mapping.
+        id: stableM3uChannelId(line),
+        name: _name!,
+        number: _liveCount + 1,
+        logo: _logo?.isNotEmpty == true ? _logo : null,
+        categoryId: g,
+        archiveDays: catchupSource == null
+            ? 0
+            : (catchupDays > 0 ? catchupDays : kDefaultArchiveDays),
+        extra: {
+          'url': line,
+          'streamUserAgent': ?entryUserAgent,
+          'streamReferer': ?entryReferer,
+          if (_tvgId != null && _tvgId!.isNotEmpty) 'tvgId': _tvgId,
+          ...?catchupSource == null
+              ? null
+              : <String, dynamic>{'catchupSource': catchupSource},
+        },
+      );
+      if (!mediaBuilder.add(
+        entry,
+        mediaType: mediaType,
+        media: isMedia,
+        radio: isRadio,
+      )) {
         categoryTitles.add(g);
         channels.add(entry);
+        _liveCount++;
       }
-      name = group = logo = tvgId = catchupSource = null;
+      batchLength++;
+      _name = _group = _logo = _tvgId = catchupSource = null;
       entryUserAgent = entryReferer = null;
       catchupDays = 0;
     }
   }
-  if (!hasPlaylistMarker) {
-    throw const FormatException('Invalid M3U playlist response');
-  }
-  if (name != null) rejectedRows++;
 
-  final categories = (categoryTitles.toList()..sort())
-      .map((t) => Category(id: t, title: t))
-      .toList();
-  return M3uParsed(
-    channels,
-    categories,
-    headerEpgUrl,
-    capability,
-    rejectedRows,
-    mediaBuilder.build(),
-  );
+  void finish() {
+    if (!hasPlaylistMarker) {
+      throw const FormatException('Invalid M3U playlist response');
+    }
+    if (_name != null) rejectedRows++;
+  }
+
+  M3uParsed takeBatch() {
+    final batch = M3uParsed(
+      channels,
+      (categoryTitles.toList()..sort())
+          .map((title) => Category(id: title, title: title))
+          .toList(),
+      headerEpgUrl,
+      capability,
+      rejectedRows,
+      mediaBuilder.build(),
+    );
+    channels = <Channel>[];
+    categoryTitles.clear();
+    mediaBuilder = M3uMediaBuilder();
+    batchLength = 0;
+    return batch;
+  }
 }
 
-String? _attr(String line, String key) =>
-    RegExp('$key="([^"]*)"').firstMatch(line)?.group(1);
+final _attributePatterns = <String, RegExp>{};
+
+String? _attr(String line, String key) => _attributePatterns
+    .putIfAbsent(key, () => RegExp('$key="([^"]*)"'))
+    .firstMatch(line)
+    ?.group(1);
 
 String? _headerEpgAttribute(String line) {
   final matches = RegExp(
@@ -900,7 +1055,7 @@ String? _headerEpgAttribute(String line) {
   return values.isEmpty ? null : values.join(',');
 }
 
-String _name(String extinf) {
+String _entryTitle(String extinf) {
   final lastQuote = extinf.lastIndexOf('"');
   final comma = extinf.indexOf(',', lastQuote == -1 ? 0 : lastQuote);
   return comma == -1 ? '' : extinf.substring(comma + 1).trim();

@@ -165,6 +165,7 @@ copy(require.resolve('core-js-bundle/minified.js'), 'polyfills.js');
 transform(require.resolve('pako/dist/pako_inflate.min.js'), 'pako-inflate.js');
 copy(path.join(path.dirname(require.resolve('pako')), 'LICENSE'), 'licenses/pako-LICENSE.txt');
 transform(path.join(project, 'platform/streaming_gzip.js'), 'platform/streaming_gzip.js');
+transform(path.join(project, 'platform/m3u_disk_catalog.js'), 'platform/m3u_disk_catalog.js');
 if (!(options.platformModules || []).some((item) =>
   (typeof item === 'string' ? item : item.relative) === 'platform/epg_files.js')) {
   transform(path.join(project, 'platform/epg_files.js'), 'platform/epg_files.js');

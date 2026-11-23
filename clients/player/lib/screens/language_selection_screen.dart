@@ -58,7 +58,7 @@ class _LanguageSelectionScreenState extends State<LanguageSelectionScreen> {
   Widget _buildScreen(BuildContext context) {
     final deviceLanguage = _controller.deviceLanguage;
     final languages = [
-      ?deviceLanguage,
+      if (deviceLanguage != null) deviceLanguage,
       ...AppLanguage.values.where((language) => language != deviceLanguage),
     ];
     final direction = _selected == AppLanguage.arabic

@@ -49,8 +49,9 @@ function harness(settings = {}) {
   const core = {
     appLanguages: () => JSON.stringify([{code:'en',name:'English'}]),
     canCatchup: () => false,
-    createSource() {
-      return {
+    createSource(_config, _transport, onImportProgress) {
+      if (onImportProgress && settings.captureImportProgress) settings.captureImportProgress(onImportProgress);
+      const engine = {
         invoke(method, raw) {
           const args = JSON.parse(raw || '{}');
           calls.push({method,args});
@@ -61,6 +62,14 @@ function harness(settings = {}) {
           if (method === 'connect') return Promise.resolve('null');
           if (method === 'categories') return Promise.resolve(JSON.stringify([{id:'tv',title:'TV'}]));
           if (method === 'channels') return Promise.resolve(JSON.stringify(settings.channels || [{id:'channel-1',name:'Channel 1',categoryId:'tv'}]));
+          if (method === 'catalogScope') {
+            if (settings.diskCatalog) {
+              prepared.disk = true;
+              prepared.diskCommitted = settings.diskCommitted === true;
+            }
+            return Promise.resolve(JSON.stringify(settings.diskCatalog === true));
+          }
+          if (method === 'catalogRemove') return Promise.resolve('true');
           if (method === 'catalogState') {
             if (calls.some(call => call.method === 'prepareCatalog')) postPrepareState.resolve();
             return Promise.resolve(JSON.stringify(prepared));
@@ -83,6 +92,7 @@ function harness(settings = {}) {
                 ? {kind:args.kind,count:0,syncedAt:null,complete:false} : result;
               if (row.complete === true) prepared.kinds[args.kind] = {complete:true,count:row.count,syncedAt:row.syncedAt};
               completedPrepares++;
+              if (prepared.disk && kinds.every(kind => prepared.kinds[kind].complete)) prepared.diskCommitted = true;
               return JSON.stringify(row);
             });
           }
@@ -96,7 +106,13 @@ function harness(settings = {}) {
               channels:[{id:'channel-1',name:'Channel 1',categoryId:'tv'}],syncedAt,refreshDue:false}));
           }
           if (method === 'mediaCategories') return Promise.resolve(JSON.stringify([{id:args.kind+'-cat',title:args.kind}]));
+          if (method === 'mediaByIds') return Promise.resolve(JSON.stringify(args.ids.includes('movie-42') ?
+            [{id:'movie-42',kind:'movie',title:'The saved title',categoryId:'movie-cat'}] : []));
+          if (method === 'searchMedia') return Promise.resolve(JSON.stringify([{id:'match-1',kind:args.kind,title:'Match 1'}]));
           if (method === 'mediaItemsPage') {
+            if (args.query === 'match') return Promise.resolve(JSON.stringify({
+              items:[{id:'match-'+args.page,kind:args.kind,title:'Match '+args.page}],page:args.page,hasMore:args.page < 3
+            }));
             const item = {id:args.kind+'-ready',kind:args.kind,title:args.kind+' item',categoryId:args.kind+'-cat'};
             return Promise.resolve(JSON.stringify({items:[item],page:1,totalPages:1}));
           }
@@ -143,6 +159,11 @@ function harness(settings = {}) {
         },
         dispose() { return Promise.resolve(); }
       };
+      return settings.workerReplies ? {
+        invoke: (method, args) => engine.invoke(method, args).then(JSON.parse),
+        restoreCatalog: (scope, snapshot) => engine.invoke('importCatalog', JSON.stringify({scope,snapshot})).then(JSON.parse),
+        dispose: engine.dispose
+      } : engine;
     },
     hashPin: value => Promise.resolve(value),
     newSourceId: () => 'generated-source',
@@ -190,6 +211,7 @@ function harness(settings = {}) {
     onProgress:() => { if (api) calls.push({state:copy(api.getState())}); }
   };
   if (settings.now) options.now = settings.now;
+  if (settings.diskCatalog) options.requireCatalogEncryption = true;
   if (settings.timer) { options.setTimeout = settings.timer.setTimeout; options.clearTimeout = settings.timer.clearTimeout; }
   if (settings.catalogStore) options.catalogStore = settings.catalogStore;
   else if (settings.batchStore) options.catalogStore = {
@@ -241,6 +263,49 @@ function harness(settings = {}) {
   };
 }
 
+test('foreground catalog import publishes phases independently from section progress', async t => {
+  let reportPhase;
+  const timer = virtualTimer();
+  const kit = harness({timer, captureImportProgress: callback => { reportPhase = callback; }});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  const loading = kit.api.query('sources.load', {id:'fixture-source'});
+  await kit.catalogStarted;
+  assert.equal(typeof reportPhase, 'function');
+  for (const phase of ['waiting', 'downloading', 'downloading', 'processing', 'saving']) reportPhase(phase);
+  const events = kit.calls.flatMap(call => call.state?.importProgress ? [call.state] : []);
+  assert.deepEqual(events.map(state => state.importProgress), ['waiting', 'downloading', 'processing', 'saving']);
+  assert.ok(events.every(state => state.loadingStage === 'catalog-live' && state.catalogPreparation.sections.live.status === 'pending'));
+  kinds.forEach(kind => kit.sectionGates[kind].resolve({kind, count:1, syncedAt, complete:true}));
+  await loading;
+  assert.equal(kit.api.getState().importProgress, null);
+
+  timer.run(0);
+  await kit.epgStarted;
+  reportPhase('downloading');
+  assert.equal(kit.api.getState().importProgress, null, 'background guide work cannot re-open import progress');
+  kit.epgGate.resolve([]);
+});
+
+test('cancelling a source import clears its phase and ignores late events', async t => {
+  let reportPhase;
+  const kit = harness({captureImportProgress: callback => { reportPhase = callback; }});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  const loading = kit.api.query('sources.load', {id:'fixture-source'});
+  const cancelled = assert.rejects(loading, {code:'cancelled'});
+  await kit.catalogStarted;
+  assert.equal(typeof reportPhase, 'function');
+  reportPhase('waiting');
+  assert.equal(kit.api.getState().importProgress, 'waiting');
+  await kit.api.query('sources.cancel');
+  assert.equal(kit.api.getState().importProgress, null);
+  reportPhase('processing');
+  assert.equal(kit.api.getState().importProgress, null);
+  kinds.forEach(kind => kit.sectionGates[kind].resolve({kind, count:1, syncedAt, complete:true}));
+  await cancelled;
+});
+
 function legacyBatchStore(raw) {
   const batches=new Map();
   return {protectKeys(keys){assert.equal(keys.length,4);return()=>{};},
@@ -256,6 +321,111 @@ function legacyBatchStore(raw) {
     discardBatch(key,token){const value=batches.get(key);if(value&&value.token===token)batches.delete(key);return Promise.resolve(true);},
     mark(){return Promise.resolve(true);},remove(key){batches.delete(key);return Promise.resolve(true);}};
 }
+
+test('disk catalog commits first-use rows without restoring or exporting a legacy snapshot', async t => {
+  const kit = harness({diskCatalog:true, batchStore:{}, timer:virtualTimer()});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  kinds.forEach(kind => kit.sectionGates[kind].resolve({kind,count:1,syncedAt,complete:true}));
+
+  const loaded = await kit.api.query('sources.load',{id:'fixture-source'});
+
+  assert.equal(loaded.cachePersisted,true);
+  assert.deepEqual(kit.calls.find(call => call.method === 'catalogScope')?.args,
+    {scope:'generated-source', requireEncryption:true});
+  assert.equal(kit.calls.some(call => /^(importCatalog|beginCatalogImport|exportCatalog|beginCatalogExport)$/.test(call.method)),false);
+  assert.equal((await kit.api.query('catalog.items',{kind:'movie',page:1})).items[0].id,'movie-ready');
+});
+
+test('disk catalog reopens its committed rows without a provider catalog refresh', async t => {
+  const readKeys = [];
+  const kit = harness({diskCatalog:true, diskCommitted:true, timer:virtualTimer(), catalogStore:{
+    read(key) { readKeys.push(key); return Promise.resolve(null); }
+  }});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  kinds.forEach(kind => { kit.prepared.kinds[kind] = {complete:true,count:1,syncedAt}; });
+
+  const loaded = await kit.api.query('sources.load',{id:'fixture-source'});
+
+  assert.equal(loaded.cachePersisted,true);
+  assert.deepEqual(loaded.channels.map(row => row.id),['channel-1']);
+  assert.ok(readKeys.every(key => key === 'b'.repeat(64) || key === 'c'.repeat(64)),
+    'a committed disk catalog has no legacy catalog reads');
+  assert.equal(kit.calls.some(call => call.method === 'prepareCatalog'),false);
+});
+
+test('searches of a committed disk catalog can return subsequent result pages', async t => {
+  const kit = harness({diskCatalog:true,diskCommitted:true,timer:virtualTimer()});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  kinds.forEach(kind => { kit.prepared.kinds[kind] = {complete:true,count:1,syncedAt}; });
+  await kit.api.query('sources.load',{id:'fixture-source'});
+
+  const page = await kit.api.query('catalog.items',{kind:'movie',query:'match',page:2});
+
+  assert.equal(page.page,2);
+  assert.equal(page.hasMore,true);
+  assert.deepEqual(page.items.map(item => item.id),['match-2']);
+});
+
+test('enabling the disk catalog can still open the saved channel list during an offline upgrade', async t => {
+  const kit = harness({diskCatalog:true, timer:virtualTimer(), catalogStore:{
+    read(key) { return Promise.resolve(key === 'd'.repeat(64) ? {raw:'saved-live',token:'legacy'} : null); }
+  }});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+
+  const loaded = await kit.api.query('sources.load',{id:'fixture-source'});
+
+  assert.equal(loaded.cachePersisted,true);
+  assert.deepEqual(loaded.channels.map(row => row.id),['channel-1']);
+  assert.equal(kit.calls.some(call => call.method === 'prepareCatalog'),false);
+});
+
+test('a disk refresh that runs out of storage keeps the loaded live rows without requesting them again', async t => {
+  const timer = virtualTimer(), kit = harness({diskCatalog:true,diskCommitted:true,timer,
+    now:() => syncedAt, epgCapability:'unsupported', workerReplies:true});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  kinds.forEach(kind => { kit.prepared.kinds[kind] = {complete:true,count:1,syncedAt}; });
+  kit.prepared.kinds.live.syncedAt -= 86400001;
+  await kit.api.query('sources.load',{id:'fixture-source'});
+  assert.equal(timer.run(0),1);
+  await kit.prepareStartedByKind.live;
+  kit.sectionGates.live.resolve({__tvbroM3uDiskError:'storage_full'});
+  await kit.postPrepareState;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(kit.calls.filter(call => call.method === 'channels').length,1);
+  assert.deepEqual((await kit.api.query('sources.catalog')).channels.map(row => row.id),['channel-1']);
+});
+
+test('favorites from an inactive disk catalog resolve by ID within their profile', async t => {
+  const kit = harness({diskCatalog:true, timer:virtualTimer()});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  await kit.options.userState.set('samsung_favorites_v1', JSON.stringify({'generated-source':[
+    {sourceId:'fixture-source',item:{id:'movie-42',kind:'movie',title:'movie-42'},unresolved:true}
+  ]}));
+
+  const favorites = await kit.api.query('favorites.list');
+
+  assert.equal(favorites.items[0].item.title,'The saved title');
+  assert.deepEqual(kit.calls.find(call => call.method === 'catalogScope')?.args,
+    {scope:'generated-source',requireEncryption:true});
+  assert.deepEqual(kit.calls.find(call => call.method === 'mediaByIds')?.args,{kind:'movie',ids:['movie-42']});
+  assert.equal(kit.calls.some(call => call.method === 'allMediaItems'),false);
+});
+
+test('removing an M3U source cleans up the disk catalog within its profile', async t => {
+  const kit = harness({diskCatalog:true, timer:virtualTimer()});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+
+  assert.deepEqual(await kit.api.query('sources.remove',{id:'fixture-source'}),[]);
+  assert.deepEqual(kit.calls.find(call => call.method === 'catalogRemove')?.args,
+    {scope:'generated-source',requireEncryption:true});
+});
 
 test('cold source load persists usable catalogs and opens before the EPG attempt finishes', async t => {
   const disk = filesystem(), kit = harness({catalogStore:disk.restart()});
@@ -298,8 +468,8 @@ test('cold source load persists usable catalogs and opens before the EPG attempt
   assert.equal(new Set(kit.calls.filter(call => call.method === 'prepareCatalog').map(call => call.args.refreshKey)).size,1,
     'all catalog kinds share one canonical refresh batch key');
   assert.equal(kit.calls.filter(call => call.method === 'epg').length,1);
-  assert.equal(kit.calls.some(call=>call.state&&call.state.loadingStage==='catalog-persist'),true,
-    'the final preparation stage is visible after the EPG attempt completes');
+  assert.ok(kit.calls.some(call => call.state?.loadingStage === 'catalog-persist' && call.state.importProgress === 'saving'),
+    'the legacy snapshot write publishes the saving phase');
   assert.equal(loaded.channels.length,1);
   assert.equal(loaded.preparation.sections.live.status,'ready');
   assert.equal(loaded.preparation.sections.movie.status,'ready');
@@ -312,6 +482,28 @@ test('cold source load persists usable catalogs and opens before the EPG attempt
 
   const moviePage = await kit.api.query('catalog.items',{kind:'movie',page:1});
   assert.equal(moviePage.items[0].id,'movie-ready','a prepared movie root remains available after another section fails');
+});
+
+test('an oversized M3U fails the source load with one actionable error before guide or catalog writes', async t => {
+  const kit = harness();
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  const load = kit.api.query('sources.load',{id:'fixture-source'});
+  await kit.catalogStarted;
+  kinds.forEach(kind => kit.sectionGates[kind].resolve({__tvbroPlaylistSizeLimit:true}));
+  await assert.rejects(load,{code:'playlist_size_limit'});
+  assert.equal(kit.calls.some(call => ['epg','beginCatalogExport'].includes(call.method)),false);
+});
+
+test('a first disk import reports exhausted storage with a recovery message', async t => {
+  const kit = harness({diskCatalog:true, timer:virtualTimer()});
+  t.after(() => kit.api.dispose());
+  await kit.seedSource();
+  const load = kit.api.query('sources.load',{id:'fixture-source'});
+  await kit.catalogStarted;
+  kinds.forEach(kind => kit.sectionGates[kind].resolve({__tvbroM3uDiskError:'storage_full'}));
+  await assert.rejects(load,{code:'catalog_storage_full',message:/Free up storage and try again/});
+  assert.equal(kit.calls.some(call => ['epg','beginCatalogExport'].includes(call.method)),false);
 });
 
 test('real Samsung disk cache survives failed EPG and opens after restart without catalog downloads', async t => {

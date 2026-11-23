@@ -18,11 +18,20 @@ class M3uMediaCatalog {
 }
 
 final _m3uEpisodePatterns = [
-  RegExp(r'\bS(\d{1,3})[\s._-]*E(\d{1,4})\b', caseSensitive: false),
-  RegExp(r'\b(\d{1,3})x(\d{1,4})\b', caseSensitive: false),
-  RegExp(
-    r'\b(?:Season|Sezon)\s*(\d{1,3})[\s._-]*(?:Episode|Ep\.?|Odcinek|Odc\.?)\s*(\d{1,4})\b',
-    caseSensitive: false,
+  (
+    pattern: RegExp(r'\bS(\d{1,3})[\s._-]*E(\d{1,4})\b', caseSensitive: false),
+    needsVodHint: false,
+  ),
+  (
+    pattern: RegExp(r'\b(\d{1,3})x(\d{1,4})\b', caseSensitive: false),
+    needsVodHint: true,
+  ),
+  (
+    pattern: RegExp(
+      r'\b(?:Season|Sezon)\s*(\d{1,3})[\s._-]*(?:Episode|Ep\.?|Odcinek|Odc\.?)\s*(\d{1,4})\b',
+      caseSensitive: false,
+    ),
+    needsVodHint: false,
   ),
 ];
 final _m3uMovieExtension = RegExp(
@@ -51,10 +60,20 @@ class M3uMediaBuilder {
     final uri = Uri.tryParse(entry.extra['url'] as String? ?? '');
     final parts = uri?.pathSegments ?? const <String>[];
     final pathKind = parts.isEmpty ? '' : parts.first.toLowerCase();
+    late final videoFile = _m3uMovieExtension.hasMatch(uri?.path ?? '');
+    late final hasVodHint =
+        media ||
+        pathKind == 'series' ||
+        explicit == 'series' ||
+        explicit == 'episode' ||
+        videoFile;
     RegExpMatch? episode;
-    for (final pattern in _m3uEpisodePatterns) {
-      episode = pattern.firstMatch(entry.name);
-      if (episode != null) break;
+    for (final (:pattern, :needsVodHint) in _m3uEpisodePatterns) {
+      final match = pattern.firstMatch(entry.name);
+      // Live channel names can contain the same shorthand, e.g. 24x7 or 1x2.
+      if (match == null || (needsVodHint && !hasVodHint)) continue;
+      episode = match;
+      break;
     }
     final ContentKind kind;
     if (explicit == 'series' || explicit == 'episode') {
@@ -73,7 +92,7 @@ class M3uMediaBuilder {
       kind = ContentKind.movie;
     } else if (episode != null) {
       kind = ContentKind.episode;
-    } else if (_m3uMovieExtension.hasMatch(uri?.path ?? '')) {
+    } else if (videoFile) {
       kind = ContentKind.movie;
     } else {
       return false;

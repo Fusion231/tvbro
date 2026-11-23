@@ -176,7 +176,7 @@ void main() {
       'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
     );
     expect(FocusManager.instance.primaryFocus, same(node));
-    expect(find.text('Resume from 12:00'), findsOneWidget);
+    expect(find.text('Resume from 12:00 · Supporter'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

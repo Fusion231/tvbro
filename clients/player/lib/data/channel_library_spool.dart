@@ -18,19 +18,29 @@ class ChannelLibrarySpool {
   static Future<ChannelLibrarySpool> create(
     List<Channel> channels,
     SecretLocatorVault vault,
+  ) => fromRows(_rows(channels), vault);
+
+  static Future<ChannelLibrarySpool> fromRows(
+    Stream<List<Map<String, Object?>>> rows,
+    SecretLocatorVault vault,
   ) async {
     final directory = await Directory.systemTemp.createTemp('tvbro_channels_');
     final file = File('${directory.path}${Platform.pathSeparator}sealed.rows');
+    var count = 0;
     try {
       final output = await file.open(mode: FileMode.write);
       try {
-        await for (final bytes in vault.encodeCacheRows(_rows(channels))) {
+        final counted = rows.map((batch) {
+          count += batch.length;
+          return batch;
+        });
+        await for (final bytes in vault.encodeCacheRows(counted)) {
           await output.writeFrom(bytes);
         }
       } finally {
         await output.close();
       }
-      return ChannelLibrarySpool._(directory, file, channels.length);
+      return ChannelLibrarySpool._(directory, file, count);
     } catch (_) {
       await _delete(directory);
       rethrow;

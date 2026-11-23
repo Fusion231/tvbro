@@ -38,7 +38,7 @@ test('concatenated gzip members are validated even across separate pushes',()=>{
   assert.equal(Buffer.concat([...first.chunks,...second.chunks,...end.chunks].map(value=>Buffer.from(value,'base64'))).toString(),'onetwo');
 });
 test('a 40 MiB expansion is emitted in bounded batches without accumulating a result',()=>{
-  const body=zlib.gzipSync(Buffer.alloc(40*1024*1024,120),{level:9}),push=create(64*1024*1024);
+  const body=zlib.gzipSync(Buffer.alloc(40*1024*1024,120),{level:9}),push=create(null);
   let size=0,peak=0;
   for(let offset=0;offset<body.length;offset+=1024) {
     const value=JSON.parse(push(body.subarray(offset,offset+1024).toString('base64'),false));assert.equal(value.error,undefined);

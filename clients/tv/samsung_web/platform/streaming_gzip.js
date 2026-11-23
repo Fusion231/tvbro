@@ -6,13 +6,13 @@
   environment = environment || (typeof global !== 'undefined' ? global : {});
   var pako = environment.pako || (typeof require === 'function' ? require('pako') : null);
   var inflater = null, total = 0, failure = null, batch = [], batchSize = 0, seen = false, finished = false;
-  if (!pako || typeof pako.Inflate !== 'function' || typeof maximum !== 'number' ||
-      !isFinite(maximum) || maximum < 1 || maximum > 4294967296 || Math.floor(maximum) !== maximum) failure = 'invalid-gzip';
+  if (!pako || typeof pako.Inflate !== 'function' || maximum !== null && (typeof maximum !== 'number' ||
+      !isFinite(maximum) || maximum < 1 || maximum > 4294967296 || Math.floor(maximum) !== maximum)) failure = 'invalid-gzip';
   function start() {
     inflater = new pako.Inflate({windowBits:31,chunkSize:32768});
     inflater.onData = function (bytes) {
       total += bytes.length; batchSize += bytes.length;
-      if (total > maximum) { failure = 'limit'; throw new Error('Decoded guide work limit'); }
+      if (maximum !== null && total > maximum) { failure = 'limit'; throw new Error('Decoded response exceeds its limit'); }
       // One KiB of DEFLATE input can expand to about one MiB; never queue a
       // whole inflated block before the Dart stream can apply backpressure.
       if (batchSize > 2 * 1024 * 1024) { failure = 'invalid-gzip'; throw new Error('Invalid gzip batch'); }

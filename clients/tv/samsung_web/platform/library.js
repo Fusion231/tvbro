@@ -71,6 +71,11 @@
     update(stage);
     return update;
   }
+  function setImportProgress(source, phase) {
+    if (source.importProgress === phase) return;
+    source.importProgress = phase;
+    if (options.onProgress) options.onProgress();
+  }
   function decode(key, fallback, state) { return parsed((state || storage.read())[key], fallback); }
   function profiles(state) {
     var rows = decode(K.profiles, [], state);
@@ -521,7 +526,7 @@
     if (!source) return Promise.reject(error('Najpierw wybierz źródło.'));
     if (source.catalogCommit) return source.catalogCommit.then(function () { return invoke(method, args, source); });
     var input = JSON.stringify(args || {});
-    var share = ['categories', 'channels', 'mediaCategories', 'mediaItemsPage', 'mediaItems', 'allMediaItems', 'searchMedia', 'mediaDetails'].indexOf(method) >= 0;
+    var share = ['categories', 'channels', 'mediaCategories', 'mediaItemsPage', 'mediaItems', 'allMediaItems', 'mediaByIds', 'searchMedia', 'mediaDetails'].indexOf(method) >= 0;
     var key = method + '\n' + input;
     if (method === 'invalidate') { source.readCache = null; source.reads = null; }
     // Keep serialized metadata only: callers can mutate their result without
@@ -570,7 +575,12 @@
     }
     return pending.then(function (raw) {
       if ((method === 'cacheKey' || method === 'guideCacheKey') && typeof raw === 'string' && /^[a-f0-9]{64}$/.test(raw)) return raw;
-      if (method !== 'epg') return parsed(raw);
+      if (method !== 'epg') {
+        var result = parsed(raw);
+        if (result && result.__tvbroPlaylistSizeLimit === true) throw error('This playlist is too large for this TV. Ask your provider for a smaller playlist and update the source link.', 'playlist_size_limit');
+        if (result && result.__tvbroM3uDiskError === 'storage_full') throw error('This TV is out of space for the playlist. Free up storage and try again.', 'catalog_storage_full');
+        return result;
+      }
       var value;
       try { value = parsed(raw); } catch (_) { throw epgError('epg_invalid_data'); }
       if (value && value.__tvbroEpgError === 1) throw epgError(value.code, value.status, value.causeCode, value.retryAt);
@@ -582,19 +592,25 @@
     });
   }
   function check(expected) { if (expected !== revision) throw error('Wczytywanie anulowano.', 'cancelled'); }
+  function catalogScopeArgs(scope) { return { scope: scope, requireEncryption: options.requireCatalogEncryption === true }; }
+  function bindDiskCatalog(source) {
+    if (source.config.kind !== 'm3u') return Promise.resolve(false);
+    return engineValue(source.engine, 'catalogScope', catalogScopeArgs(source.cacheScope)).catch(function () { return false; })
+      .then(function (ready) { return (source.diskCatalog = ready === true); });
+  }
   function removeStoredSource(config, scope) {
-    if (!catalogStore || !config) return Promise.resolve();
+    if (!config || typeof createSource !== 'function' || (!catalogStore && config.kind !== 'm3u')) return Promise.resolve();
     var engine;
     return Promise.resolve().then(function () {
       engine = createSource(JSON.stringify(config), function () { return Promise.reject(error('Wczytywanie anulowano.', 'cancelled')); });
-      return Promise.all(['cacheKey', 'guideCacheKey', 'legacyCacheKey', 'legacyGuideCacheKey'].map(function (method) {
-        return engine.invoke(method, JSON.stringify({ scope: scope }));
+      var disk = config.kind === 'm3u' && engineValue(engine, 'catalogRemove', catalogScopeArgs(scope)).catch(function () {});
+      var snapshots = catalogStore && Promise.all(['cacheKey', 'guideCacheKey', 'legacyCacheKey', 'legacyGuideCacheKey'].map(function (method) {
+        return engine.invoke(method, JSON.stringify({ scope: scope })).then(function (raw) {
+          var key = typeof raw === 'string' && /^[a-f0-9]{64}$/.test(raw) ? raw : parsed(raw);
+          return catalogStore.remove(key);
+        }).catch(function () {});
       }));
-    }).then(function (keys) {
-      return Promise.all(keys.map(function (raw) {
-        var key = typeof raw === 'string' && /^[a-f0-9]{64}$/.test(raw) ? raw : parsed(raw);
-        return catalogStore.remove(key);
-      }));
+      return Promise.all([disk, snapshots]);
     }).catch(function () {}).then(function () { if (engine) return engine.dispose(); });
   }
   function engineValue(engine, method, args) {
@@ -602,8 +618,9 @@
       return engine.restoreCatalog ? raw : parsed(raw);
     });
   }
-  function migrateLegacySourceCache(config, replacement, scope, engineOverride, allowUnpersistedCache) {
-    if (!catalogStore || typeof catalogStore.read !== 'function' || !config) return Promise.resolve(false);
+  function migrateLegacySourceCache(config, replacement, scope, engineOverride, allowUnpersistedCache, skipCatalog) {
+    var hasStore = catalogStore && typeof catalogStore.read === 'function';
+    if (!config || typeof createSource !== 'function' || !hasStore && !(replacement && config.kind === 'm3u')) return Promise.resolve(false);
     var engine = engineOverride || null, replacementEngine = null, protectionLease = null, migrationPreserveKeys = null,
       failed = error(cacheMigrationMessage, 'cache_migration_failed');
     function releaseProtectionLease() {
@@ -740,18 +757,26 @@
     }).then(function (keys) {
       if (!keys) return false;
       var snapshotKeys = { current: keys[0], legacy: keys[1], currentGuide: keys[2], legacyGuide: keys[3] };
+      if (!hasStore) return /^[a-f0-9]{64}$/.test(snapshotKeys.current);
       if (!/^[a-f0-9]{64}$/.test(snapshotKeys.current) || !/^[a-f0-9]{64}$/.test(snapshotKeys.legacy) ||
           snapshotKeys.current === snapshotKeys.legacy) return false;
+      var disk = replacement ? { config: config, engine: engine, cacheScope: scope } : null;
+      var state = disk ? bindDiskCatalog(disk).then(function (ready) {
+        return ready ? engineValue(engine, 'catalogState', {}).catch(function () {}) : null;
+      }) : Promise.resolve(null);
+      return state.then(function (diskState) { return restoreLegacy(snapshotKeys, skipCatalog || diskState && diskState.diskCommitted === true); });
+    });
+    function restoreLegacy(snapshotKeys, guideOnly) {
       migrationPreserveKeys = [snapshotKeys.current, snapshotKeys.currentGuide,
         snapshotKeys.legacy, snapshotKeys.legacyGuide];
       if (typeof catalogStore.protectKeys === 'function') {
         protectionLease = catalogStore.protectKeys(migrationPreserveKeys);
       }
       return Promise.all([
-        catalogStore.read(snapshotKeys.current), catalogStore.read(snapshotKeys.legacy),
+        guideOnly ? null : catalogStore.read(snapshotKeys.current), guideOnly ? null : catalogStore.read(snapshotKeys.legacy),
         catalogStore.read(snapshotKeys.currentGuide), catalogStore.read(snapshotKeys.legacyGuide),
-        typeof catalogStore.readBatch === 'function' ? catalogStore.readBatch(snapshotKeys.current) : null,
-        typeof catalogStore.readBatch === 'function' ? catalogStore.readBatch(snapshotKeys.legacy) : null
+        !guideOnly && typeof catalogStore.readBatch === 'function' ? catalogStore.readBatch(snapshotKeys.current) : null,
+        !guideOnly && typeof catalogStore.readBatch === 'function' ? catalogStore.readBatch(snapshotKeys.legacy) : null
       ]).then(function (saved) {
         var snapshots = { currentRaw: saved[0], oldRaw: saved[1], currentGuide: saved[2], oldGuide: saved[3],
           currentBatch: saved[4], oldBatch: saved[5] };
@@ -766,7 +791,7 @@
           });
         });
       });
-    });
+    }
     return operation.catch(function (failure) {
       if (allowUnpersistedCache) return false;
       if (failure && failure.code === 'cache_migration_failed') throw failure;
@@ -784,6 +809,7 @@
     });
   }
   function saveCatalog(source, expected, detached) {
+    if (source.diskCatalog) return Promise.resolve(source.cachePersisted);
     if (!catalogStore || !source.cacheKey) return Promise.resolve(false);
     if (source.capabilities && source.capabilities.fullCatalogCache === true && typeof catalogStore.writeBatch === 'function') {
       return savePreparedCatalog(source, expected, detached);
@@ -804,6 +830,7 @@
     });
   }
   function scheduleCatalogSave(source) {
+    if (source.diskCatalog) return;
     source.cacheDirty = true;
     if (source.cacheRefreshing) return;
     if (!catalogStore || source.cacheSaveTimer || source.cacheSaveFlight) return;
@@ -862,6 +889,7 @@
       }
     });
     source.catalogState = Object.assign({}, copy(state), { kinds: kinds });
+    if (state.diskCommitted === true) source.cachePersisted = true;
     source.preparation.cacheState = copy(source.catalogState);
     updatePreparationWarnings(source);
     if (options.onProgress) options.onProgress();
@@ -916,7 +944,7 @@
   function prepareCatalogBatch(source, expected, kinds, forceRefresh, progress) {
     if (!kinds.length) return catalogState(source, expected);
     source.catalogRetryAt = source.catalogRetryAt || {};
-    var refreshKey = newRefreshKey(source), rowByKind = Object.create(null);
+    var refreshKey = newRefreshKey(source), rowByKind = Object.create(null), catalogFailure;
     kinds.forEach(function (kind) { setPreparationSection(source, kind, 'pending'); });
     setPreparationStage(source, progress);
     return Promise.all(kinds.map(function (kind) {
@@ -930,6 +958,7 @@
         return { ok: true, kind: kind };
       }).catch(function (failure) {
         if (expected !== revision || failure && (failure.code === 'cancelled' || failure.name === 'AbortError')) throw failure;
+        if (failure && (failure.code === 'playlist_size_limit' || failure.code === 'catalog_storage_full')) catalogFailure = failure;
         var retry = failure && Number(failure.retryAt), retryAt = isFinite(retry) && retry > now() ? retry : now() + 3600000;
         source.catalogRetryAt[kind] = retryAt;
         setPreparationSection(source, kind, 'failed', source.catalogState && source.catalogState.kinds[kind] && source.catalogState.kinds[kind].count,
@@ -937,7 +966,10 @@
         setPreparationStage(source, progress);
         return { ok: false, kind: kind };
       });
-    })).then(function () { return catalogState(source, expected); });
+    })).then(function () { return catalogState(source, expected); }).then(function (state) {
+      if (catalogFailure && !catalogHasContent(source, state)) throw catalogFailure;
+      return state;
+    });
   }
   function readPreparedLive(source, expected, state) {
     var live = state && state.kinds && state.kinds.live;
@@ -987,6 +1019,7 @@
     }).catch(function (failure) { check(expected); return null; });
   }
   function savePreparedCatalog(source, expected, detached) {
+    if (source.diskCatalog) return Promise.resolve(source.cachePersisted);
     if (!catalogStore || !source.cacheKey) { source.cachePersisted = false; return Promise.resolve(false); }
     if (typeof catalogStore.writeBatch !== 'function') return saveCatalog(source, expected, detached);
     if (source.catalogExportFlight) return source.catalogExportFlight.catch(function () {}).then(function () {
@@ -1183,8 +1216,11 @@
     var state = source.catalogState, due = refreshDueKinds(source, state), jobs = [], catalogJob = Promise.resolve();
     if (due.length) {
       catalogJob = prepareCatalogBatch(source, expected, due, false, null).then(function (next) {
-        return readPreparedLive(source, expected, next).then(function () {
-          if (due.indexOf('live') >= 0 && !(source.catalogRetryAt && source.catalogRetryAt.live)) {
+        var liveChanged = source.diskCatalog ? state.diskCommitted !== next.diskCommitted || state.kinds.live.syncedAt !== next.kinds.live.syncedAt :
+          due.indexOf('live') >= 0 && !(source.catalogRetryAt && source.catalogRetryAt.live);
+        var live = !source.diskCatalog || liveChanged ? readPreparedLive(source, expected, next) : Promise.resolve();
+        return live.then(function () {
+          if (liveChanged) {
             catalogRevision++; if (options.onProgress) options.onProgress();
           }
           return savePreparedCatalog(source, expected, false);
@@ -1247,6 +1283,7 @@
           source.catalogState = finalState;
           if (catalogHasContent(source, finalState)) {
             var persistProgress = beginLoading('catalog-persist');
+            if (!source.diskCatalog && catalogStore && source.cacheKey) setImportProgress(source, 'saving');
             return savePreparedCatalog(source, expected, false).then(function () {
               if (source.cachePersisted === false && options.onProgress) options.onProgress();
               source.preparationChecked = true;
@@ -1446,6 +1483,7 @@
     transport.abort();
     var old = active; active = null; playing = null;
     if (old) {
+      setImportProgress(old, null);
       clearTimeout(old.cacheSaveTimer); clearTimeout(old.cacheRefreshTimer); clearTimeout(old.guideSaveTimer);
       clearTimeout(old.metadataSaveTimer); cancelTimer(old.preparedRefreshTimer); cancelTimer(old.epgRefreshTimer);
     }
@@ -1456,23 +1494,32 @@
     });
     return Promise.all([progress, disposed, historyWrite]);
   }
-  function configure(config, connect, preservePlay) {
-    var same = active && active.config.id === config.id && JSON.stringify(active.config) === JSON.stringify(config);
+  function configure(config, scope, preservePlay) {
+    var same = active && active.cacheScope === scope && active.config.id === config.id && JSON.stringify(active.config) === JSON.stringify(config);
     if (same) {
       var existing = active, currentRevision = revision;
-      return (connect ? invoke('connect', {}, existing) : Promise.resolve()).then(function () { check(currentRevision); return existing; });
+      return existing.configuration.then(function () { check(currentRevision); return existing; });
     }
     var closing = release(preservePlay), expected = revision;
     return closing.then(function () {
       check(expected);
-      var source = { config: copy(config), engine: createSource(JSON.stringify(config), function (request, responseOptions) {
+      var source = { config: copy(config), channels: [], categories: [], capabilities: {}, cacheScope: scope, importProgress: null };
+      source.engine = createSource(JSON.stringify(config), function (request, responseOptions) {
         if (expected !== revision) return Promise.resolve(JSON.stringify({ errorKind: 'capability', error: 'Zapytanie anulowano.' }));
         return transport.request(request, responseOptions);
-      }), channels: [], categories: [], capabilities: {} };
-      active = source;
-      return (connect ? invoke('connect', {}, source) : Promise.resolve()).then(function () { check(expected); return invoke('capabilities', {}, source); }).then(function (caps) {
-        check(expected); source.capabilities = caps; return source;
+      }, function (phase) {
+        if (expected !== revision || active !== source || !source.catalogFlight) return;
+        if (['waiting', 'downloading', 'processing', 'saving'].indexOf(phase) >= 0) setImportProgress(source, phase);
       });
+      active = source;
+      source.configuration = invoke('capabilities', {}, source).then(function (caps) {
+        check(expected); source.capabilities = caps; return bindDiskCatalog(source);
+      }).then(function () { check(expected); return source; }, function (failure) {
+        if (active !== source) throw failure;
+        active = null;
+        return Promise.resolve(source.engine.dispose()).catch(function () {}).then(function () { throw failure; });
+      });
+      return source.configuration;
     });
   }
   function selectSource(args, preservePlay) {
@@ -1480,28 +1527,33 @@
     var config = args.config || configList().filter(function (s) { return s.id === args.id; })[0];
     if (!config) return Promise.reject(error('Nie znaleziono źródła.'));
     if (hostedHttpSource(config)) return Promise.reject(error(hostedHttpMessage, 'hosted_http_blocked'));
+    var configuration = configure(config, bucketId(owner), preservePlay);
     var progress = beginLoading('catalog-read');
-    return configure(config, false, preservePlay).then(function (source) {
-      source.cacheScope = bucketId(owner);
-      if (source.catalog || source.catalogFlight) return source;
-      return migrateLegacySourceCache(config, null, source.cacheScope, source.engine, true).then(function () { return source; });
-    }).then(function (source) {
+    return configuration.then(function (source) {
       var expected = revision;
       var catalog = source.catalogFlight || (source.catalog ? Promise.resolve(source.catalog) : null);
       if (!catalog) {
         var fullCache = source.capabilities && source.capabilities.fullCatalogCache === true;
-        var keys = catalogStore ? Promise.all([
-          invoke('cacheKey', { scope: source.cacheScope }, source).then(function (key) {
-            source.cacheKey = key;
-          }).catch(function () { check(expected); source.cacheKey = null; }),
-          invoke('guideCacheKey', { scope: source.cacheScope }, source).then(function (key) {
-            source.guideKey = key;
-            if (typeof catalogStore.mark === 'function') return Promise.resolve().then(function () {
-              return catalogStore.mark(key, 'guide');
-            }).catch(function () {});
-          }).catch(function () { check(expected); source.guideKey = null; })
-        ]) : Promise.resolve();
-        catalog = Promise.all([keys, setupMetadata(source, expected)]).then(function () {
+        catalog = (source.diskCatalog ? invoke('catalogState', {}, source) : Promise.resolve(null)).then(function (disk) {
+          check(expected);
+          var committed = disk && disk.diskCommitted === true;
+          return migrateLegacySourceCache(config, null, source.cacheScope, source.engine, true, committed).then(function () {
+            check(expected);
+            var keys = catalogStore ? Promise.all([
+              committed ? null : invoke('cacheKey', { scope: source.cacheScope }, source).then(function (key) {
+                source.cacheKey = key;
+              }).catch(function () { check(expected); source.cacheKey = null; }),
+              invoke('guideCacheKey', { scope: source.cacheScope }, source).then(function (key) {
+                source.guideKey = key;
+                if (typeof catalogStore.mark === 'function') return Promise.resolve().then(function () {
+                  return catalogStore.mark(key, 'guide');
+                }).catch(function () {});
+              }).catch(function () { check(expected); source.guideKey = null; })
+            ]) : Promise.resolve();
+            return Promise.all([keys, setupMetadata(source, expected)]).then(function () { return committed ? disk : null; });
+          });
+        }).then(function (disk) {
+          if (disk) return loadPreparedCatalog(source, expected, disk, progress);
           if (fullCache) {
             return restoreCatalogBatch(source, expected, 2).then(function (state) {
               if (state) return state;
@@ -1527,7 +1579,11 @@
           });
         });
         source.catalogFlight = catalog;
-        function clearCatalog() { if (source.catalogFlight === catalog) source.catalogFlight = null; }
+        function clearCatalog() {
+          if (source.catalogFlight !== catalog) return;
+          source.catalogFlight = null;
+          if (active === source) setImportProgress(source, null);
+        }
         catalog.then(clearCatalog, clearCatalog);
       }
       return catalog.then(function (parts) {
@@ -1750,6 +1806,10 @@
     });
     return invoke('seriesProgress', {item:item,positions:positions,prepareNext:true}, source).then(function (value) {
       check(expected);
+      if (!value.nextEpisode || !value.latestPosition || value.latestPosition.finished) return value;
+      return supporter().then(function (allowed) { value.resumeAllowed = allowed; return value; });
+    }).then(function (value) {
+      check(expected);
       var selected = allowedProfile();
       if (active !== source || selected.id !== profile.id || selected.source !== profile.source) throw error('Profil został zmieniony.', 'cancelled');
       scheduleCatalogSave(source);
@@ -1858,10 +1918,19 @@
         var source = temporary ? { config: config, engine: createSource(JSON.stringify(config), function (request, responseOptions) {
           try { stillCurrent(); } catch (_) { return Promise.resolve(JSON.stringify({ errorKind: 'capability', error: 'Zapytanie anulowano.' })); }
           return transport.request(request, responseOptions);
-        }) } : active;
-        var ready = temporary ? invoke('connect', {}, source) : Promise.resolve();
-        return ready.then(function () { stillCurrent(); return Promise.all([invoke(group.kind === 'live' ? 'channels' : 'allMediaItems', { kind: group.kind }, source),
-          group.kind==='live' ? invoke('categories',{},source) : Promise.resolve([])]); }).then(function (parts) {
+        }), cacheScope: bucketId(profile) } : active;
+        var ready = temporary ? bindDiskCatalog(source).then(function (disk) {
+          stillCurrent(); return disk ? null : invoke('connect', {}, source);
+        }) : source.configuration;
+        return ready.then(function () {
+          stillCurrent();
+          var live = group.kind === 'live', args = { kind: group.kind };
+          if (source.diskCatalog) args.ids = rows.filter(function (row) {
+            return row.sourceId === group.sourceId && ((row.item || row.channel).kind || 'live') === group.kind;
+          }).map(function (row) { return (row.item || row.channel).id; });
+          return Promise.all([invoke(live ? 'channels' : source.diskCatalog ? 'mediaByIds' : 'allMediaItems', args, source),
+            live ? invoke('categories', {}, source) : Promise.resolve([])]);
+        }).then(function (parts) {
           stillCurrent();
           var items=group.kind==='live' ? organization.apply(parts[0],config.settings && config.settings.channelOrganization,true) : parts[0];
           ranks[group.sourceId]=Object.create(null);items.forEach(function (item,index) {ranks[group.sourceId][item.id]=index;});
@@ -2527,7 +2596,8 @@
     if (action === 'catalog.categories' || action==='catalog.items') {
       var browsingSource=active,browsingRevision=revision,browsingConfig=sourceConfig();
       if (action==='catalog.categories') return invoke('mediaCategories',{kind:args.kind},browsingSource).then(function (rows) {check(browsingRevision);return visibleCategories(browsingConfig,rows,args.kind);});
-      return args.query ? invoke('searchMedia',args,browsingSource).then(function (items) {check(browsingRevision);return {items:visibleMedia(browsingConfig,items,args.kind),page:1,hasMore:false};}) :
+      var diskSearch = browsingSource && browsingSource.catalogState && browsingSource.catalogState.diskCommitted === true;
+      return args.query && !diskSearch ? invoke('searchMedia',args,browsingSource).then(function (items) {check(browsingRevision);return {items:visibleMedia(browsingConfig,items,args.kind),page:1,hasMore:false};}) :
         invoke('mediaItemsPage',args,browsingSource).then(function (page) {check(browsingRevision);page.items=visibleMedia(browsingConfig,page.items,args.kind);return page;});
     }
     if (action === 'media.enrich') {
@@ -2736,7 +2806,7 @@
   return {
     stopPlayback: function () { try { return query('playback.stop', {}); } catch (error) { return Promise.reject(error); } },
     query: function (action, args) { return Promise.resolve().then(function () { return query(action, args || {}); }); },
-    getState: function () { var state = options.getState(); state.currentItem = playing && (playing.item || playing.channel); state.loadingStage = loadingStage; state.catalogPreparation=active && active.preparation ? copy(active.preparation) : null; state.libraryRevision=libraryRevision; state.catalogRevision=catalogRevision; state.guideRevision=guideRevision; return state; },
+    getState: function () { var state = options.getState(); state.currentItem = playing && (playing.item || playing.channel); state.loadingStage = loadingStage; state.importProgress = active && active.importProgress; state.catalogPreparation=active && active.preparation ? copy(active.preparation) : null; state.libraryRevision=libraryRevision; state.catalogRevision=catalogRevision; state.guideRevision=guideRevision; return state; },
     onState: function (state) {
       if (!state.playing && !state.buffering && playing && playing.item) saveProgress(state).catch(options.onError);
       else if (playing && playing.item && Date.now() - savedAt > 10000) { savedAt = Date.now(); saveProgress(state).catch(options.onError); }

@@ -3472,6 +3472,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       item.id,
     );
     if (!mounted) return;
+    MediaItem episodeWithCategory(MediaItem episode) =>
+        episode.categoryId == null && item.kind == ContentKind.series
+        ? episode.copyWith(categoryId: item.categoryId)
+        : episode;
     final playFromStart = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.82),
@@ -3511,10 +3515,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // movies, so "Continue watching" reloads on return (the details used to
         // push its own player, which skipped that reload — the series rail then
         // went stale until a manual refresh).
-        onPlayEpisode: (episode) => _playMedia(
-          episode.categoryId == null && item.kind == ContentKind.series
-              ? episode.copyWith(categoryId: item.categoryId)
-              : episode,
+        onPlayEpisode: (episode) =>
+            _playMedia(episodeWithCategory(episode), owner: config),
+        onPlayEpisodeFromStart: (episode) => _playMedia(
+          episodeWithCategory(episode),
+          fromStart: true,
           owner: config,
         ),
         onPlay:

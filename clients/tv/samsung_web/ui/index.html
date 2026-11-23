@@ -132,6 +132,7 @@
     <aside id="setup-progress" class="setup-progress" aria-labelledby="setup-progress-title" hidden>
       <h2 id="setup-progress-title">Preparing your library…</h2>
       <p id="setup-progress-summary" class="muted" role="status"></p>
+      <p id="setup-progress-phase" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
       <dl id="setup-progress-stages">
         <div><dt>Live TV</dt><dd id="setup-progress-live"></dd></div>
         <div><dt>Movies</dt><dd id="setup-progress-movie"></dd></div>
@@ -171,6 +172,7 @@
   <script src="viewport.js"></script>
   <script src="$WEBAPIS/webapis/webapis.js"></script>
   <script src="polyfills.js"></script>
+  <script src="platform/m3u_disk_catalog.js"></script>
   <script src="canonical-core.js"></script>
   <script src="panel-validation.js"></script>
   <script src="publisher-config.js"></script>

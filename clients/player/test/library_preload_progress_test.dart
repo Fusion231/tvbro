@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:iptvs/data/import_progress.dart';
 import 'package:iptvs/l10n/app_localizations.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/theme.dart';
@@ -127,6 +128,7 @@ void main() {
     double textScale = 1,
     bool reduceMotion = false,
     Map<ContentKind, bool?> stages = _savedCatalogs,
+    ImportProgressStage? work,
     bool includeEpg = false,
     bool? epgReady,
     String? epgMessage,
@@ -151,6 +153,7 @@ void main() {
         home: Scaffold(
           body: LibraryPreloadProgress(
             stages: stages,
+            work: work,
             includeEpg: includeEpg,
             epgReady: epgReady,
             epgMessage: epgMessage,
@@ -163,6 +166,36 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
   }
+
+  testWidgets('current work stays readable and announced on a small screen', (
+    tester,
+  ) async {
+    AppLanguageController.instance.preview(AppLanguage.polish);
+    for (final (work, label) in const [
+      (ImportProgressStage.processing, 'Przetwarzanie danych…'),
+      (ImportProgressStage.saving, 'Zapisywanie biblioteki…'),
+    ]) {
+      await showProgress(
+        tester,
+        size: const Size(320, 568),
+        textScale: 2,
+        reduceMotion: true,
+        stages: pending,
+        work: work,
+      );
+
+      final caption = find.text(label);
+      expect(caption, findsOneWidget);
+      await tester.ensureVisible(caption);
+      await tester.pump();
+      expect(caption.hitTestable(), findsOneWidget);
+      final announcement = tester.getSemantics(caption).getSemanticsData();
+      expect(announcement.flagsCollection.isLiveRegion, isTrue);
+      expect(announcement.label, label);
+      expect(find.byType(FilledButton), findsNothing);
+      expect(tester.takeException(), isNull);
+    }
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   for (final size in const [
     Size(1280, 720),

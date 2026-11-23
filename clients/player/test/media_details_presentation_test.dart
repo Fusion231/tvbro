@@ -191,7 +191,7 @@ void main() {
         ModalRoute.of(tester.element(find.byType(MediaDetailsSheet))),
         isA<DialogRoute<void>>(),
       );
-      expect(find.text('Resume from 12:34'), findsOneWidget);
+      expect(find.text('Resume from 12:34 · Supporter'), findsOneWidget);
       expect(
         focusRouteKey(FocusManager.instance.primaryFocus),
         'media.details.play',
@@ -295,7 +295,7 @@ void main() {
       expect(find.text('In favorites'), findsOneWidget);
       expect(actions, ['favorite']);
 
-      await tester.tap(find.text('Resume from 12:34'));
+      await tester.tap(find.text('Resume from 12:34 · Supporter'));
       await finishMotion(tester);
       expect(actions, ['favorite', 'resume']);
       expect(find.byType(MediaDetailsSheet), findsNothing);
@@ -303,7 +303,14 @@ void main() {
       await tester.tap(find.text('Open details'));
       await finishMotion(tester);
       await waitForMetadata(tester);
-      await tester.tap(find.text('From start'));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(find.text('Watch from beginning'), findsOneWidget);
+      expect(
+        focusRouteKey(FocusManager.instance.primaryFocus),
+        'media.details.fromStart',
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
       await finishMotion(tester);
       expect(actions, ['favorite', 'resume', 'fromStart']);
       expect(find.byType(MediaDetailsSheet), findsNothing);

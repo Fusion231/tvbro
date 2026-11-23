@@ -35,8 +35,9 @@ void main() {
   Future<void> open(
     WidgetTester tester,
     _GateAccess access,
-    ValueChanged<SupporterGateResult> result,
-  ) async {
+    ValueChanged<SupporterGateResult> result, {
+    String? freeActionLabel = 'Watch from beginning',
+  }) async {
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.dark,
@@ -46,9 +47,11 @@ void main() {
               onPressed: () async => result(
                 await requireSupporterFeature(
                   context,
-                  SupporterFeature.vodResume,
+                  freeActionLabel == null
+                      ? SupporterFeature.recurringRecordings
+                      : SupporterFeature.vodResume,
                   access: access,
-                  freeActionLabel: 'Watch from beginning',
+                  freeActionLabel: freeActionLabel,
                 ),
               ),
               child: const Text('Resume'),
@@ -222,12 +225,24 @@ void main() {
     );
   });
 
-  testWidgets('remote can refresh, retry after failure and continue free', (
+  testWidgets('resume gate selects free playback on the first remote OK', (
+    tester,
+  ) async {
+    final access = _GateAccess(false, configured: true);
+    SupporterGateResult? result;
+    await open(tester, access, (value) => result = value);
+    await tester.sendKeyEvent(LogicalKeyboardKey.select);
+    await tester.pumpAndSettle();
+    expect(result, SupporterGateResult.free);
+    expect(access.refreshes, 0);
+  });
+
+  testWidgets('other gates start on refresh and allow retry after failure', (
     tester,
   ) async {
     final access = _GateAccess(false);
     SupporterGateResult? result;
-    await open(tester, access, (value) => result = value);
+    await open(tester, access, (value) => result = value, freeActionLabel: null);
     access.pending = Completer<bool>();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
@@ -249,7 +264,7 @@ void main() {
   ) async {
     final access = _GateAccess(false)..pending = Completer<bool>();
     SupporterGateResult? result;
-    await open(tester, access, (value) => result = value);
+    await open(tester, access, (value) => result = value, freeActionLabel: null);
     await tester.tap(find.text('Refresh access'));
     await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
@@ -261,6 +276,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(result, SupporterGateResult.cancelled);
+  });
+
+  testWidgets('refresh cannot pop playback after choosing the free action', (
+    tester,
+  ) async {
+    final access = _GateAccess(false)..pending = Completer<bool>();
+    SupporterGateResult? result;
+    await open(tester, access, (value) => result = value);
+    await tester.tap(find.text('Refresh access'));
+    await tester.pump();
+    await tester.tap(find.text('Watch from beginning'));
+    access.pending!.complete(true);
+    await tester.pumpAndSettle();
+    expect(result, SupporterGateResult.free);
+    expect(find.text('Resume'), findsOneWidget);
   });
 
   testWidgets('Polish dialog fits TV and compact screens with enlarged text', (

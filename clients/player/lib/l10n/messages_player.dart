@@ -51,6 +51,10 @@ const Map<String, String> polishPlayerMessages = {
       'Źródło nie odpowiedziało na czas. Ponowiliśmy próbę automatycznie; sprawdź połączenie i spróbuj ponownie.',
   'The source returned more data than the app can safely load.':
       'Źródło zwróciło więcej danych, niż aplikacja może bezpiecznie wczytać.',
+  'The M3U playlist exceeds the {limit} size limit (about {size}). Use a smaller playlist from your provider.':
+      'Playlista M3U przekracza limit rozmiaru {limit} i ma około {size}. Użyj mniejszej playlisty od dostawcy.',
+  'An entry in the M3U playlist exceeds the {limit} per-line limit. Ask your provider for a corrected playlist.':
+      'Wpis na playliście M3U przekracza limit {limit} na wiersz. Poproś dostawcę o poprawioną playlistę.',
   'The source rejected the saved credentials. Check the source details.':
       'Źródło odrzuciło zapisane dane logowania. Sprawdź szczegóły źródła.',
   'The source could not be loaded. Check its details and try again.':

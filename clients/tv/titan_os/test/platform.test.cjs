@@ -59,6 +59,7 @@ test('Titan waits for protected storage before starting the unchanged shared lib
   assert.equal(b.env.TVBroPlatformAdapters.confirmExit, true);
   assert.equal(b.env.TVBroPlatformAdapters.openTrailer, undefined);
   assert.equal(b.libraryOptions().requiresHttpsProvider,true,'only hosted Titan requires an HTTPS provider route');
+  assert.equal(b.libraryOptions().requireCatalogEncryption,true);
 });
 
 test('failed persistent storage never creates an empty profile or starts the library', async () => {

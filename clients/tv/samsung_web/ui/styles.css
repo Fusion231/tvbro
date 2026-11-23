@@ -464,6 +464,9 @@ body.dialog-open .app-shell { visibility: hidden; pointer-events: none; }
   box-shadow: 0 8px 24px rgba(0, 0, 0, .55);
 }
 .setup-progress h2, .setup-progress p { margin-bottom: 8px; }
+#setup-progress-phase { word-wrap: break-word; }
+#setup-progress-phase:empty { margin-bottom: 0; }
+.short-height .setup-progress { bottom: 12px; padding: 12px 16px; }
 .setup-progress dl { margin: 12px 0 0; }
 .setup-progress dl div { display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid #374459; }
 .setup-progress dd { margin: 0; color: #a9b0bd; }

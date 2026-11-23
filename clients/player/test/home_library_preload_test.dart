@@ -165,6 +165,7 @@ void main() {
                 find.text('Checking source connection…').evaluate().isNotEmpty,
           );
           expect(find.byType(ChannelListScreen), findsNothing);
+          expect(find.text('Waiting for the source…'), findsOneWidget);
           expect(fixture.requests['get_live_categories'], isNull);
           expect(fixture.requests['get_vod_categories'], isNull);
           expect(fixture.requests['get_series_categories'], isNull);
@@ -253,6 +254,10 @@ void main() {
           expect(find.byType(LibraryPreloadProgress), findsOneWidget);
           expect(find.byType(ChannelListScreen), findsNothing);
           expect(find.text('Program guide (EPG)'), findsOneWidget);
+          await _pumpUntil(
+            tester,
+            () => find.text('Downloading data…').evaluate().isNotEmpty,
+          );
           expect(preloadReady.isCompleted, isFalse);
           expect(fixture.epgGate.isCompleted, isFalse);
           expect(await read(() => db.lastEpgSynced(_sourceId)), isNull);
@@ -1044,8 +1049,6 @@ class _XtreamFixture {
     }
     if (request.uri.path == '/xmltv.php') {
       _recordRequest('xmltv');
-      if (!epgStarted.isCompleted) epgStarted.complete();
-      if (gateEpg) await epgGate.future;
       String timestamp(DateTime value) =>
           '${value.toUtc().toIso8601String().substring(0, 19).replaceAll(RegExp(r'[-:T]'), '')} +0000';
       final current = now();
@@ -1059,10 +1062,16 @@ class _XtreamFixture {
                 'stop="${timestamp(current.add(const Duration(hours: 1)))}">'
                 '<title>Fixture programme</title></programme></tv>'
           : '<?xml version="1.0"?><tv></tv>';
-      request.response
-        ..headers.contentType = ContentType('application', 'xml')
-        ..write(guide);
-      await request.response.close();
+      final response = request.response;
+      response.headers.contentType = ContentType('application', 'xml');
+      if (gateEpg) {
+        response.write(guide.substring(0, 16));
+        await response.flush();
+      }
+      if (!epgStarted.isCompleted) epgStarted.complete();
+      if (gateEpg) await epgGate.future;
+      response.write(gateEpg ? guide.substring(16) : guide);
+      await response.close();
       return;
     }
 

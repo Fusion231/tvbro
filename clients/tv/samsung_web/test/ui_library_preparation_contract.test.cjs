@@ -9,7 +9,7 @@ const acorn=require('acorn');
 
 const source=fs.readFileSync(path.join(__dirname,'../ui/app.js'),'utf8');
 const declarations=acorn.parse(source,{ecmaVersion:2022}).body[0].expression.callee.body.body;
-const functions=declarations.filter(node=>node.type==='FunctionDeclaration'&&['loadSource','updatePlayer'].includes(node.id.name));
+const functions=declarations.filter(node=>node.type==='FunctionDeclaration'&&['loadSource','updatePlayer','renderSetupProgress'].includes(node.id.name));
 const handlers=functions.map(node=>source.slice(node.start,node.end)).join('\n');
 
 function nodes(){
@@ -44,4 +44,27 @@ test('existing status surface labels each catalog-preparation stage',()=>{
   assert.ok(statuses.every(row=>row.loading===true));
   assert.match(source, /"No channels, movies or series were found in this source\."\s*:\s*"To źródło nie zwróciło kanałów TV, filmów ani seriali\."/,
     'the new empty-library error has a Polish UI translation');
+});
+
+test('source import caption localizes phase changes and clears independently from the section rows',()=>{
+  const view={busy:true,screen:'sources',setupLoad:{message:'Loading library…'},player:false};
+  const byId=nodes(), writes=[];
+  const env={view,byId,t:value=>`translated ${value}`,status(){},
+    text(node,value){if(node===byId('setup-progress-phase')) writes.push(value);node.textContent=value;},
+    seekDuration:()=>0,updatePlayerHint(){},updatePlayerTimeline(){},time:()=>'',syncPreviewIdleTimer(){},advanceCompletedEpisode(){}};
+  vm.createContext(env);vm.runInContext(handlers,env);
+  const state={loadingStage:'catalog-live',catalogPreparation:{sections:{live:{status:'ready'}}},isLive:true,playing:false};
+  for (const importProgress of ['waiting','downloading','downloading','processing','saving',null]) {
+    env.updatePlayer({...state,importProgress});
+  }
+  assert.deepEqual(writes,['translated Waiting for the source…','translated Downloading data…',
+    'translated Processing data…','translated Saving the library…','']);
+  assert.equal(byId('setup-progress-live').textContent,'translated Ready');
+  assert.equal(byId('setup-progress-stages').hidden,false);
+
+  env.updatePlayer({...state,importProgress:'waiting'});
+  view.busy=false;view.setupLoad.error=true;
+  env.renderSetupProgress();
+  assert.equal(byId('setup-progress-phase').textContent,'');
+  assert.equal(byId('setup-load-retry').hidden,false);
 });

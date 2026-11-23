@@ -774,7 +774,8 @@ void main() {
             onPlay: played.add,
           );
 
-          final heading = tester.getRect(find.text('Continue watching'));
+          final continueHeading = find.text('Continue watching · Supporter');
+          final heading = tester.getRect(continueHeading);
           expect(
             heading.top,
             greaterThan(tester.getBottomLeft(find.text('FROM YOUR LIBRARY')).dy),
@@ -809,7 +810,7 @@ void main() {
             skipOffstage: false,
           );
           expect(
-            tester.getBottomLeft(find.text('Continue watching')).dy,
+            tester.getBottomLeft(continueHeading).dy,
             lessThan(tester.getTopLeft(browseHeading).dy),
           );
           await tester.sendKeyEvent(LogicalKeyboardKey.enter);

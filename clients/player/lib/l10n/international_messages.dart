@@ -123,9 +123,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ ulubione",
   },
   "es": {
-    "Loading episodes from the playlist…": "Cargando episodios de la lista…",
-    "Could not fill in episodes. Saved content is still available.": "No se pudieron cargar los episodios. Los datos guardados siguen disponibles.",
-    "Retry episode download": "Reintentar la descarga de episodios",
     " · Repeats weekly": " • Repeticiones semanales",
     " · Suggested": " · Recomendado",
     " · metadata updated": " · Metadatos actualizados",
@@ -1351,9 +1348,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "· Los favoritos",
   },
   "de": {
-    "Loading episodes from the playlist…": "Folgen aus der Wiedergabeliste werden geladen…",
-    "Could not fill in episodes. Saved content is still available.": "Die Folgen konnten nicht geladen werden. Gespeicherte Inhalte sind weiterhin verfügbar.",
-    "Retry episode download": "Folgen erneut herunterladen",
     " · Repeats weekly": " • Wiederholung pro Woche",
     " · Suggested": " · vorgeschlagen",
     " · metadata updated": " • Aktualisierte Metadaten",
@@ -2579,9 +2573,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ Favoriten",
   },
   "fr": {
-    "Loading episodes from the playlist…": "Chargement des épisodes de la liste…",
-    "Could not fill in episodes. Saved content is still available.": "Impossible de charger les épisodes. Les contenus enregistrés restent disponibles.",
-    "Retry episode download": "Réessayer de télécharger les épisodes",
     " · Repeats weekly": " • Répétez chaque semaine",
     " · Suggested": " · suggéré",
     " · metadata updated": " • Métadonnées mises à jour",
@@ -3807,9 +3798,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ Les favoris",
   },
   "pt-br": {
-    "Loading episodes from the playlist…": "Carregando episódios da playlist…",
-    "Could not fill in episodes. Saved content is still available.": "Não foi possível carregar os episódios. O conteúdo salvo continua disponível.",
-    "Retry episode download": "Tentar baixar os episódios novamente",
     " · Repeats weekly": " • Repetir por semana",
     " · Suggested": " · sugestão",
     " · metadata updated": " • Metadatos atualizados",
@@ -5035,9 +5023,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ Favoritos",
   },
   "it": {
-    "Loading episodes from the playlist…": "Caricamento degli episodi dalla playlist…",
-    "Could not fill in episodes. Saved content is still available.": "Impossibile caricare gli episodi. I contenuti salvati sono ancora disponibili.",
-    "Retry episode download": "Riprova a scaricare gli episodi",
     " · Repeats weekly": " • ripetere ogni settimana",
     " · Suggested": " • suggerito",
     " · metadata updated": " • Metadati aggiornati",
@@ -6263,9 +6248,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ I preferiti",
   },
   "tr": {
-    "Loading episodes from the playlist…": "Oynatma listesinden bölümler yükleniyor…",
-    "Could not fill in episodes. Saved content is still available.": "Bölümler yüklenemedi. Kaydedilen içerik hâlâ kullanılabilir.",
-    "Retry episode download": "Bölümleri yeniden indirmeyi dene",
     " · Repeats weekly": " • Haftalık tekrarlar",
     " · Suggested": " · Önerilen",
     " · metadata updated": " · Metadata güncellenmiş",
@@ -7491,9 +7473,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ Favori",
   },
   "uk": {
-    "Loading episodes from the playlist…": "Завантаження епізодів зі списку відтворення…",
-    "Could not fill in episodes. Saved content is still available.": "Не вдалося завантажити епізоди. Збережені дані все ще доступні.",
-    "Retry episode download": "Повторити завантаження епізодів",
     " · Repeats weekly": " · Повторювати щотижня",
     " · Suggested": " · Пропонується",
     " · metadata updated": " · Мета-додатки оновлені",
@@ -8719,9 +8698,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ Улюблений",
   },
   "ru": {
-    "Loading episodes from the playlist…": "Загрузка эпизодов из плейлиста…",
-    "Could not fill in episodes. Saved content is still available.": "Не удалось загрузить эпизоды. Сохранённые данные по-прежнему доступны.",
-    "Retry episode download": "Повторить загрузку эпизодов",
     " · Repeats weekly": " • повторяются еженедельно",
     " · Suggested": " · Предложен",
     " · metadata updated": " · обновленные метаданные",
@@ -9947,9 +9923,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ Любимые",
   },
   "ar": {
-    "Loading episodes from the playlist…": "جارٍ تحميل الحلقات من قائمة التشغيل…",
-    "Could not fill in episodes. Saved content is still available.": "تعذّر تحميل الحلقات. لا يزال المحتوى المحفوظ متاحًا.",
-    "Retry episode download": "إعادة محاولة تنزيل الحلقات",
     " · Repeats weekly": " · تكرار الأسبوع",
     " · Suggested": " · اقتراح",
     " · metadata updated": " · الميثاق المحدد",
@@ -11175,9 +11148,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ المفضلة",
   },
   "hi": {
-    "Loading episodes from the playlist…": "प्लेलिस्ट से एपिसोड लोड हो रहे हैं…",
-    "Could not fill in episodes. Saved content is still available.": "एपिसोड लोड नहीं हो सके। सेव किया गया कॉन्टेंट अब भी उपलब्ध है।",
-    "Retry episode download": "एपिसोड फिर से डाउनलोड करें",
     " · Repeats weekly": " • सप्ताह में दोहराएं",
     " · Suggested": " · सुझाव",
     " · metadata updated": " · मेटाडेटा अपडेट",
@@ -12403,9 +12373,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ पसंदीदा",
   },
   "bn": {
-    "Loading episodes from the playlist…": "প্লেলিস্ট থেকে পর্ব লোড হচ্ছে…",
-    "Could not fill in episodes. Saved content is still available.": "পর্ব লোড করা যায়নি। সংরক্ষিত কনটেন্ট এখনও পাওয়া যাবে।",
-    "Retry episode download": "পর্ব আবার ডাউনলোড করুন",
     " · Repeats weekly": " • সপ্তাহে বারবার",
     " · Suggested": " · প্রস্তাবিত",
     " · metadata updated": " · ম্যাটা ডেটা আপডেট",
@@ -13631,9 +13598,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ প্রিয়",
   },
   "id": {
-    "Loading episodes from the playlist…": "Memuat episode dari daftar putar…",
-    "Could not fill in episodes. Saved content is still available.": "Episode tidak dapat dimuat. Konten tersimpan masih tersedia.",
-    "Retry episode download": "Coba unduh episode lagi",
     " · Repeats weekly": " · Berulang setiap minggu",
     " · Suggested": " · disarankan",
     " · metadata updated": " · Metadata yang diperbarui",
@@ -14859,9 +14823,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ Favorit",
   },
   "zh-hans": {
-    "Loading episodes from the playlist…": "正在从播放列表加载剧集…",
-    "Could not fill in episodes. Saved content is still available.": "无法加载剧集。已保存的内容仍可使用。",
-    "Retry episode download": "重新下载剧集",
     " · Repeats weekly": " · 每周重复",
     " · Suggested": " · 建议",
     " · metadata updated": " · 最新数据",
@@ -16087,9 +16048,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ 最喜欢",
   },
   "ja": {
-    "Loading episodes from the playlist…": "プレイリストからエピソードを読み込み中…",
-    "Could not fill in episodes. Saved content is still available.": "エピソードを読み込めませんでした。保存済みのコンテンツは引き続き利用できます。",
-    "Retry episode download": "エピソードのダウンロードを再試行",
     " · Repeats weekly": " ■週に繰り返す",
     " · Suggested": " ■推奨",
     " · metadata updated": " ●メタデータ更新",
@@ -17315,9 +17273,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "■お気に入り",
   },
   "ko": {
-    "Loading episodes from the playlist…": "재생목록에서 에피소드를 불러오는 중…",
-    "Could not fill in episodes. Saved content is still available.": "에피소드를 불러오지 못했습니다. 저장된 콘텐츠는 계속 이용할 수 있습니다.",
-    "Retry episode download": "에피소드 다운로드 다시 시도",
     " · Repeats weekly": " · 일주일에 반복",
     " · Suggested": " · 제안",
     " · metadata updated": " · 메타 데이터 업데이트",
@@ -18543,9 +18498,6 @@ const internationalMessages = <String, Map<String, String>>{
     "♥ Favorites": "♥ 좋아하는",
   },
   "vi": {
-    "Loading episodes from the playlist…": "Đang tải các tập từ danh sách phát…",
-    "Could not fill in episodes. Saved content is still available.": "Không tải được các tập. Nội dung đã lưu vẫn có sẵn.",
-    "Retry episode download": "Thử tải lại các tập",
     " · Repeats weekly": " · Lặp lại hàng tuần",
     " · Suggested": " · đề xuất",
     " · metadata updated": " · Tính năng Meta Update",

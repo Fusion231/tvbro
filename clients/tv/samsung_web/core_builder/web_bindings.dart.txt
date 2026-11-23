@@ -2,6 +2,7 @@
 // File IO is session memory; catalog snapshots restore provider metadata.
 // The Source engine and these in-process channels stay inside a browser Worker.
 class Platform { static const isIOS = false; }
+const kIsWeb=true;
 class HttpStatus {
   static const ok=200, unauthorized=401, forbidden=403, notFound=404,
     requestTimeout=408, tooManyRequests=429, internalServerError=500,
@@ -40,11 +41,58 @@ class HttpClientResponse extends Stream<List<int>> {
   final Uint8List bytes;
   final HttpHeaders headers;
   final _DiskGuideFile? diskFile;
-  HttpClientResponse(this.statusCode,this.bytes,this.headers,[this.diskFile]);
-  int get contentLength => diskFile?.size??bytes.length;
+  final _PlaylistBlob? playlistBlob;
+  final _PlaylistByteStream? playlistStream;
+  HttpClientResponse(this.statusCode,this.bytes,this.headers,[this.diskFile,this.playlistBlob,this.playlistStream]);
+  int get contentLength => diskFile?.size??playlistBlob?.size??(playlistStream==null?bytes.length:-1);
   @override StreamSubscription<List<int>> listen(void Function(List<int>)? onData,
       {Function? onError,void Function()? onDone,bool? cancelOnError}) =>
-    (diskFile?.openRead()??_chunksOf(bytes)).listen(onData,onError:onError,onDone:onDone,cancelOnError:cancelOnError);
+    (diskFile?.openRead()??playlistStream?.openRead()??playlistBlob?.openRead()??_chunksOf(bytes))
+      .listen(onData,onError:onError,onDone:onDone,cancelOnError:cancelOnError);
+}
+extension type _PlaylistByteStream(JSObject _) implements JSObject {
+  external JSPromise<JSUint8Array?> next();
+  external void close();
+  Stream<List<int>> openRead() async* {
+    while(true) {
+      final chunk=await next().toDart;
+      if(chunk==null)break;
+      yield chunk.toDart;
+    }
+  }
+}
+extension type _PlaylistBlob(JSObject _) implements JSObject {
+  external int get size;
+  external _PlaylistBlob slice(int start,int end);
+  external JSPromise<JSArrayBuffer> arrayBuffer();
+  Stream<List<int>> openRead() async* {
+    for(var offset=0;offset<size;) {
+      final end=min(offset+65536,size), part=slice(offset,end);
+      final JSArrayBuffer buffer;
+      if(part.hasProperty('arrayBuffer'.toJS).toDart) {
+        buffer=await part.arrayBuffer().toDart;
+      } else {
+        // Tizen 3 does not expose Blob.arrayBuffer().
+        final reader=_PlaylistFileReader(), done=Completer<JSArrayBuffer>();
+        reader.onload=(() { done.complete(reader.result); }).toJS;
+        reader.onerror=(() { done.completeError(const FormatException('Unable to read the playlist.')); }).toJS;
+        reader.readAsArrayBuffer(part);
+        buffer=await done.future;
+      }
+      final bytes=buffer.toDart.asUint8List();
+      if(bytes.length!=end-offset)throw const FormatException('Incomplete playlist data');
+      yield bytes;
+      offset=end;
+    }
+  }
+}
+@JS('FileReader')
+extension type _PlaylistFileReader._(JSObject _) implements JSObject {
+  external _PlaylistFileReader();
+  external set onload(JSFunction callback);
+  external set onerror(JSFunction callback);
+  external JSArrayBuffer get result;
+  external void readAsArrayBuffer(_PlaylistBlob blob);
 }
 String _workloadName(HttpWorkloadPolicy policy) => switch(policy.name) {
   'provider JSON'=>'provider-json', 'Stalker JSON'=>'stalker-json', _=>policy.name,
@@ -63,16 +111,24 @@ Future<T> providerHttpGet<T>(Uri uri,{required HttpClient client,
   if(callback==null) throw StateError('A physical HTTP transport is required');
   return ProviderRequestGate.instance.run(uri,() async {
     check();
+    final streamPlaylist=operation.policy.name=='playlist'&&Zone.current[#tvM3uDisk]==true;
     final request=jsonEncode({'url':uri.toString(),'headers':headers,'workload':_workloadName(operation.policy),
       'totalTimeoutMs':operation.remaining.inMilliseconds,
-      'maximumBodyBytes':operation.policy.maximumBodyBytes,
-      'maximumDecodedBytes':operation.policy.maximumDecodedBytes,
+      if(isTrackingImportProgress)'importProgress':true,
+      if(streamPlaylist)'streamPlaylist':true,
+      if(!streamPlaylist)'maximumBodyBytes':operation.policy.maximumBodyBytes,
+      if(!streamPlaylist)'maximumDecodedBytes':operation.policy.maximumDecodedBytes,
       if(operation.policy.name=='epg'&&Zone.current[#tvEpgDiskKey] is String)
         'epgDiskKey':Zone.current[#tvEpgDiskKey],
       'pauseOnAuthenticationFailure':pauseOnAuthenticationFailure,
       'idleTimeoutMs':operation.policy.idleTimeout.inMilliseconds});
-    final responseText=await operation.wait((callback.callAsFunction(null,request.toJS) as JSPromise<JSString>).toDart);
+    final pending=(callback.callAsFunction(null,request.toJS) as JSPromise<JSAny?>).toDart;
+    final reply=await (streamPlaylist?pending:operation.wait(pending));
     check();
+    final envelope=operation.policy.name=='playlist'&&reply.isA<JSObject>()?reply as JSObject:null;
+    final playlistBlob=envelope?.getProperty<JSObject?>('bodyBlob'.toJS);
+    final playlistStream=envelope?.getProperty<JSObject?>('bodyStream'.toJS);
+    final responseText=envelope?.getProperty<JSString>('metadata'.toJS)??reply as JSString;
     final data=objectJson(responseText.toDart);
     if(data['errorKind']=='provider-blocked') throw ProviderRequestBlocked(
       status:data['status'] as int,retryAt:DateTime.parse(data['retryAt'] as String));
@@ -93,7 +149,11 @@ Future<T> providerHttpGet<T>(Uri uri,{required HttpClient client,
     final diskFile=data['bodyFile'] is Map?_DiskGuideFile.fromJson(Map<String,dynamic>.from(data['bodyFile'] as Map),callback):null;
     final bytes=data['bodyBase64'] is String ? base64Decode(data['bodyBase64'] as String)
       : Uint8List.fromList(utf8.encode(data['body'] as String? ?? ''));
-    _checkLimit(bytes.length,operation.policy.maximumBodyBytes,operation.policy.name);
+    final response=HttpClientResponse(status,bytes,HttpHeaders(responseHeaders),diskFile,
+      playlistBlob==null?null:_PlaylistBlob(playlistBlob),
+      playlistStream==null?null:_PlaylistByteStream(playlistStream));
+    if(!streamPlaylist&&playlistBlob==null)_checkLimit(bytes.length,operation.policy.maximumBodyBytes,operation.policy.name);
+    try {
     for(final target in {uri,responseUri}) {
       ProviderRequestGate.instance.recordResponse(target,status,retryAfter:responseHeaders['retry-after'],
         pauseOnAuthenticationFailure:pauseOnAuthenticationFailure);
@@ -102,7 +162,15 @@ Future<T> providerHttpGet<T>(Uri uri,{required HttpClient client,
     ProviderRequestGate.instance.check(uri);
     ProviderRequestGate.instance.check(responseUri);
     onResponseUri?.call(responseUri);
-    return readResponse(HttpClientResponse(status,bytes,HttpHeaders(responseHeaders),diskFile));
+    if(operation.policy.name=='playlist') {
+      return await runZoned(()=>readResponse(response),zoneValues:{
+        #tvPlaylistBytes:streamPlaylist?null:operation.policy.maximumDecodedBytes,
+      });
+    }
+    return await readResponse(response);
+    } finally {
+      response.playlistStream?.close();
+    }
   },timeout:operation.remaining,cancellation:token?.whenCancelled,checkCancellation:check);
 }
 
@@ -454,12 +522,15 @@ class _WebGzipDecoder extends Converter<List<int>,List<int>> {
   // Retain the 0.1.31 WGT's stream adapter: sending the whole inflated guide as
   // one event makes the XML event parser allocate a whole-guide object graph.
   @override Stream<List<int>> bind(Stream<List<int>> stream) async* {
-    if(Zone.current[#tvEpgDisk]==true) {
-      final push=_createStreamingGzip.callAsFunction(null,kEpgWorkload.maximumDecodedBytes.toJS) as JSFunction;
+    final playlistMaximum=Zone.current[#tvPlaylistBytes] as int?;
+    final streamPlaylist=Zone.current[#tvM3uDisk]==true;
+    if(streamPlaylist||playlistMaximum!=null||Zone.current[#tvEpgDisk]==true) {
+      final maximum=streamPlaylist?null:(playlistMaximum??kEpgWorkload.maximumDecodedBytes).toJS;
+      final push=_createStreamingGzip.callAsFunction(null,maximum) as JSFunction;
       List<Uint8List> decode(List<int> input,bool last) {
         final value=objectJson((push.callAsFunction(null,base64Encode(input).toJS,last.toJS) as JSString).toDart);
-        if(value['error']=='limit')throw const HttpWorkloadException('Decoded guide exceeds the work limit',isSizeLimit:true);
-        if(value['error']!=null)throw const FormatException('Invalid gzip guide');
+        if(value['error']=='limit')throw const HttpWorkloadException('Decoded response exceeds the work limit',isSizeLimit:true);
+        if(value['error']!=null)throw const FormatException('Invalid gzip response');
         return [for(final chunk in value['chunks'] as List)base64Decode(chunk as String)];
       }
       await for(final bytes in stream) {
@@ -1886,12 +1957,217 @@ Map<String,Object> _webGuideFailure(Object error) {
   return {'__tvbroEpgError':1,'code':code,
     if(status!=null&&status>=100&&status<=599)'status':status};
 }
-JSObject createSourceBridge(JSString configText,JSFunction transport) {
+class _TvM3uStorageFull implements Exception {}
+
+class _TvM3uDiskCatalog {
+  _TvM3uDiskCatalog(this.source,this.key,this._call);
+
+  final M3uSource source;
+  final String key;
+  final JSFunction _call;
+  Map<String,dynamic>? _saved;
+  LoadToken? _token;
+  Future<void>? _flight;
+  String? _refreshKey;
+  static const _pageSize=100;
+  static const _readSize=400;
+  static const _kinds=['live','movie','series'];
+  static const readMethods={'categories','channels','mediaCategories','mediaItems',
+    'mediaItemsPage','allMediaItems','searchMedia','mediaByIds','playbackEpisodes','seriesProgress'};
+
+  bool get committed=>_saved!=null;
+  Future<dynamic> rpc(String method,[Map<String,dynamic> args=const {}]) async {
+    final reply=await (_call.callAsFunction(null,method.toJS,jsonEncode(args).toJS) as JSPromise<JSString>).toDart;
+    final value=jsonDecode(reply.toDart);
+    if(value is Map&&value['__tvbroM3uDiskError']=='storage_full')throw _TvM3uStorageFull();
+    return value;
+  }
+
+  Future<void> restore() async {
+    _saved=await rpc('state') as Map<String,dynamic>?;
+    _restoreHeader();
+  }
+
+  void _restoreHeader() {
+    final header=_saved?['header'] as Map?;
+    if(header==null)return;
+    source._headerKnown=true;
+    source._headerEpgUrl=header['epg'] as String?;
+    source._effectivePlaylistUri=Uri.tryParse(header['uri'] as String? ?? source.playlistUrl);
+    source._catchupCapability=_catchupFromJson(Map<String,dynamic>.from(header['catchup'] as Map));
+  }
+
+  Map<String,dynamic> kindState(String kind)=>{'complete':committed,
+    'count':(_saved?['counts'] as Map?)?[kind]??0,'syncedAt':_saved?['syncedAt']};
+
+  Map<String,dynamic> catalogState(Map<String,dynamic> fallback)=>{'disk':true,'diskCommitted':committed,
+    'kinds':committed?{for(final kind in _kinds)kind:kindState(kind)}:fallback['kinds']};
+
+  Future<void> cancel() async {
+    _token?.cancel();
+    await _flight?.catchError((Object _){});
+  }
+
+  Future<void> prepare(String refreshKey,{required bool force}) async {
+    final current=_flight;
+    if(current!=null) {
+      if(!force||refreshKey==_refreshKey)return current;
+      await current.catchError((Object _){});
+      return prepare(refreshKey,force:force);
+    }
+    final last=_saved?['syncedAt'] as int?;
+    if(refreshKey==_refreshKey||(last!=null&&!force&&
+        DateTime.now().millisecondsSinceEpoch-last<CanonicalTvCachePolicy.catalogMaxAge.inMilliseconds))return;
+    _refreshKey=refreshKey;
+    final token=_token=LoadToken();
+    final flight=_flight=_import(token);
+    try { await flight; }
+    catch(_) { _refreshKey=null; rethrow; }
+    finally { _flight=null; _token=null; }
+  }
+
+  Future<void> _import(LoadToken token) async {
+    final draft=await rpc('begin') as String;
+    var order=0;
+    Map<String,dynamic> category(String parent,String id,String title)=>
+      {'kind':'category','parentId':parent,'id':id,'title':title,'order':order++};
+    try {
+      await runZoned(()=>source.readCatalog(token,(batches) async {
+        await for(final batch in batches) {
+          final rows=<Map<String,dynamic>>[
+            for(final value in batch.categories)category('live',value.id,value.title),
+            for(final entry in batch.media.categories.entries)
+              for(final value in entry.value)category(entry.key.name,value.id,value.title),
+            for(final value in batch.channels)
+              {...channelJson(value),'kind':'live','order':value.number??0},
+            for(final items in [...batch.media.roots.values,...batch.media.children.values])
+              for(final value in items) {
+                ...mediaCatalogStorageJson(value),
+                'order':switch(value.kind) {
+                  ContentKind.episode=>value.episodeNumber??0,
+                  ContentKind.season=>value.seasonNumber??0,
+                  _=>order++,
+                },
+              },
+          ];
+          for(var from=0;from<rows.length;from+=_readSize) {
+            if(token.isCancelled)throw const LoadCancelledException();
+            await rpc('add',{'draft':draft,'rows':rows.sublist(from,min(from+_readSize,rows.length))});
+          }
+        }
+      },limitBodyBytes:false),zoneValues:{#tvM3uDisk:true});
+      if(token.isCancelled)throw const LoadCancelledException();
+      reportImportProgress(ImportProgressStage.saving);
+      _saved=await rpc('commit',{'draft':draft,'header':{
+        'epg':source._headerEpgUrl,'uri':source._effectivePlaylistUri?.toString(),
+        'catchup':_catchupJson(source._catchupCapability),
+      }}) as Map<String,dynamic>;
+    } catch(_) {
+      try { await rpc('abort',{'draft':draft}); } catch(_) {}
+      _restoreHeader();
+      rethrow;
+    }
+  }
+
+  Future<Map<String,dynamic>> _page(String kind,Map<String,dynamic> filters,{int offset=0,int limit=_readSize}) async =>
+    await rpc('read',{'kind':kind,...filters,'offset':offset,'limit':limit}) as Map<String,dynamic>;
+
+  Future<List<dynamic>> _list(String kind,Map<String,dynamic> filters) async {
+    final out=<dynamic>[];
+    for(var offset=0;;) {
+      final page=await _page(kind,filters,offset:offset);
+      final items=page['items'] as List;
+      out.addAll(items);
+      offset+=items.length;
+      if(items.isEmpty||page['hasMore']!=true&&
+          (page['count'] is! int||offset>=(page['count'] as int)))return out;
+    }
+  }
+
+  Future<List<MediaItem>> _children(String kind,String? parentId) async {
+    if(parentId==null)return const [];
+    return _media(await _list(kind,{'parentId':parentId}));
+  }
+
+  List<MediaItem> _media(List rows)=>[for(final row in rows)mediaFromJson(Map<String,dynamic>.from(row as Map))];
+
+  Future<MediaItem> mediaDetails(MediaItem item) async {
+    final row=await rpc('get',{'kind':item.kind.name,'id':item.id,
+      if(item.parentId!=null)'parentId':item.parentId});
+    return row is Map?mediaFromJson(Map<String,dynamic>.from(row)):item;
+  }
+
+  Future<Object?> read(String method,Map<String,dynamic> args) async {
+    final kind=args['kind'] as String? ?? 'live';
+    final parent=args['parent'];
+    final filters=<String,dynamic>{
+      if(args['categoryId'] is String)'categoryId':args['categoryId'],
+      if(parent is Map&&parent['id'] is String)'parentId':parent['id'],
+      if(args['ids'] is List)'ids':args['ids'],
+    };
+    switch(method) {
+      case 'categories':
+      case 'mediaCategories':
+        final rows=await _list('category',{'parentId':kind});
+        if(method=='categories')rows.sort((a,b)=>(a['title'] as String).compareTo(b['title'] as String));
+        return [for(final row in rows) {'id':row['id'],'title':row['title'],
+          if(method=='mediaCategories')'kind':kind}];
+      case 'channels':
+      case 'mediaByIds':
+        final rows=await _list(method=='channels'?'live':kind,filters);
+        if(args['ids'] is List)rows.sort((a,b)=>(a['order'] as int).compareTo(b['order'] as int));
+        return method=='channels'
+          ?[for(final row in rows)channelFromJson(Map<String,dynamic>.from(row as Map))]
+          :_media(rows);
+      case 'allMediaItems':
+      case 'mediaItems':
+        return _media(await _list(kind,filters));
+      case 'mediaItemsPage':
+        final page=max(1,args['page'] as int? ?? 1);
+        final query=(args['query'] as String? ?? '').trim();
+        final result=await _page(kind,{...filters,if(query.isNotEmpty)'query':query},
+          offset:(page-1)*_pageSize,limit:_pageSize);
+        final count=result['count'] as int?;
+        final total=count==null?page+(result['hasMore']==true?1:0):max(page,(count+_pageSize-1)~/_pageSize);
+        return MediaPage(items:_media(result['items'] as List),page:page,totalPages:total);
+      case 'searchMedia':
+        final query=(args['query'] as String? ?? '').trim();
+        if(query.isEmpty)return const [];
+        return _media((await _page(kind,{...filters,'query':query},limit:200))['items'] as List);
+      case 'playbackEpisodes':
+        final item=mediaFromJson(Map<String,dynamic>.from(args['item'] as Map));
+        if(item.kind!=ContentKind.episode)return {'items':const []};
+        final episodes=orderPlaybackEpisodes(await _children('episode',item.parentId));
+        return {'items':sourceJson(episodes),'parent':item.parentId==null?null:
+          await rpc('get',{'kind':'season','id':item.parentId}),
+          'previous':sourceJson(adjacentPlaybackEpisode(episodes,item.id,-1)),
+          'next':sourceJson(adjacentPlaybackEpisode(episodes,item.id,1))};
+      case 'seriesProgress':
+        final series=mediaFromJson(Map<String,dynamic>.from(args['item'] as Map));
+        final positions=_seriesPositionsFromJson(args['positions'] as List? ?? const []);
+        if(positions.isEmpty)return {
+          ..._seriesProgressJson(SeriesWatchProgress.fromEpisodes(const <MediaItem>[],positions)),
+          'complete':false,
+        };
+        final seasons=await _children('season',series.id);
+        final episodes=<MediaItem>[];
+        for(final season in seasons) {
+          episodes.addAll(await _children('episode',season.id));
+        }
+        final progress=SeriesWatchProgress.fromEpisodes(episodes,positions);
+        return {..._seriesProgressJson(progress),'complete':episodes.isNotEmpty&&progress.watchedCount==episodes.length};
+      default:throw UnsupportedError('Unknown disk catalog read');
+    }
+  }
+}
+
+JSObject createSourceBridge(JSString configText,JSFunction transport,[JSFunction? onImportProgress]) {
   final json=objectJson(configText.toDart);
   json['id']??=newSourceId(); json['label']??='';
   final config=SourceConfig.fromJson(json);
   final source=runZoned(()=>config.build(),zoneValues:{#tvTransport:transport});
   final catalog=_WebCatalogCache(source,config);
+  _TvM3uDiskCatalog? diskCatalog;
   final metadata=_WebMetadata(source,transport);
   var mappingOverrides=<EpgChannelOverride>[];
   var mappingSignature='[]', mappingRevision=0;
@@ -1910,6 +2186,29 @@ JSObject createSourceBridge(JSString configText,JSFunction transport) {
     final epgDisk=args.remove('_tvEpgDisk')==true;
     final epgScope=args.remove('_tvEpgScope');
     final method=methodText.toDart;
+    if(method=='catalogScope'||method=='catalogRemove') {
+      final factory=globalContext.getProperty<JSFunction?>('TVBroM3uDiskCreate'.toJS);
+      if(source is! M3uSource||factory==null)return 'false'.toJS;
+      final key=catalog.cacheKey(args['scope'] as String);
+      if(method=='catalogScope'&&diskCatalog?.key==key)return 'true'.toJS;
+      final options=JSObject()
+        ..setProperty('requireEncryption'.toJS,(args['requireEncryption']==true).toJS);
+      final call=factory.callAsFunction(null,key.toJS,options) as JSFunction?;
+      if(call==null)return 'false'.toJS;
+      final disk=_TvM3uDiskCatalog(source,key,call);
+      if(method=='catalogRemove') {
+        if(diskCatalog?.key==key)await diskCatalog!.cancel();
+        await disk.rpc('remove');
+        if(diskCatalog?.key==key)diskCatalog=null;
+      } else {
+        await disk.restore();
+        if(disposed)throw const LoadCancelledException();
+        await diskCatalog?.cancel();
+        diskCatalog=disk;
+      }
+      return 'true'.toJS;
+    }
+    final disk=diskCatalog;
     if(method=='epgMapping.set') {
       final rows=args['overrides'];
       if(rows is! List||rows.length>10000)throw const FormatException('Invalid EPG mappings');
@@ -1967,7 +2266,9 @@ JSObject createSourceBridge(JSString configText,JSFunction transport) {
     if(method=='mediaDetails'||method=='metadata.details'||method=='metadata.refresh') {
       final item=mediaFromJson(Map<String,dynamic>.from(args['item'] as Map));
       final expectedCatalogGeneration=catalog.generation;
-      final providerItem=await catalog.providerDetails(item,refresh:method=='metadata.refresh');
+      final providerItem=disk?.committed==true
+        ?await disk!.mediaDetails(item)
+        :await catalog.providerDetails(item,refresh:method=='metadata.refresh');
       if(disposed||expectedCatalogGeneration!=catalog.generation)throw const LoadCancelledException();
       final merged=await metadata.withCurrentCacheIdentity(()=>method=='metadata.refresh'
         ?metadata.refresh(providerItem,sourceDetailsLoaded:true)
@@ -1988,11 +2289,15 @@ JSObject createSourceBridge(JSString configText,JSFunction transport) {
         metadata.enrich(items,limit:args['limit'] as int? ?? 40));
       return jsonEncode(sourceJson(enriched)).toJS;
     }
-    if(method=='catalogState')return jsonEncode(catalog.state()).toJS;
+    if(method=='catalogState')return jsonEncode(disk?.catalogState(catalog.state())??catalog.state()).toJS;
     if(method=='prepareCatalog') {
       final kind=ContentKind.values.byName(args['kind'] as String? ?? 'live');
       final refreshKey=args['refreshKey'];
       if(refreshKey is! String)throw const FormatException('A catalog refresh key is required');
+      if(disk!=null) {
+        await disk.prepare(refreshKey,force:args['forceRefresh']==true);
+        return jsonEncode({'kind':kind.name,...disk.kindState(kind.name)}).toJS;
+      }
       return jsonEncode(await catalog.prepareCatalog(kind,refreshKey:refreshKey,forceRefresh:args['forceRefresh']==true)).toJS;
     }
     if(method=='beginCatalogExport')return jsonEncode(catalog.beginCatalogExport(args['scope'] as String)).toJS;
@@ -2047,6 +2352,23 @@ JSObject createSourceBridge(JSString configText,JSFunction transport) {
     }
     final guideReadKey=method=='epg'?_catalogDigest(jsonEncode(['epg',_catalogOrdered(args)])):'';
     final guideDeferred=method=='epg'&&(catalog.guide.failures[guideReadKey]??0)>DateTime.now().millisecondsSinceEpoch;
+    if(method=='invalidate'&&disk!=null)await disk.cancel();
+    if(disk!=null&&_TvM3uDiskCatalog.readMethods.contains(method)) {
+      if(!disk.committed&&catalog._prepared.isEmpty)await disk.prepare('read',force:false);
+      if(disk.committed) {
+        final value=await disk.read(method,args);
+        if(disposed||!identical(disk,diskCatalog))throw const LoadCancelledException();
+        return jsonEncode(sourceJson(value)).toJS;
+      }
+    }
+    if(method=='mediaByIds'||(method=='channels'&&args['ids'] is List)) {
+      final live=method=='channels';
+      final kind=live?'live':args['kind'] as String;
+      final raw=catalog.readPrepared(live?'channels':'allMediaItems',{'kind':kind});
+      final ids=(args['ids'] as List).toSet();
+      final rows=raw==null?const []:jsonDecode(raw) as List;
+      return jsonEncode(rows.where((row)=>ids.contains(row['id'])).toList()).toJS;
+    }
     final prepared=catalog.readPrepared(method,args);
     if(prepared!=null)return prepared.toJS;
     final cached=catalog.read(method,args,stale:guideDeferred);
@@ -2115,7 +2437,13 @@ JSObject createSourceBridge(JSString configText,JSFunction transport) {
   Future<JSString> invokeSafe(JSString method,JSString args) async {
     try { return await invoke(method,args); }
     catch(error) {
-      if(method.toDart!='epg'||error is LoadCancelledException)rethrow;
+      if(error is _TvM3uStorageFull)return '{"__tvbroM3uDiskError":"storage_full"}'.toJS;
+      final action=method.toDart;
+      if((action=='prepareCatalog'||_TvM3uDiskCatalog.readMethods.contains(action))&&
+          source is M3uSource&&error is HttpWorkloadException&&error.isSizeLimit) {
+        return '{"__tvbroPlaylistSizeLimit":true}'.toJS;
+      }
+      if(action!='epg'||error is LoadCancelledException)rethrow;
       final failure=_webGuideFailure(error);
       final epgArgs=objectJson(args.toDart)..remove('_tvEpgMaximumBytes')..remove('_tvEpgDisk')..remove('_tvEpgScope')..['_mapping']=mappingSignature;
       final key=_catalogDigest(jsonEncode(['epg',_catalogOrdered(epgArgs)]));
@@ -2124,8 +2452,22 @@ JSObject createSourceBridge(JSString configText,JSFunction transport) {
       return jsonEncode(failure).toJS;
     }
   }
-  api.setProperty('invoke'.toJS,((JSString method,JSString args)=>invokeSafe(method,args).toJS).toJS);
-  api.setProperty('dispose'.toJS,(() { disposed=true;metadata.close();return source.dispose().then((_)=>'null'.toJS).toJS; }).toJS);
+  Future<JSString> invokeWithProgress(JSString method,JSString args) {
+    if(onImportProgress==null||!const {'connect','prepareCatalog','categories','channels',
+        'mediaCategories','mediaItemsPage','epg'}.contains(method.toDart))return invokeSafe(method,args);
+    return trackImportProgress(()=>invokeSafe(method,args),
+      (stage)=>onImportProgress.callAsFunction(null,stage.name.toJS));
+  }
+  api.setProperty('invoke'.toJS,((JSString method,JSString args)=>invokeWithProgress(method,args).toJS).toJS);
+  Future<JSString> dispose() async {
+    disposed=true;
+    metadata.close();
+    final pending=diskCatalog?.cancel();
+    await source.dispose();
+    await pending;
+    return 'null'.toJS;
+  }
+  api.setProperty('dispose'.toJS,(()=>dispose().toJS).toJS);
   return api;
 }
 JSString parentalRulesBridge(JSString methodText,JSString argsText) {

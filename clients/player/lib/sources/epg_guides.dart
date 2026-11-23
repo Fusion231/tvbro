@@ -11,6 +11,7 @@ import 'dart:io';
 
 import '../data/diagnostics_log.dart';
 import '../data/epg_download_cache.dart';
+import '../data/import_progress.dart';
 import '../data/load_token.dart';
 import '../data/net.dart';
 import 'source.dart';
@@ -101,6 +102,7 @@ EpgGuideFeed xmltvGuideFeed({
           isSizeLimit: error.isSizeLimit,
         );
       }
+      reportImportProgress(ImportProgressStage.processing);
       yield* parseXmltvFileBatched(
         file,
         mapping == null || guideId == null

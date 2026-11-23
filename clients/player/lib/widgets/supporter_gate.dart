@@ -95,7 +95,7 @@ class _SupporterGateState extends State<_SupporterGate> {
     });
     try {
       final allowed = await widget.access.refresh(widget.feature);
-      if (!mounted) return;
+      if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
       if (allowed) {
         Navigator.of(context).pop(SupporterGateResult.allowed);
         return;
@@ -225,6 +225,7 @@ class _SupporterGateState extends State<_SupporterGate> {
         ),
         actions: [
           TextButton(
+            autofocus: widget.freeActionLabel != null,
             onPressed: () =>
                 Navigator.of(context).pop(SupporterGateResult.free),
             child: Text(widget.freeActionLabel ?? tr('Not now')),
@@ -248,7 +249,7 @@ class _SupporterGateState extends State<_SupporterGate> {
               child: Text(tr('Buy with Google Play')),
             ),
           FilledButton.icon(
-            autofocus: true,
+            autofocus: widget.freeActionLabel == null,
             focusNode: _refreshFocus,
             onPressed: _checking ? null : _refresh,
             icon: _checking

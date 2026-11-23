@@ -77,6 +77,10 @@ function environment(options = {}) {
       if (this.aborts) return;
       this.bodyDelivered = true;
       this.responseText = response.body == null ? '{"ok":true}' : response.body;
+      if (this.responseType === 'blob') {
+        this.response = new Blob([this.responseText]);
+        Object.defineProperty(this, 'responseText', {get() { throw new Error('InvalidStateError: binary response'); }});
+      }
       if (this.responseType === 'arraybuffer') {
         const bytes = Buffer.from(this.responseText);
         this.response = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -188,6 +192,152 @@ test('binary EPG still enforces the response size limit', async () => {
   const response = JSON.parse(await transport.request({url:'https://guide.test/large', workload:'epg', maximumDecodedBytes:1024}));
   assert.equal(response.errorKind, 'limit');
   assert.equal(response.bodyBase64, undefined);
+});
+
+test('M3U import transfers a raw Blob to the source worker without navigating through text or base64', async () => {
+  const body = require('node:zlib').gzipSync(Buffer.from('#EXTM3U\r\n#EXTINF:-1,Łódź\r\nhttps://streams.invalid/one\r\n'));
+  const env = environment({autoResponse: () => ({body})});
+  env.value.btoa = () => { throw Error('UI must not encode playlist bytes'); };
+  const response = await createTransport(env.value).request({url:'https://playlist.invalid/list',workload:'playlist',
+    maximumBodyBytes:1024,maximumDecodedBytes:1024}, {binaryResponse:true});
+  assert.equal(response.status, 200);
+  assert.deepEqual(Buffer.from(await response.bodyBlob.arrayBuffer()), body);
+  assert.equal(response.body, undefined);
+  assert.equal(response.bodyBase64, undefined);
+});
+
+test('legacy playlist import reports download at successful headers before the Blob is delivered', async t => {
+  const env = environment(), stages = [];
+  const transport = createTransport(env.value);
+  t.after(() => transport.abort());
+  const source = {
+    url:'https://progress-playlist.invalid/list',workload:'playlist',importProgress:true
+  };
+  const result = transport.request(source, {
+    binaryResponse:true,onImportProgress:stage => stages.push(stage)
+  });
+  assert.deepEqual(stages, []);
+  await env.sent(1);
+  const xhr = env.state.xhrs[0];
+  assert.deepEqual(stages, ['waiting']);
+  xhr.beginHeaders();
+  assert.deepEqual(stages, ['waiting','downloading']);
+  assert.equal(xhr.bodyDelivered, undefined);
+  xhr.onprogress({loaded:1});
+  xhr.respond({body:'#EXTM3U\n'});
+  assert.equal(await (await result).bodyBlob.text(), '#EXTM3U\n');
+  assert.deepEqual(stages, ['waiting','downloading']);
+});
+
+test('import progress respects refused and blocked requests and excludes unmarked downloads', async () => {
+  const env = environment(), stages = [], transport = createTransport(env.value);
+  const source = {
+    url:'https://progress-refused.invalid/list',workload:'provider-json',importProgress:true
+  };
+  const options = {onImportProgress:stage => stages.push(stage)};
+  const refused = transport.request(source, options);
+  await env.sent(1);
+  env.state.xhrs[0].respond({status:429});
+  assert.equal(JSON.parse(await refused).status, 429);
+  assert.deepEqual(stages, ['waiting']);
+  assert.equal(JSON.parse(await transport.request(source, options)).errorKind, 'provider-blocked');
+  assert.deepEqual(stages, ['waiting']);
+  const background = transport.request({url:'https://background.invalid/catalog',workload:'provider-json'}, options);
+  await env.sent(2);
+  env.state.xhrs[1].respond();
+  assert.equal(JSON.parse(await background).status, 200);
+  assert.deepEqual(stages, ['waiting']);
+});
+
+test('M3U request limits abort advertised and unknown-size responses before reading a Blob', async () => {
+  const env = environment(), transport = createTransport(env.value);
+  const request = {url:'https://over-limit-playlist.invalid/list',workload:'playlist',maximumBodyBytes:1024,maximumDecodedBytes:2048};
+  const advertised = transport.request(request,{binaryResponse:true});
+  await env.sent(1);
+  env.state.xhrs[0].beginHeaders({headers:{'Content-Length':'1025'}});
+  assert.equal(JSON.parse(await advertised).errorKind,'limit');
+  const unknown = transport.request(request,{binaryResponse:true});
+  await env.sent(2);
+  env.state.xhrs[1].beginHeaders();
+  env.state.xhrs[1].onprogress({loaded:1025});
+  assert.equal(JSON.parse(await unknown).errorKind,'limit');
+  assert.ok(env.state.xhrs.every(xhr => xhr.aborts === 1 && !xhr.bodyDelivered));
+});
+
+test('streamed playlists expose response headers before reading and cancel the active body', async () => {
+  const env = environment({autoResponse: () => ({body:'unexpected XHR'})});
+  const stages = [];
+  let body, stagesAtFetch, pulls = 0;
+  Object.assign(env.value, {AbortController, Response, fetch: async (_url, {signal}) => {
+    stagesAtFetch = stages.slice();
+    const stream = new ReadableStream({
+      start(controller) {
+        body = controller;
+        signal.addEventListener('abort', () => controller.error(signal.reason));
+      },
+      pull() { pulls++; }
+    }, {highWaterMark:0});
+    return new Response(stream, {headers:{'Content-Length':'399000000'}});
+  }});
+  const transport = createTransport(env.value);
+  const response = await transport.request({url:'https://streamed-playlist.invalid/list',workload:'playlist',
+    streamPlaylist:true,idleTimeoutMs:1000,importProgress:true}, {binaryResponse:true,onImportProgress:stage => stages.push(stage)});
+  assert.equal(response.status,200);
+  assert.deepEqual(stagesAtFetch, ['waiting']);
+  assert.deepEqual(stages, ['waiting','downloading']);
+  assert.equal(env.state.xhrs.length,0);
+  assert.equal(pulls,0);
+  const first = response.bodyStream.next();
+  body.enqueue(new Uint8Array([35,69,88,84]));
+  assert.deepEqual(await first,new Uint8Array([35,69,88,84]));
+  const stalled = response.bodyStream.next();
+  transport.abort();
+  await assert.rejects(stalled,{name:'AbortError'});
+});
+
+test('legacy streamed playlists have no absolute XHR transfer timeout or byte ceiling', async () => {
+  const env = environment();
+  const transport = createTransport(env.value);
+  const result = transport.request({url:'https://legacy-playlist.invalid/list',workload:'playlist',
+    streamPlaylist:true,totalTimeoutMs:400,idleTimeoutMs:1000}, {binaryResponse:true});
+  await env.sent(1);
+  const xhr = env.state.xhrs[0];
+  assert.equal(xhr.timeout,0);
+  xhr.beginHeaders({headers:{'Content-Length':'399000000'}});
+  xhr.onprogress({loaded:200000000});
+  await new Promise(resolve => setTimeout(resolve,410));
+  xhr.respond({body:'#EXTM3U\n'});
+  assert.equal(await (await result).bodyBlob.text(),'#EXTM3U\n');
+});
+
+test('idle timeout applies while a streamed playlist read waits for the provider', async () => {
+  const env = environment({autoResponse: () => ({body:'unexpected XHR'})});
+  Object.assign(env.value, {AbortController, Response, fetch: async (_url, {signal}) => new Response(new ReadableStream({
+    start(controller) { signal.addEventListener('abort', () => controller.error(signal.reason)); }
+  }, {highWaterMark:0}))});
+  const response = await createTransport(env.value).request({url:'https://stalled-playlist.invalid/list',workload:'playlist',
+    streamPlaylist:true,idleTimeoutMs:20}, {binaryResponse:true});
+  await new Promise(resolve => setTimeout(resolve,25));
+  await assert.rejects(response.bodyStream.next(),{name:'TimeoutError'});
+});
+
+test('a streamed M3U 429 is recorded without reading the body and blocks retries', async () => {
+  const env = environment({autoResponse: () => ({status:200})});
+  let calls = 0, aborted = false;
+  Object.assign(env.value, {AbortController, Response, fetch: async (_url, {signal}) => {
+    calls++;
+    signal.addEventListener('abort', () => { aborted = true; });
+    return new Response('refused', {status:429,headers:{'Retry-After':'500'}});
+  }});
+  const transport = createTransport(env.value);
+  const request = {url:'https://streamed-refusal.invalid/list',workload:'playlist',streamPlaylist:true};
+  const first = JSON.parse(await transport.request(request,{binaryResponse:true}));
+  assert.equal(first.status,429);
+  assert.equal(first.headers['retry-after'],'500');
+  assert.equal(aborted,true);
+  const retry = JSON.parse(await transport.request(request,{binaryResponse:true}));
+  assert.equal(retry.errorKind,'provider-blocked');
+  assert.equal(calls,1);
 });
 
 test('an advertised oversized XMLTV aborts at headers without blocking a short guide request', async () => {
@@ -335,16 +485,18 @@ test('failed User-Agent reset is retried before the next GET', async () => {
 });
 
 test('abort cancels the active XHR and queued GET without leaving the agent queue poisoned', async () => {
-  const env = environment();
+  const env = environment(), stages = [];
   const transport = createTransport(env.value);
-  const first = transport.request({url:'https://provider.test/active', headers:{'User-Agent':'Custom'}});
+  const options = {onImportProgress:stage => stages.push(stage)};
+  const first = transport.request({url:'https://provider.test/active', headers:{'User-Agent':'Custom'},importProgress:true}, options);
   await tick();
   resolveAgent(env.state, 0);
   await env.sent(1);
   assert.equal(env.state.xhrs.length, 1);
-  const queued = transport.request({url:'https://provider.test/queued'});
+  const queued = transport.request({url:'https://provider.test/queued',importProgress:true}, options);
   transport.abort();
   assert.equal(env.state.xhrs[0].aborts, 1);
+  env.state.xhrs[0].beginHeaders();
   await env.agent(2);
   assert.equal(env.state.agents[1].value, 'Samsung SmartTV fixture');
   resolveAgent(env.state, 1);
@@ -354,6 +506,7 @@ test('abort cancels the active XHR and queued GET without leaving the agent queu
   assert.equal(queuedResult.errorKind, 'cancelled');
   assert.match(queuedResult.error, /anulowano/i);
   assert.equal(env.state.xhrs.length, 1);
+  assert.deepEqual(stages, ['waiting']);
 
   const later = transport.request({url:'https://provider.test/after-abort'});
   await env.sent(2);

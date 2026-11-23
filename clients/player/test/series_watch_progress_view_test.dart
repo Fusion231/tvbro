@@ -157,6 +157,7 @@ void main() {
   Future<void> open(
     WidgetTester tester, {
     ValueChanged<MediaItem>? onPlayEpisode,
+    ValueChanged<MediaItem>? onPlayEpisodeFromStart,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -169,6 +170,7 @@ void main() {
             onToggleFavorite: () {},
             onPlay: null,
             onPlayEpisode: onPlayEpisode ?? (_) {},
+            onPlayEpisodeFromStart: onPlayEpisodeFromStart,
           ),
         ),
       ),
@@ -214,10 +216,22 @@ void main() {
       await seedSeason(tester);
       await save(tester, 'bbb', finished: false);
       MediaItem? played;
-      await open(tester, onPlayEpisode: (episode) => played = episode);
-      await pumpUntil(tester, find.text('Resume S1E1'));
+      MediaItem? restarted;
+      await open(
+        tester,
+        onPlayEpisode: (episode) => played = episode,
+        onPlayEpisodeFromStart: (episode) => restarted = episode,
+      );
+      await pumpUntil(tester, find.text('Resume S1E1 · Supporter'));
       final detailsState = tester.state(find.byType(MediaDetailsSheet));
       expect(find.text('Watched episodes: 0'), findsOneWidget);
+
+      final restart = find.text('Watch from beginning');
+      await tester.ensureVisible(restart);
+      await tester.tap(restart);
+      await tester.pump();
+      expect(restarted?.id, 'bbb');
+      expect(played, isNull);
 
       await tester.ensureVisible(primary());
       await tester.tap(primary());
@@ -229,7 +243,8 @@ void main() {
       expect(tester.state(find.byType(MediaDetailsSheet)), same(detailsState));
       expect(find.text('Watched episodes: 1'), findsOneWidget);
       expect(find.text('Next episode: S1E2, Apple BipBop'), findsOneWidget);
-      expect(find.text('Resume S1E1'), findsNothing);
+      expect(find.text('Resume S1E1 · Supporter'), findsNothing);
+      expect(restart, findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },

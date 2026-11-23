@@ -120,6 +120,21 @@ test('keyless series details identify TVmaze and link its license', async () => 
     ['https://www.tvmaze.com/shows/42','https://creativecommons.org/licenses/by-sa/4.0/']);
 });
 
+for (const resumeAllowed of [false, true]) test('a saved movie offers explicit play from start, Supporter='+resumeAllowed, async () => {
+  const item = {id:'movie-1',kind:'movie',title:'Movie'};
+  const kit = harness({query(action) {
+    if (action === 'media.progress') return Promise.resolve({positions:{'movie-1':{position:120,finished:false}},resumeAllowed});
+  }});
+  const record = kit.env.showDetails(item,'source');
+  await kit.settle();
+  const actions = record.node.querySelector('.details-actions');
+  const start = actions.children.find(node => node.textContent === 'From start' && !node.hidden);
+  assert.ok(start);
+  assert.equal(actions.children.some(node => /^Resume from /.test(node.textContent) && !node.hidden),resumeAllowed);
+  start.click();
+  assert.equal(kit.calls.find(([method]) => method === 'play')[1].resumeMode,'beginning');
+});
+
 test('returning from playback keeps the freshly watched label when an older progress lookup finishes last', async () => {
   const progress = [];
   const kit = harness({query(action) { if (action === 'media.progress') { const request = deferred(); progress.push(request); return request.promise; } }});
@@ -216,7 +231,7 @@ function seriesSummary(overrides = {}) {
   return Object.assign({watchedCount:1,latestEpisode,
     latestPosition:{position:100,duration:100,progress:1,finished:true},
     nextEpisode:{id:'episode-1',kind:'episode',title:'Second episode',seasonNumber:1,episodeNumber:2,parentId:'season-1'},
-    complete:false},overrides);
+    complete:false,resumeAllowed:true},overrides);
 }
 
 test('a collapsed started series shows watched history and plays the next episode through the existing handoff', async () => {
@@ -253,6 +268,18 @@ test('an unfinished series episode uses the existing resume chooser', async () =
   assert.equal(choices.length,1); assert.equal(choices[0][0].id,'episode-0');
   assert.equal(choices[0][1],'source'); assert.equal(choices[0][2],record);
   assert.equal(kit.calls.some(row => row[0] === 'play'),false,'resume still needs the existing chooser/gate');
+});
+
+test('a free user can play the unfinished series episode from the start', async () => {
+  const summary = seriesSummary({resumeAllowed:false,latestPosition:{position:30,finished:false}});
+  summary.nextEpisode = summary.latestEpisode;
+  const kit = harness({query:action => action === 'media.seriesProgress' ? Promise.resolve(summary) : undefined});
+  const record = kit.env.showDetails({id:'series',kind:'series',title:'Series'},'source');
+  await kit.settle();
+  const primary = record.node.querySelector('.details-primary');
+  assert.equal(primary.textContent,'Play S1E1');
+  primary.click();
+  assert.equal(kit.calls.find(([method]) => method === 'play')[1].resumeMode,'beginning');
 });
 
 test('unstarted and complete series retain episode browsing without fabricating a next episode', async () => {

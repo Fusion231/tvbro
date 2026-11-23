@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_database.dart';
+import 'package:iptvs/data/import_progress.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/load_token.dart';
 import 'package:iptvs/data/metadata_provider.dart';
@@ -31,6 +33,110 @@ https://example.invalid/series/101.mp4
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'streamed gzip keeps episode identities across batches and failed refresh keeps cache',
+    () => HttpOverrides.runWithHttpOverrides(() async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final directory = await Directory.systemTemp.createTemp(
+        'm3u-stream-test-',
+      );
+      final db = await AppDatabase.openAt('${directory.path}/library.db');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final source = M3uSource(
+        sourceId: 'streamed',
+        playlistUrl: 'http://127.0.0.1:${server.port}/list.m3u',
+      );
+      addTearDown(() async {
+        await source.dispose();
+        await server.close(force: true);
+        await db.close();
+        await directory.delete(recursive: true);
+      });
+      final playlist = StringBuffer('#EXTM3U\r\n')
+        ..writeln('#EXTINF:-1 group-title="Series",Żuraw S03E01')
+        ..writeln('https://example.invalid/series/episode.mkv');
+      for (var i = 0; i < 500; i++) {
+        playlist.writeln('#EXTINF:-1 group-title="TV",Channel $i');
+        playlist.writeln('https://example.invalid/live/$i.ts');
+      }
+      playlist
+        ..writeln('#EXTINF:-1 group-title="Series",Żuraw S02E07')
+        ..writeln('https://example.invalid/series/episode.mkv');
+      var invalid = false;
+      var requests = 0;
+      server.listen((request) async {
+        requests++;
+        final payload = gzip.encode(
+          utf8.encode(
+            invalid ? '$playlist${'x' * (256 * 1024 + 1)}\n' : '$playlist',
+          ),
+        );
+        final response = request.response..bufferOutput = false;
+        response.add(payload.sublist(0, 1));
+        await response.flush();
+        response.add(payload.sublist(1));
+        await response.close();
+      });
+      final repository = LibraryRepository(source: source, db: db);
+      final stages = <ImportProgressStage>[];
+      await trackImportProgress(repository.synchronizeCatalog, stages.add);
+      expect(stages, [
+        ImportProgressStage.waiting,
+        ImportProgressStage.downloading,
+        ImportProgressStage.processing,
+        ImportProgressStage.saving,
+      ]);
+      final tv = await repository.load();
+      expect(tv.channels.length, 500);
+      expect(tv.channels.last.number, 500);
+      final series = (await repository.loadMedia(ContentKind.series))
+          .items
+          .single;
+      expect(series.title, 'Żuraw');
+      final seasons = (await repository.loadMedia(
+        ContentKind.season,
+        parent: series,
+      )).items;
+      expect(seasons.map((season) => season.seasonNumber), [2, 3]);
+      final first = (await repository.loadMedia(
+        ContentKind.episode,
+        parent: seasons[0],
+      )).items.single;
+      final second = (await repository.loadMedia(
+        ContentKind.episode,
+        parent: seasons[1],
+      )).items.single;
+      expect(first.id, second.id);
+      expect(
+        (await repository.resolveMedia(first)).url,
+        'https://example.invalid/series/episode.mkv',
+      );
+      expect(requests, 1);
+
+      invalid = true;
+      final previousStamp = await db.lastCatalogSynced(
+        source.id,
+        ContentKind.series,
+      );
+      await expectLater(
+        repository.synchronizeCatalog(forceRefresh: true),
+        throwsA(
+          isA<HttpWorkloadException>().having(
+            (e) => e.workloadName,
+            'workload',
+            'playlist line',
+          ),
+        ),
+      );
+      expect(
+        await db.lastCatalogSynced(source.id, ContentKind.series),
+        previousStamp,
+      );
+      expect(await db.readChannels(source.id), hasLength(500));
+      expect(requests, 2);
+    }, _RealHttpOverrides()),
+  );
 
   test(
     'a fresh legacy catalog shares its background upgrade with a series opened during it',
@@ -249,6 +355,31 @@ https://example.invalid/movie/six.mkv
       expect(parsed.media.roots[ContentKind.movie]![4].categoryId, 'Films');
     },
   );
+
+  test('ambiguous numeric titles need VOD evidence to be episodes', () {
+    final parsed = parseM3uPlaylist('''#EXTM3U
+#EXTINF:-1,News 24X7
+https://example.invalid/fixture/10
+#EXTINF:-1,Arena Sport 1x2 HD
+https://example.invalid/fixture/11
+#EXTINF:-1,Example 1x02
+https://example.invalid/series/12
+#EXTINF:-1,Example 1x03
+https://example.invalid/fixture/13.mkv
+#EXTINF:-1,Example S01E04
+https://example.invalid/fixture/14
+''');
+    expect(parsed.channels.map((channel) => channel.name), [
+      'News 24X7',
+      'Arena Sport 1x2 HD',
+    ]);
+    final series = parsed.media.roots[ContentKind.series]!.single;
+    final season = parsed.media.children[series.id]!.single;
+    expect(
+      parsed.media.children[season.id]!.map((episode) => episode.episodeNumber),
+      [2, 3, 4],
+    );
+  });
 
   test('series identities survive reordering and separate language categories', () {
     String entry(String title, String group, String id) =>

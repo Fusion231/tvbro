@@ -128,6 +128,7 @@
     hashPin: hashPin,
     openTrailer: canOpenTrailer() ? openTrailer : undefined,
     catalogStore: catalogStoreModule ? catalogStoreModule.create({ environment: environment, secureStore: store }) : null,
+    requireCatalogEncryption: injected.requireCatalogEncryption === true,
     requiresHttpsProvider: requiresHttpsProvider,
     onProgress: function () {
       if (!library) return;
@@ -162,6 +163,8 @@
       cancelled: 'Anulowano.', supporter_required: 'Wznowienie wymaga funkcji wspierającego. Możesz odtworzyć od początku.',
       configuration_required: 'Ta funkcja wymaga konfiguracji wydawcy.',
       hosted_http_blocked: 'This provider uses HTTP. This TV version needs HTTPS. Ask your provider for an HTTPS address or use TVBro on Android, Windows or Samsung.',
+      playlist_size_limit: 'This playlist is too large for this TV. Ask your provider for a smaller playlist and update the source link.',
+      catalog_storage_full: 'This TV is out of space for the playlist. Free up storage and try again.',
       cache_migration_failed: 'Saved source data could not be moved safely. The source settings were not changed.',
       secure_store_list_failed: 'Nie udało się odczytać listy danych zapisanych na telewizorze. Spróbuj ponownie uruchomić aplikację. [PAMIĘĆ:LISTA]',
       secure_store_read_failed: 'Nie udało się odczytać danych profilu z pamięci telewizora. Spróbuj ponownie uruchomić aplikację. [PAMIĘĆ:ODCZYT]',

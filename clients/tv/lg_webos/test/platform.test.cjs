@@ -45,6 +45,7 @@ test('webOS waits for protected hydration before shared library reads and keeps 
   assert.deepEqual(b.calls, ['read-storage', 'library']);
   assert.equal(b.env.TVBroSamsungMemoryPolicy, b.env.TVBroWebOSMemoryPolicy);
   assert.equal(b.libraryOptions.requiresHttpsProvider,false);
+  assert.equal(b.libraryOptions.requireCatalogEncryption,true);
   assert.equal(b.env.TVBroPlatformAdapters.normalizeKey(461), 10009);
   for (const code of [13, 37, 38, 39, 40, 415, 413, 19, 33, 34, 48, 8]) assert.equal(b.env.TVBroPlatformAdapters.normalizeKey(code), code);
   await platform.exit();
@@ -70,6 +71,7 @@ test('shared default Samsung creation still starts synchronously without LG read
   assert.equal(typeof b.env.TVBroSamsungPlatform.query, 'function');
   assert.equal(b.env.TVBroPlatformReady, undefined);
   assert.deepEqual(b.calls, ['read-storage', 'library']);
+  assert.equal(b.libraryOptions.requireCatalogEncryption,false);
 });
 
 test('LG Back uses system behavior; trailers validate URLs and bound failed service calls', async () => {

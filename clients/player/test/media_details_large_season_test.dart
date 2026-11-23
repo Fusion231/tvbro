@@ -326,10 +326,10 @@ void main() {
     await _finishMotion(tester);
 
     expect(find.text('Watched'), findsOneWidget);
-    expect(find.text('Resume from 12:34'), findsOneWidget);
+    expect(find.text('Resume from 12:34 · Supporter'), findsOneWidget);
     expect(find.bySemanticsLabel('S1E1, Episode 0, Watched'), findsOneWidget);
     expect(
-      find.bySemanticsLabel('S1E2, Episode 1, Resume from 12:34'),
+      find.bySemanticsLabel('S1E2, Episode 1, Resume from 12:34 · Supporter'),
       findsOneWidget,
     );
     final progress = find.descendant(
@@ -357,7 +357,7 @@ void main() {
     await tester.runAsync(() => db.readPlaybackPositionsForSync());
     await _finishMotion(tester);
     expect(find.text('Watched'), findsNWidgets(2));
-    expect(find.text('Resume from 12:34'), findsNothing);
+    expect(find.text('Resume from 12:34 · Supporter'), findsNothing);
     expect(_outerScroll(tester).offset, closeTo(offset, 0.1));
 
     await tester.runAsync(() async {
@@ -381,7 +381,7 @@ void main() {
     await tester.runAsync(() => db.readPlaybackPositionsForSync());
     await _finishMotion(tester);
     expect(find.text('Watched'), findsNothing);
-    expect(find.text('Resume from 15:00'), findsOneWidget);
+    expect(find.text('Resume from 15:00 · Supporter'), findsOneWidget);
     expect(_outerScroll(tester).offset, closeTo(offset, 0.1));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

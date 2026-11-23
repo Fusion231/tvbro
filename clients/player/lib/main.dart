@@ -42,10 +42,13 @@ import 'theme.dart';
 const int kAndroidImageCacheBytes = 32 << 20;
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  final binding = WidgetsFlutterBinding.ensureInitialized();
   if (defaultTargetPlatform == TargetPlatform.android) {
     PaintingBinding.instance.imageCache.maximumSizeBytes =
         kAndroidImageCacheBytes;
+    // Let Android focus the window before a database migration can delay startup.
+    runApp(const ColoredBox(color: AppColors.ink));
+    await binding.waitUntilFirstFrameRasterized;
   }
   configureProviderImages();
   PlaybackBackend.initialize();
@@ -54,14 +57,13 @@ Future<void> main() async {
   // independent — only the identity migration below needs the database and the
   // sources together. Starting them at once costs the longest of the
   // keychain/disk round trips instead of their sum, all of which is on the path
-  // to the first frame. A failure here still aborts boot; it arrives wrapped in
+  // to the first interactive screen. A failure still aborts boot, wrapped in
   // a ParallelWaitError rather than on its own.
   // `detectDeviceClass` joins the tuple for the same reason as the rest: it is
   // one platform round trip with no dependency on the others, and it must
-  // settle before the first frame because it decides the *layout* (a television
-  // is the wide two-pane UI regardless of the logical width its density
-  // reports — `isWideLayout`). Awaiting it ahead of this group added its
-  // latency to time-to-first-frame for nothing.
+  // settle before showing the interactive screen because it decides the
+  // *layout* (a television uses the wide two-pane UI regardless of the logical
+  // width its density reports — `isWideLayout`).
   final (db, sources, _, _, _, _, _) = await (
     AppDatabase.open(),
     store.list(),

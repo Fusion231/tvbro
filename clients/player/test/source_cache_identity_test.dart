@@ -566,6 +566,17 @@ class _SyntheticM3u extends M3uSource {
   }
 
   @override
+  Future<void> readCatalog(
+    LoadToken token,
+    Future<void> Function(Stream<M3uParsed>) consume, {
+    bool limitBodyBytes = true,
+  }) async {
+    await consume(
+      Stream.value(M3uParsed(await channels(), await categories(), null)),
+    );
+  }
+
+  @override
   Stream<List<Programme>>? epgBatched(
     List<Channel> channels, {
     LoadToken? token,

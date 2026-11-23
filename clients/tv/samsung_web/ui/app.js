@@ -73,6 +73,10 @@
     "Could not save the channel list on this TV. It may need to download again next time.": "Nie udało się zapisać listy na telewizorze. Przy kolejnym uruchomieniu może być potrzebne ponowne pobranie.",
     "Loading cloud profiles…": "Wczytywanie profili z chmury…",
     "Preparing your library…": "Przygotowywanie biblioteki…",
+    "Waiting for the source…": "Oczekiwanie na odpowiedź źródła…",
+    "Downloading data…": "Pobieranie danych…",
+    "Processing data…": "Przetwarzanie danych…",
+    "Saving the library…": "Zapisywanie biblioteki…",
     "Waiting": "Oczekuje",
     "Ready": "Gotowe",
     "No items": "Brak pozycji",
@@ -101,6 +105,8 @@
     "Lock / unlock item": "Zablokuj / odblokuj pozycję",
     "Previous": "Poprzednie",
     "Continue watching?": "Kontynuować oglądanie?",
+    "This playlist is too large for this TV. Ask your provider for a smaller playlist and update the source link.": "Ta lista odtwarzania jest za duża dla tego telewizora. Poproś dostawcę o mniejszą listę i zaktualizuj jej adres w ustawieniach źródła.",
+    "This TV is out of space for the playlist. Free up storage and try again.": "Na telewizorze brakuje miejsca na zapisanie listy odtwarzania. Zwolnij miejsce i spróbuj ponownie.",
     "Added to favorites.": "Dodano do ulubionych.",
     "Removed from favorites.": "Usunięto z ulubionych.",
     "Could not update favorites.": "Nie udało się zmienić ulubionych.",
@@ -450,12 +456,17 @@
     var panel = byId('setup-progress'), load = view.setupLoad;
     panel.hidden = !load;
     byId('app-shell').setAttribute('data-setup-progress', load ? 'true' : 'false');
+    var phases = {waiting:'Waiting for the source…',downloading:'Downloading data…',processing:'Processing data…',saving:'Saving the library…'};
+    var phase = load && !load.error && Object.prototype.hasOwnProperty.call(phases, load.importProgress) ? t(phases[load.importProgress]) : '';
+    var caption = byId('setup-progress-phase');
+    if (caption.textContent !== phase) text(caption, phase);
     if (!load) return;
     if (preparation) load.sections = preparation.sections || {};
     var sections = load.sections || {};
     var labels = {ready:'Ready',empty:'No items',failed:'Unavailable',unavailable:'Unavailable',pending:'Waiting'};
     text(byId('setup-progress-title'), t(load.error ? 'Could not load the source.' : 'Preparing your library…'));
-    text(byId('setup-progress-summary'), load.message);
+    var summary = byId('setup-progress-summary');
+    if (summary.textContent !== load.message) text(summary, load.message);
     byId('setup-progress-stages').hidden = !!load.error;
     byId('setup-load-retry').hidden = !load.error;
     byId('setup-load-edit').hidden = !load.error || !!(load.config && load.config.kind === 'demo');
@@ -1714,6 +1725,7 @@
       'catalog-read': 'Reading saved channel list…', 'catalog-save': 'Saving channel list…',
       'catalog-live': 'Preparing live TV…', 'catalog-movie': 'Preparing movies…',
       'catalog-series': 'Preparing series…', 'catalog-guide': 'Loading guide…', 'catalog-persist': 'Saving your library…' };
+    if (view.setupLoad && view.busy && state) view.setupLoad.importProgress = state.importProgress;
     if (state && (view.busy || view.pairingDownloading) && typeof state.loadingStage === 'string' && Object.prototype.hasOwnProperty.call(stages, state.loadingStage)) {
       var progress = t(stages[state.loadingStage]);
       if (view.screen === 'pairing' && view.pairingDownloading) { view.pairingStage = progress; text(byId('pairing-status'), progress); }
@@ -2115,7 +2127,8 @@
     if (item.kind === 'series' || item.kind === 'season') {
       record.series = element('div', 'details-seasons'); record.series.appendChild(element('h2', '', t('Episodes'))); content.appendChild(record.series);
       primary = button(t('View episodes'), 'button button-primary details-primary', function () {
-        if (record.seriesContinuation) chooseResume(record.seriesContinuation, record.sourceId, record);
+        if (record.seriesContinuation && record.seriesResumeAllowed) chooseResume(record.seriesContinuation, record.sourceId, record);
+        else if (record.seriesContinuation) startDetailsPlayback(record, record.seriesContinuation, 'beginning');
         else focus(record.seasons.length ? record.seasons[0].header : close);
       });
       if (item.kind === 'series') {
@@ -2135,8 +2148,10 @@
       query('media.progress', {items:[item],sourceId:sourceId}).then(function (data) {
         if (!detailsCurrent(record)) return;
         var saved = data.positions && data.positions[item.id];
-        if (saved && data.resumeAllowed && saved.position > 0 && !saved.finished) {
-          primary.resumeMode = 'resume'; text(primary, t('Resume from {position}', {position:time(saved.position)})); fromStart.hidden = false;
+        if (saved && saved.position > 0 && !saved.finished) {
+          if (data.resumeAllowed) {
+            primary.resumeMode = 'resume'; text(primary, t('Resume from {position}', {position:time(saved.position)})); fromStart.hidden = false;
+          } else text(primary, t('From start'));
         }
       }).catch(function () {});
     }
@@ -2192,14 +2207,15 @@
       var latest = data.latestEpisode, position = data.latestPosition, next = data.complete ? null : data.nextEpisode;
       var scroll = record.scroll.scrollTop;
       record.seriesContinuation = next || null;
+      record.seriesResumeAllowed = data.resumeAllowed === true && !!position && !position.finished;
       record.seriesProgress.hidden = !latest || !position;
       text(record.seriesWatched, t('Watched episodes: {count}', {count:data.watchedCount || 0}));
       text(record.seriesLatest, latest ? t('Last watched: {episode}', {episode:episodeSummaryLabel(latest)}) : '');
       record.seriesNext.hidden = !data.complete && !next;
       text(record.seriesNext, data.complete ? t('All available episodes watched') : next
-        ? position && !position.finished ? t('Resume from {position}', {position:time(position.position)})
+        ? record.seriesResumeAllowed ? t('Resume from {position}', {position:time(position.position)})
           : t('Next episode: {episode}', {episode:episodeSummaryLabel(next)}) : '');
-      text(record.primary, next ? t(position && !position.finished ? 'Resume {episode}' : 'Play {episode}', {episode:episodeNumberLabel(next)}) : t('View episodes'));
+      text(record.primary, next ? t(record.seriesResumeAllowed ? 'Resume {episode}' : 'Play {episode}', {episode:episodeNumberLabel(next)}) : t('View episodes'));
       if (!next && document.activeElement === record.browseEpisodes) focus(record.primary);
       record.browseEpisodes.hidden = !next;
       record.scroll.scrollTop = scroll;

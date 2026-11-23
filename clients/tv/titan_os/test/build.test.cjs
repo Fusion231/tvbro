@@ -31,7 +31,7 @@ test('Titan stages current Samsung UI/core with portable HTML5 bindings and no v
     assert.equal(fs.existsSync(path.join(result.payload, relative)), false, relative);
   }
   for (const name of ['ui/index.html', 'ui/styles.css', 'ui/app.js', 'ui/viewport.js', 'platform.js',
-    'platform/user_state.js', 'platform/transport.js', 'platform/source_worker.js', 'platform/organization.js',
+    'platform/user_state.js', 'platform/transport.js', 'platform/source_worker.js', 'platform/organization.js', 'platform/m3u_disk_catalog.js',
     'platform/backup.js', 'platform/library.js', 'platform/cloud.js']) {
     const relative = 'clients/tv/samsung_web/' + name;
     assert.equal(result.inputHashes[relative], hashFile(path.join(owner, relative)), relative);
@@ -65,7 +65,8 @@ test('hosted canonical core and source worker use the same original parsers with
   }
   const window = context();
   window.window = window;
-  for (const relative of ['polyfills.js', 'canonical-core.js', 'panel-validation.js', 'platform/html5-player.js', 'platform/player.js']) load(window, relative);
+  for (const relative of ['polyfills.js', 'platform/m3u_disk_catalog.js', 'canonical-core.js', 'panel-validation.js', 'platform/html5-player.js', 'platform/player.js']) load(window, relative);
+  assert.equal(typeof window.TVBroM3uDiskCreate, 'function');
   assert.equal(typeof window.TVBroTitanPlayer.create, 'function');
   const parsed = JSON.parse(window.TVBroCanonical.parseM3u('#EXTM3U\n#EXTINF:-1,One\nhttps://provider.test/one.m3u8\n'));
   assert.equal(parsed.channels.length, 1);
@@ -88,7 +89,8 @@ test('hosted canonical core and source worker use the same original parsers with
   };
   load(worker, 'platform/source_worker.js');
   await completion;
-  assert.deepEqual(imports, ['../polyfills.js', '../pako-inflate.js', 'streaming_gzip.js', '../canonical-core.js']);
+  assert.deepEqual(imports, ['../polyfills.js', '../pako-inflate.js', 'streaming_gzip.js', 'm3u_disk_catalog.js', '../canonical-core.js']);
+  assert.equal(typeof worker.TVBroM3uDiskCreate, 'function');
   assert.equal(typeof worker.onmessage, 'function');
 });
 

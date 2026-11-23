@@ -60,7 +60,7 @@ test('LG build uses current shared UI/core/protocol sources and LG platform bind
     if (relative.endsWith('.js')) acorn.parse(fs.readFileSync(path.join(result.serviceDir, relative), 'utf8'), {ecmaVersion:5});
   }
   for (const name of ['ui/index.html', 'ui/styles.css', 'ui/app.js', 'ui/viewport.js', 'platform.js',
-    'platform/user_state.js', 'platform/transport.js', 'platform/source_worker.js', 'platform/organization.js',
+    'platform/user_state.js', 'platform/transport.js', 'platform/source_worker.js', 'platform/organization.js', 'platform/m3u_disk_catalog.js',
     'platform/backup.js', 'platform/library.js', 'platform/cloud.js']) {
     const relative = 'clients/tv/samsung_web/' + name;
     assert.equal(result.inputHashes[relative], hashFile(path.join(owner, relative)), relative + ' must use current shared source');
@@ -110,7 +110,8 @@ test('staged runtime and worker use packaged polyfills when native built-ins are
   window.navigator = {userAgent:'Mozilla/5.0 (Web0S; Linux/SmartTV) Chrome/38.0.2125.122 WebAppManager'};
   let backCalls = 0;
   window.PalmSystem = {platformBack() { backCalls++; }};
-  for (const file of ['polyfills.js', 'webOSTV.js', 'canonical-core.js', 'panel-validation.js']) load(window, file);
+  for (const file of ['polyfills.js', 'webOSTV.js', 'platform/m3u_disk_catalog.js', 'canonical-core.js', 'panel-validation.js']) load(window, file);
+  assert.equal(typeof window.TVBroM3uDiskCreate, 'function');
   assert.equal(window.webOS.platform.tv, true);
   window.webOS.platformBack();
   assert.equal(backCalls, 1);
@@ -140,7 +141,8 @@ test('staged runtime and worker use packaged polyfills when native built-ins are
   };
   load(worker, 'platform/source_worker.js');
   await ready;
-  assert.deepEqual(imports, ['../polyfills.js', '../pako-inflate.js', 'streaming_gzip.js', '../canonical-core.js']);
+  assert.deepEqual(imports, ['../polyfills.js', '../pako-inflate.js', 'streaming_gzip.js', 'm3u_disk_catalog.js', '../canonical-core.js']);
+  assert.equal(typeof worker.TVBroM3uDiskCreate, 'function');
   assert.equal(typeof worker.onmessage, 'function');
 });
 

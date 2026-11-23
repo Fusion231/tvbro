@@ -128,12 +128,12 @@ async (page) => {
   await closeDetails(); phases.push('watched count, latest/next, collapsed UI and TV geometry');
 
   await seed([{index:0,position:590},{index:1,position:90}]);
-  await openSeries(); await details().getByRole('button',{name:'Resume S1E2',exact:true}).waitFor();
+  await openSeries(); await details().getByRole('button',{name:'Play S1E2',exact:true}).waitFor();
   await activate(details().locator('.details-primary'));
   await page.waitForFunction(() => document.body.classList.contains('player-open') &&
     window.TVBroSamsungPlatform.getState().playing && document.querySelector('#player-view').getAttribute('aria-busy') === 'false');
   const playing = await page.evaluate(() => window.TVBroSamsungPlatform.getState().currentItem.id);
-  check(playing === await page.evaluate(() => window.__seriesQa.episodes[1].id),'Resume action must open the selected episode');
+  check(playing === await page.evaluate(() => window.__seriesQa.episodes[1].id),'Play action must open the selected episode from the start');
   if (fixture.platform === 'samsung') await page.evaluate(() => window.__samsungFixture.tick(590));
   else await page.evaluate(() => window.TVBroSamsungPlatform.seek(11.6));
   await page.keyboard.press('ArrowUp'); await activate('#stop-player');

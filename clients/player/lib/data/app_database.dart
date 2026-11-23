@@ -11,9 +11,11 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../sources/source.dart';
 import '../sources/source_identity.dart';
 import '../sources/epg_mapping.dart';
+import '../sources/m3u_source.dart';
 import 'epg_ingest.dart';
 import 'channel_library_spool.dart';
 import 'epg_models.dart';
+import 'import_progress.dart';
 import 'load_token.dart';
 import 'programme_search.dart';
 import 'secret_locator_vault.dart';
@@ -3395,6 +3397,201 @@ class AppDatabase {
       await spool?.dispose();
     }
     return wrote;
+  }
+
+  /// Stage one encrypted playlist and atomically publish live, movies and series.
+  Future<void> replaceM3uCatalog(
+    M3uSource source, {
+    required LoadToken token,
+    required String? expectedCacheIdentity,
+  }) async {
+    final sourceId = source.id;
+    var displayOrder = 0;
+    List<Map<String, Object?>> rows(M3uParsed batch) => [
+      for (final category in batch.categories)
+        {
+          'table': 'categories',
+          'id': category.id,
+          'title': category.title,
+          'extra': const <String, dynamic>{},
+        },
+      for (final channel in batch.channels)
+        {
+          'table': 'channels',
+          'id': channel.id,
+          'name': channel.name,
+          'number': channel.number,
+          'logo': channel.logo,
+          'category_id': channel.categoryId,
+          'archive_days': channel.archiveDays,
+          'extra': channel.extra,
+        },
+      for (final categories in batch.media.categories.values)
+        for (final category in categories)
+          {
+            'table': 'media_categories',
+            'kind': category.kind.name,
+            'id': category.id,
+            'title': category.title,
+            'extra': const <String, dynamic>{},
+          },
+      for (final items in [
+        ...batch.media.roots.values,
+        ...batch.media.children.values,
+      ])
+        for (final item in items)
+          {
+            'table': 'media_items',
+            ..._mediaItemRow(
+              sourceId,
+              item.kind,
+              item,
+              displayOrder: item.parentId == null
+                  ? displayOrder++
+                  : (item.kind == ContentKind.episode
+                            ? item.episodeNumber
+                            : item.seasonNumber) ??
+                        0,
+              protectedExtra: const {},
+            ),
+            'extra': item.extra,
+          },
+    ];
+
+    ChannelLibrarySpool? spool;
+    void checkCancellation() {
+      if (token.isCancelled) throw const LoadCancelledException();
+    }
+
+    try {
+      await source.readCatalog(token, (batches) async {
+        spool = await ChannelLibrarySpool.fromRows(batches.map(rows), _vault);
+      });
+      reportImportProgress(ImportProgressStage.saving);
+      await _db.transaction((txn) async {
+        checkCancellation();
+        if (expectedCacheIdentity != null &&
+            !await _sourceCacheIdentityMatches(
+              txn,
+              sourceId,
+              expectedCacheIdentity,
+            )) {
+          throw const LoadCancelledException();
+        }
+        final details = {
+          for (final row in await txn.query(
+            'media_items',
+            where: 'source_id = ? AND kind = ? AND extra LIKE ?',
+            whereArgs: [sourceId, ContentKind.movie.name, '%"details":%'],
+          ))
+            row['id'] as String: row,
+        };
+        final previousStamp = await _catalogStamp(
+          txn,
+          sourceId,
+          ContentKind.series,
+        );
+        for (final table in [
+          'categories',
+          'channels',
+          'media_categories',
+          'media_items',
+          'catalog_sync',
+          'media_page_state',
+          'media_sync',
+        ]) {
+          await txn.delete(
+            table,
+            where: 'source_id = ?',
+            whereArgs: [sourceId],
+          );
+        }
+        await for (final staged in spool!.read()) {
+          checkCancellation();
+          final episodeIds = {
+            for (final row in staged)
+              if (row['kind'] == ContentKind.episode.name) row['id'] as String,
+          };
+          final parents = <String, Object?>{};
+          if (episodeIds.isNotEmpty) {
+            final marks = List.filled(episodeIds.length, '?').join(',');
+            final existing = await txn.query(
+              'media_items',
+              columns: ['id', 'parent_id'],
+              where: 'source_id = ? AND kind = ? AND id IN ($marks)',
+              whereArgs: [sourceId, ContentKind.episode.name, ...episodeIds],
+            );
+            for (final row in existing) {
+              parents[row['id'] as String] = row['parent_id'];
+            }
+          }
+          final batch = txn.batch();
+          for (final row in staged) {
+            final table = row.remove('table') as String;
+            row['source_id'] = sourceId;
+            if (table == 'categories' || table == 'media_categories') {
+              row.remove('extra');
+            }
+            if (row['kind'] == ContentKind.episode.name) {
+              final id = row['id'] as String;
+              final parent = row['parent_id'];
+              if (parents.putIfAbsent(id, () => parent) != parent) {
+                row['id'] = '$id:$parent';
+              }
+            }
+            batch.insert(
+              table,
+              _retainMediaDetails(
+                row,
+                row['kind'] == ContentKind.movie.name
+                    ? details[row['id']]
+                    : null,
+              ),
+              conflictAlgorithm: table == 'channels'
+                  ? ConflictAlgorithm.replace
+                  : ConflictAlgorithm.ignore,
+            );
+          }
+          await batch.commit(noResult: true);
+        }
+
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final stamp = previousStamp != null && previousStamp >= now
+            ? previousStamp + 1
+            : now;
+        final updated = await txn.update(
+          'sources',
+          {'name': source.name, 'synced_at': stamp},
+          where: 'id = ?',
+          whereArgs: [sourceId],
+        );
+        if (updated == 0) {
+          await txn.insert('sources', {
+            'id': sourceId,
+            'name': source.name,
+            'synced_at': stamp,
+          });
+        }
+        for (final kind in [
+          ContentKind.live.name,
+          ContentKind.movie.name,
+          ContentKind.series.name,
+          _m3uSeriesTreeKey,
+        ]) {
+          await _writeCatalogSync(txn, sourceId, kind, stamp);
+        }
+        await txn.rawInsert(
+          "INSERT INTO media_page_state "
+          "(source_id,kind,parent_id,category_id,synced_at,loaded_pages,total_pages) "
+          "SELECT DISTINCT source_id,kind,parent_id,'',?,1,1 FROM media_items "
+          "WHERE source_id = ? AND kind IN (?,?) AND parent_id IS NOT NULL",
+          [stamp, sourceId, ContentKind.season.name, ContentKind.episode.name],
+        );
+        checkCancellation();
+      });
+    } finally {
+      await spool?.dispose();
+    }
   }
 
   /// Whether [sourceId] has a channel catalog `_loadChannels` would serve.
